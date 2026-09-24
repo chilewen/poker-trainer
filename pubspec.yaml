@@ -1,0 +1,31 @@
+name: poker_trainer
+description: 德州扑克训练器：对局、复盘、错局重玩、概率计算
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ^3.12.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.6.1
+  path_provider: ^2.1.6
+  sqflite: ^2.4.3
+  sqflite_common_ffi: ^2.4.2+1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+
+# sqlite3 的原生构建钩子默认会从 GitHub 下载预编译库（网络受限会失败）。
+# 改用 macOS/iOS 系统自带的 libsqlite3，无需下载。
+hooks:
+  user_defines:
+    sqlite3:
+      source: system
+      name_macos: /usr/lib/libsqlite3.dylib
