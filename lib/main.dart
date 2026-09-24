@@ -1,6 +1,10 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
 
+import 'features/game/data/table_session_store.dart';
 import 'features/game/presentation/lobby_screen.dart';
 import 'features/game/presentation/game_screen.dart';
 import 'features/history/data/hand_history_store.dart';
@@ -12,9 +16,16 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final store = HandHistoryStore();
   await store.init();
+  // 对局存档与数据库放在同一个 App 支持目录下。
+  final dir = await getApplicationSupportDirectory();
+  final sessionStore =
+      TableSessionStore(File('${dir.path}/table_session.json'));
   runApp(
     ProviderScope(
-      overrides: [historyStoreProvider.overrideWithValue(store)],
+      overrides: [
+        historyStoreProvider.overrideWithValue(store),
+        sessionStoreProvider.overrideWithValue(sessionStore),
+      ],
       child: const PokerTrainerApp(),
     ),
   );

@@ -8,6 +8,7 @@ import '../../../engine/hand_history.dart';
 import '../../../engine/types.dart';
 import '../../../trainer/odds.dart';
 import '../../history/data/hand_history_store.dart';
+import '../data/table_session_store.dart';
 import 'hand_review_sheet.dart';
 import 'table_controller.dart';
 
@@ -52,10 +53,20 @@ final historyStoreProvider = Provider<HandHistoryStore>(
       throw UnimplementedError('historyStoreProvider 必须在 main() 中 override'),
 );
 
+/// 对局存档存储：在 main() 中初始化并 override。
+final sessionStoreProvider = Provider<TableSessionStore>(
+  (ref) => throw UnimplementedError(
+      'sessionStoreProvider 必须在 main() 中 override'),
+);
+
 /// 牌桌控制器常驻：筹码与历史跨 Tab 保留。
 final tableProvider = ChangeNotifierProvider<TableController>((ref) {
-  final c = TableController(store: ref.watch(historyStoreProvider));
+  final c = TableController(
+    store: ref.watch(historyStoreProvider),
+    sessionStore: ref.watch(sessionStoreProvider),
+  );
   c.loadHistory();
+  c.loadSession();
   return c;
 });
 
@@ -88,7 +99,12 @@ class _GameScreenState extends ConsumerState<GameScreen> {
         backgroundColor: _bg,
         foregroundColor: Colors.white70,
         elevation: 0,
-        title: Text(table.tableLabel, style: const TextStyle(fontSize: 15)),
+        title: Text(
+          table.handsPlayed > 0
+              ? '${table.tableLabel} · 第 ${table.handsPlayed + 1} 手'
+              : table.tableLabel,
+          style: const TextStyle(fontSize: 15),
+        ),
         actions: [
           IconButton(
             tooltip: '行动路线',

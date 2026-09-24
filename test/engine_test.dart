@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -5,7 +6,11 @@ import 'package:poker_trainer/engine/card.dart';
 import 'package:poker_trainer/engine/game.dart';
 import 'package:poker_trainer/features/game/domain/ai_player.dart';
 import 'package:poker_trainer/engine/types.dart';
+import 'package:poker_trainer/features/game/data/table_session.dart';
+import 'package:poker_trainer/features/game/data/table_session_store.dart';
 import 'package:poker_trainer/features/game/domain/hand_strength.dart';
+import 'package:poker_trainer/features/game/domain/table_restore.dart';
+import 'package:poker_trainer/features/game/presentation/table_controller.dart';
 import 'package:poker_trainer/features/game/domain/preflop_ranges.dart';
 
 List<Card> _cs(String s) => s.split(' ').map(Card.parse).toList();
@@ -655,6 +660,162 @@ void main() {
     expect(station.avgFrac, greaterThan(1.0));
     expect(folder.overbetRate, 0.0,
         reason: '对手见注就弃时不超池，改用小注换跟注');
+  });
+
+  test('存档：一局的桌面快照能原样存回来，坏存档不会崩', () async {
+    final file = File('${Directory.systemTemp.path}/poker_session_test.json');
+    final store = TableSessionStore(file);
+    await store.clear();
+    expect(await store.load() == null, isTrue, reason: '没存过就读到 null');
+
+    final session = TableSession(
+      id: 'table-1',
+      label: '实战 6人桌 · 50/100',
+      config: const GameConfig(
+          startingStack: 10000, smallBlind: 50, bigBlind: 100),
+      styles: [AiStyle.tightAggressive.name, AiStyle.loosePassive.name],
+      seats: const [
+        SessionSeat(id: 'hero', name: '我', stack: 12345),
+        SessionSeat(id: 'ai0', name: '紧凶·AI1', stack: 8800),
+        SessionSeat(id: 'ai1', name: '松被动·AI2', stack: 9900),
+      ],
+      buttonIndex: 2,
+      handsPlayed: 17,
+      savedAt: DateTime.fromMillisecondsSinceEpoch(1700000000000),
+    );
+    await store.save(session);
+
+    final back = await store.load();
+    expect(back != null, isTrue);
+    final r = back!;
+    expect(r.label, '实战 6人桌 · 50/100');
+    expect(r.config.startingStack, 10000);
+    expect(r.config.smallBlind, 50);
+    expect(r.config.bigBlind, 100);
+    expect(r.styles.length, 2);
+    expect(r.styles[1], 'loosePassive');
+    expect(r.seats.length, 3);
+    expect(r.stackOf('hero'), 12345);
+    expect(r.stackOf('ai1'), 9900);
+    expect(r.stackOf('nobody') == null, isTrue);
+    expect(r.buttonIndex, 2);
+    expect(r.handsPlayed, 17);
+    expect(r.savedAt.millisecondsSinceEpoch, 1700000000000);
+
+    // 半截 JSON（App 被杀时常见的残档）当没有存档处理，不许抛异常。
+    await file.writeAsString('{ 这不是一个合法存档');
+    expect(await store.load() == null, isTrue);
+
+    await store.clear();
+    expect(await store.load() == null, isTrue);
+  });
+
+  test('存档：按钮位拨回上一手后，下一手照常前移', () {
+    final g = GameEngine(config: const GameConfig(), random: Random(5))
+      ..addPlayer('a', 'A')
+      ..addPlayer('b', 'B')
+      ..addPlayer('c', 'C');
+    g.buttonIndex = 1;
+    g.startHand();
+    expect(g.buttonIndex, 2);
+    expect(g.handOver, isFalse);
+  });
+
+  test('存档：按快照重建的牌桌，座位/筹码/按钮位都照原样', () {
+    final session = TableSession(
+      id: 'table-2',
+      label: '单挑 · 松凶',
+      config: const GameConfig(
+          startingStack: 2000, smallBlind: 10, bigBlind: 20),
+      styles: [AiStyle.looseAggressive.name],
+      seats: const [
+        SessionSeat(id: 'hero', name: '我', stack: 2600),
+        SessionSeat(id: 'ai0', name: '松凶·AI1', stack: 1400),
+      ],
+      buttonIndex: 1,
+      handsPlayed: 9,
+      savedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+    );
+
+    final rebuilt = restoreTable(session, heroId: 'hero', random: Random(11));
+    final engine = rebuilt.engine;
+    expect(engine.players.length, 2);
+    expect(engine.players[0].name, '我');
+    expect(engine.players[0].stack, 2600);
+    expect(engine.players[1].name, '松凶·AI1');
+    expect(engine.players[1].stack, 1400);
+    expect(engine.config.bigBlind, 20);
+    expect(engine.buttonIndex, 1);
+    expect(rebuilt.ais.length, 1);
+    expect(rebuilt.ais['ai0']!.style == AiStyle.looseAggressive, isTrue,
+        reason: '对手风格要跟着存档一起回来');
+
+    // 接着开下一手：按钮位前移，上一手的筹码原封不动带进来。
+    engine.startHand();
+    expect(engine.buttonIndex, 0);
+    expect(engine.players[0].stack + engine.players[0].totalBet, 2600);
+    expect(engine.handOver, isFalse);
+  });
+
+  test('存档：关掉再打开，回来还是同一张桌、同一批筹码', () async {
+    final dir = Directory.systemTemp.createTempSync('poker_session_test');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final file = File('${dir.path}/session.json');
+    const config = GameConfig(
+        startingStack: 10000, smallBlind: 50, bigBlind: 100);
+
+    // 第一台：开一桌、把筹码打散一点，然后落盘。
+    final first = TableController(
+      sessionStore: TableSessionStore(file),
+      random: Random(3),
+      aiThinkTime: Duration.zero,
+    );
+    first.startRealTable(
+        label: '实战 6人桌 · 50/100', config: config, playerCount: 6);
+    first.engine.players[0].stack = 13400;
+    first.engine.players[1].stack = 7200;
+    first.engine.buttonIndex = 3;
+    first.handsPlayed = 5;
+    await first.persistSession();
+    final sessionId = first.savedSession!.id;
+
+    // 第二台：模拟 App 重启——内存里空空如也，只剩磁盘上的存档。
+    final second = TableController(
+      sessionStore: TableSessionStore(file),
+      random: Random(3),
+      aiThinkTime: Duration.zero,
+    );
+    expect(second.hasSavedSession, isFalse, reason: '还没读档');
+    expect(second.sessionNeedsRestore, isFalse);
+    await second.loadSession();
+    expect(second.hasSavedSession, isTrue);
+    expect(second.sessionNeedsRestore, isTrue, reason: '磁盘有档、内存没桌');
+
+    second.resumeSession();
+    expect(second.sessionNeedsRestore, isFalse);
+    expect(second.savedSession!.id, sessionId);
+    expect(second.tableLabel, '实战 6人桌 · 50/100');
+    expect(second.engine.config.bigBlind, 100);
+    expect(second.engine.config.smallBlind, 50);
+    expect(second.engine.config.startingStack, 10000);
+    expect(second.engine.players.length, 6);
+    expect(second.handsPlayed, 5);
+    expect(second.engine.buttonIndex, 4, reason: '上一手 3，续上一手要前移');
+    expect(second.engine.handOver, isFalse, reason: '接着打，不是停在结算');
+    for (var i = 0; i < 6; i++) {
+      expect(second.engine.players[i].name, first.engine.players[i].name);
+    }
+    // 筹码带进新一手（盲注已下注，用「筹码 + 本手投入」核对）。
+    expect(second.engine.players[0].stack + second.engine.players[0].totalBet,
+        13400);
+    expect(second.engine.players[1].stack, 7200);
+
+    // 没关 App、只是逛回大厅再进来：不该重发牌、不该重置筹码。
+    final heroBefore = second.hero.stack;
+    final buttonBefore = second.engine.buttonIndex;
+    second.resumeSession();
+    expect(second.hero.stack, heroBefore);
+    expect(second.engine.buttonIndex, buttonBefore);
   });
 
   test('补码：补满至起始买入', () {

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../main.dart';
 import '../domain/ai_player.dart';
 import 'game_screen.dart';
+import 'table_controller.dart';
 import 'table_setup_screen.dart';
 
 /// 大厅页：新建对局入口（实战 / 场景 / 复盘 / 工具）。
@@ -12,9 +13,29 @@ class LobbyScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final table = ref.watch(tableProvider);
+    final session = table.savedSession;
+    final heroStack = session?.stackOf(TableController.heroId);
+    // 磁盘上有档、内存里还没桌 → 这是「继续上局」；桌已经开着 → 「回到牌桌」。
+    final restoring = table.sessionNeedsRestore;
     return ListView(
       padding: const EdgeInsets.all(12),
       children: [
+        if (session != null) ...[
+          _LobbyCard(
+            title: restoring ? '继续上局' : '回到牌桌',
+            subtitle: '${session.label} · 第 ${session.handsPlayed + 1} 手'
+                '${heroStack == null ? '' : ' · 我的筹码 $heroStack'}',
+            icon: Icons.play_circle_fill,
+            colors: const [Color(0xFF8A5A00), Color(0xFFE0A02A)],
+            actionLabel: restoring ? '继续' : '回去',
+            onTap: () {
+              if (!ref.read(tableProvider).resumeSession()) return;
+              _openTable(context, autoStart: false);
+            },
+          ),
+          const SizedBox(height: 12),
+        ],
         Row(
           children: [
             Expanded(

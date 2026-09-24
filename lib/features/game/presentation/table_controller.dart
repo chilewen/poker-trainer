@@ -7,7 +7,10 @@ import '../../../engine/game.dart';
 import '../../../engine/hand_history.dart';
 import '../../../engine/types.dart';
 import '../../history/data/hand_history_store.dart';
+import '../data/table_session.dart';
+import '../data/table_session_store.dart';
 import '../domain/ai_player.dart';
+import '../domain/table_restore.dart';
 
 /// 牌桌控制器：驱动 GameEngine，英雄由 UI 操作，AI 自动行动。
 ///
@@ -25,6 +28,7 @@ class TableController extends ChangeNotifier {
     ],
     this.aiThinkTime = const Duration(milliseconds: 300),
     this.store,
+    this.sessionStore,
     Random? random,
   })  : engine = GameEngine(config: config, random: random),
         _config = config,
@@ -37,6 +41,10 @@ class TableController extends ChangeNotifier {
   GameEngine engine;
   final Duration aiThinkTime;
   final HandHistoryStore? store;
+
+  /// 对局存档（可空：测试/无存储环境下照样能玩，只是不落盘）。
+  final TableSessionStore? sessionStore;
+
   GameConfig _config;
   final Random _random;
   final Map<String, AiPlayer> _ais = {};
@@ -61,11 +69,14 @@ class TableController extends ChangeNotifier {
     _generation++;
     replayingHand = null;
     tableLabel = label;
+    handsPlayed = 0;
+    _sessionId = 'table-${DateTime.now().microsecondsSinceEpoch}';
     engine = GameEngine(config: _config, random: _random);
     _setupPlayers(styles);
     engine.startHand();
     notifyListeners();
     _pump();
+    unawaited(persistSession());
   }
 
   /// 实战开桌：按盲注级别与人数重建一桌（筹码重置），并立即发牌。
@@ -91,6 +102,89 @@ class TableController extends ChangeNotifier {
 
   /// 已完成手牌历史（最新在前），供复盘/错局重玩使用。
   final List<HandHistory> history = [];
+
+  // ---------- 对局存档：关掉再回来接着打 ----------
+
+  /// 上一次落盘的存档（冷启动后大厅据此显示「继续上局」）。
+  TableSession? savedSession;
+
+  /// 内存里这张桌对应的存档 id；null = 还没开过桌。
+  String? _sessionId;
+
+  /// 当前这张桌已经打完多少手（存档恢复时一起带回来）。
+  int handsPlayed = 0;
+
+  /// 磁盘上有上一局的存档。
+  bool get hasSavedSession => savedSession != null;
+
+  /// 存档还没加载进内存（冷启动后第一次「继续上局」需要重建这张桌）。
+  bool get sessionNeedsRestore =>
+      savedSession != null && _sessionId != savedSession!.id;
+
+  /// 冷启动时读回上次的存档（与 [loadHistory] 一起在启动时调用一次）。
+  ///
+  /// 连英雄座位都没有的存档直接丢掉——那种桌子恢复出来也没法打。
+  Future<void> loadSession() async {
+    final s = await sessionStore?.load();
+    if (s == null || s.stackOf(heroId) == null) return;
+    savedSession = s;
+    notifyListeners();
+  }
+
+  /// 把当前桌面状态落盘（开新桌、每手结束各存一次）。
+  Future<void> persistSession() async {
+    final store = sessionStore;
+    if (store == null) return;
+    final session = TableSession(
+      id: _sessionId ??= 'table-${DateTime.now().microsecondsSinceEpoch}',
+      label: tableLabel,
+      config: _config,
+      styles: [
+        for (final p in engine.players)
+          if (p.id != heroId)
+            _ais[p.id]?.style.name ?? AiStyle.tightAggressive.name,
+      ],
+      seats: [
+        for (final p in engine.players)
+          SessionSeat(id: p.id, name: p.name, stack: p.stack),
+      ],
+      buttonIndex: engine.buttonIndex,
+      handsPlayed: handsPlayed,
+      savedAt: DateTime.now(),
+    );
+    savedSession = session;
+    notifyListeners();
+    await store.save(session);
+  }
+
+  /// 继续上局：把存档里的那张桌原样搬回来，然后发下一手。
+  ///
+  /// 内存里的桌就是存档里的桌时（App 没关，只是逛回大厅再进来），
+  /// 直接沿用现状——不重发牌、不重置筹码。
+  ///
+  /// 返回这张桌能不能打：false 表示存档不可用，调用方别把用户带进空桌。
+  bool resumeSession() {
+    final s = savedSession;
+    if (s == null) return false;
+    if (_sessionId == s.id) {
+      notifyListeners();
+      return true;
+    }
+    if (!s.isPlayable || s.stackOf(heroId) == null) return false;
+    _generation++;
+    replayingHand = null;
+    tableLabel = s.label;
+    _config = s.config;
+    handsPlayed = s.handsPlayed;
+    final rebuilt = restoreTable(s, heroId: heroId, random: _random);
+    engine = rebuilt.engine;
+    _ais
+      ..clear()
+      ..addAll(rebuilt.ais);
+    _sessionId = s.id;
+    _beginHand();
+    return true;
+  }
 
   /// 正在进行错局重玩时，对应的原手牌记录。
   HandHistory? replayingHand;
@@ -136,6 +230,11 @@ class TableController extends ChangeNotifier {
   void startHand() {
     _generation++;
     replayingHand = null;
+    _beginHand();
+  }
+
+  /// 在当前这张桌上发下一手（存档恢复后也走这里）。
+  void _beginHand() {
     // 破产的 AI 自动续码，英雄由「补充筹码」按钮显式处理；
     // 这里兜底防止 0 筹码也直接开局。
     for (final p in engine.players) {
@@ -219,7 +318,9 @@ class TableController extends ChangeNotifier {
     final h = engine.lastHand;
     if (h == null) return;
     if (history.any((x) => x.id == h.id)) return;
+    handsPlayed++;
     history.insert(0, h);
     unawaited(store?.save(h));
+    unawaited(persistSession());
   }
 }

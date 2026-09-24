@@ -82,10 +82,11 @@ class GameEngine {
   List<Card> _deck = [];
   List<Card> _boardOverride = [];
 
-  int _buttonIndex = -1; // startHand 时 +1，第一手为 0
-
   /// 当前手牌按钮位在 [players] 中的索引；未开局时为 -1。
-  int get buttonIndex => _buttonIndex;
+  ///
+  /// [startHand] 每次会把它往前挪一格；恢复存档时可以直接赋值，
+  /// 把按钮位拨回上一手的位置（下一手再照常前移）。
+  int buttonIndex = -1;
   Street _street = Street.preflop;
   int _actorIndex = 0;
   int _remainingToAct = 0; // 本街还需行动的人数
@@ -149,7 +150,7 @@ class GameEngine {
     for (final p in players) {
       p.resetForHand();
     }
-    _buttonIndex = (_buttonIndex + 1) % players.length;
+    buttonIndex = (buttonIndex + 1) % players.length;
     board.clear();
     _street = Street.preflop;
     handOver = false;
@@ -190,7 +191,7 @@ class GameEngine {
       playerNames: {for (final p in players) p.id: p.name},
       startingStacks: {for (final p in players) p.id: p.stack},
       holeCards: {for (final p in players) p.id: List.of(p.holeCards)},
-      buttonIndex: _buttonIndex,
+      buttonIndex: buttonIndex,
       smallBlind: config.smallBlind,
       bigBlind: config.bigBlind,
     );
@@ -210,7 +211,7 @@ class GameEngine {
   }
 
   int _smallBlindIndex() =>
-      players.length == 2 ? _buttonIndex : (_buttonIndex + 1) % players.length;
+      players.length == 2 ? buttonIndex : (buttonIndex + 1) % players.length;
 
   int _bigBlindIndex() => (_smallBlindIndex() + 1) % players.length;
 
@@ -376,7 +377,7 @@ class GameEngine {
     }
     _minRaise = config.bigBlind;
     _remainingToAct = actable.length;
-    _actorIndex = (_buttonIndex + 1) % players.length;
+    _actorIndex = (buttonIndex + 1) % players.length;
     _skipToActable();
     _maybeEarlyFinish();
   }
