@@ -748,6 +748,25 @@ class AiPlayer {
       }
       return const AiDecision(ActionType.check);
     }
+    // 4b) 弱成牌（一对但被压制：底对、第二对弱踢、顶对弱踢、被盖过的口袋对）：
+    //     有摊牌价值 → 以小注薄价值 / 保护为主，而不是当空气去诈唬。
+    //     拿一对去诈唬是最典型的「把更差的牌打走、只被更好的牌跟注」，
+    //     真人不会这么打。频率比中等牌低，多人底池基本过牌控池。
+    if (read.tier == HandTier.weak) {
+      final thin = (multiway ? 0.12 : (river ? 0.35 : 0.5)) *
+          _aggression *
+          _p.aggressionScale *
+          (texture.wetness > 0.6 ? 0.55 : 1.0) *
+          valueFactor;
+      if (_roll(thin)) {
+        return _bet(
+            game,
+            me,
+            _valueFrac(spot, read, 0.38, rangeBet: game.street == Street.flop) *
+                valueFactor);
+      }
+      return const AiDecision(ActionType.check);
+    }
     // 5) 没牌力：按计划延续诈唬，或找机会开火。
     if (_roll(_bluffChance(game, me, spot, read))) {
       _registerFire(game.street, _PlanKind.pureBluff);
@@ -944,15 +963,20 @@ class AiPlayer {
     if (read.tier == HandTier.medium) {
       if (spot.spr <= 1.2) return const AiDecision(ActionType.call);
       var need = potOdds * (spot.villainStrength > 0.7 ? 1.3 : 1.1);
-      if (bigBet) need *= 1.2;
+      // 超池是两极的：真东西和空气都在里面，抓的时候要留个余量
+      // （模型给的胜率是对着「宽范围」算的，被价值牌清空的风险没算进去）。
+      if (bigBet) need *= spot.polarizedBet ? 1.12 : 1.2;
       // 没位置的中等牌很难兑现胜率（后面还有人、也控制不了底池大小）。
       if (!spot.inPosition) need *= 1.12;
       need *= callFactor; // 抓诈唬牌：对手越疯越要跟，越闷越要弃
       final scary = !facingManiac &&
           bigBet &&
+          !spot.polarizedBet &&
           spot.villainStrength > 0.8 &&
           read.texture.wetness > 0.6;
-      if (equity() >= need && !scary) return const AiDecision(ActionType.call);
+      if (!scary && _callMix(equity(), need)) {
+        return const AiDecision(ActionType.call);
+      }
       if (canRaise &&
           smallBet &&
           spot.opponents == 1 &&
@@ -968,10 +992,17 @@ class AiPlayer {
     if (read.tier == HandTier.weak) {
       if (spot.spr <= 1.0) return const AiDecision(ActionType.call);
       var need = potOdds * (spot.villainStrength > 0.7 ? 1.7 : 1.35);
-      if (bigBet) need *= 1.35;
+      if (bigBet) need *= spot.polarizedBet ? 1.15 : 1.35;
       if (!spot.inPosition) need *= 1.1;
       need *= callFactor; // 对手越爱开火越该抓、越闷越该走
-      if (equity() >= need) return const AiDecision(ActionType.call);
+      if (_callMix(equity(), need)) return const AiDecision(ActionType.call);
+      // 一对牌是拿来抓诈唬的，赔率不够就老实弃——拿它去加注诈唬等于
+      // 把更差的牌打走、被更好的牌跟注（「有摊牌价值的牌不诈唬」）。
+      if (canRaise && read.blockerScore >= 0.5 && _roll(0.04)) {
+        _registerFire(game.street, _PlanKind.pureBluff);
+        return _raise(game, me, 0.8);
+      }
+      return const AiDecision(ActionType.fold);
     }
     // 6) 空气：弃牌为主，极少数情况诈唬加注。
     if (canRaise && _roll(_bluffRaiseChance(game, me, spot, read))) {
@@ -979,6 +1010,18 @@ class AiPlayer {
       return _raise(game, me, 0.8);
     }
     return const AiDecision(ActionType.fold);
+  }
+
+  /// 边缘牌别一刀切：胜率和门槛挨得很近时按比例混合（真人也会
+  /// 「这手跟、下手弃」），离得远就是干净的是/否。
+  ///
+  /// 河牌圈的胜率是蒙特卡洛估出来的，同一个牌线往往每次都差不多，
+  /// 纯阈值判断会让 AI 在边缘局面上一律跟或一律弃——太机械了。
+  bool _callMix(double equity, double need) {
+    final edge = equity - need;
+    if (edge >= 0.04) return true;
+    if (edge <= -0.04) return false;
+    return _roll(0.5 + edge / 0.08 * 0.5);
   }
 
   /// 听牌面对下注：跟注要跟得上「隐含赔率」，跟不动就弃。
@@ -1162,6 +1205,7 @@ class _Spot {
     required this.preflopRaises,
     required this.limpers,
     required this.priorAgg,
+    required this.polarizedBet,
     required this.villainStrength,
     required this.villainTightness,
     required this.canRaise,
@@ -1205,6 +1249,10 @@ class _Spot {
   /// 对手在前面几条街已经在开火的累计强度（0~2）：
   /// 一条街一条街地砸过来，手里的东西和「只开一枪」完全不是一回事。
   final double priorAgg;
+
+  /// 前面都过牌、这条街突然来的大注（转牌/河牌）：两极化的线，
+  /// 大注在这里不代表牌力，跟注门槛不该按「大注 = 真牌」往上抬。
+  final bool polarizedBet;
 
   /// 对手这条线的强度（0~1）与由此推出的范围紧凑度。
   final double villainStrength;
@@ -1306,6 +1354,14 @@ class _Spot {
     }
     priorAgg = priorAgg.clamp(0.0, 2.0);
 
+    // 转牌/河牌前面都没人开火，这条街突然砸一个大注：两极化的线
+    // （坚果或空气），不能按「大注 = 真牌」去收紧跟注门槛——
+    // 真人的超池一多半就是这么来的，拿中等牌抓他反而更划算。
+    final polarizedBet = toCall > 0 &&
+        priorAgg <= 0.01 &&
+        betSizeRel >= 0.8 &&
+        (game.street == Street.turn || game.street == Street.river);
+
     var vs = switch (preflopRaises) {
       0 => 0.25,
       1 => 0.5,
@@ -1314,7 +1370,7 @@ class _Spot {
     if (isPreflopAggressor && preflopRaises >= 1) vs -= 0.1;
     vs += 0.12 * villainAgg;
     vs += 0.07 * priorAgg; // 连着开火 = 这条线上真东西更多
-    if (betSizeRel >= 0.9) vs += 0.1;
+    if (betSizeRel >= 0.9) vs += polarizedBet ? 0.02 : 0.1;
     final villainStrength = vs.clamp(0.1, 1.0);
 
     return _Spot(
@@ -1336,6 +1392,7 @@ class _Spot {
       preflopRaises: preflopRaises,
       limpers: limpers,
       priorAgg: priorAgg,
+      polarizedBet: polarizedBet,
       villainStrength: villainStrength,
       villainTightness: (0.55 + 0.45 * villainStrength).clamp(0.5, 1.0),
       canRaise: me.stack > toCall,

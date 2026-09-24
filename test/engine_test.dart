@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:poker_trainer/engine/card.dart';
 import 'package:poker_trainer/engine/game.dart';
+import 'package:poker_trainer/engine/hand_evaluator.dart';
 import 'package:poker_trainer/features/game/domain/ai_player.dart';
 import 'package:poker_trainer/engine/types.dart';
 import 'package:poker_trainer/features/game/data/table_session.dart';
@@ -13,6 +14,7 @@ import 'package:poker_trainer/features/game/domain/hand_strength.dart';
 import 'package:poker_trainer/features/game/domain/table_restore.dart';
 import 'package:poker_trainer/features/game/presentation/table_controller.dart';
 import 'package:poker_trainer/features/game/domain/preflop_ranges.dart';
+import 'package:poker_trainer/trainer/odds.dart';
 
 List<Card> _cs(String s) => s.split(' ').map(Card.parse).toList();
 
@@ -78,6 +80,41 @@ void main() {
 
     // 空气牌什么都没挡到。
     expect(HandReading.of(_cs('7c 2d'), _cs('As Kd Qc')).blockerScore, 0.0);
+  });
+
+  test('范围胜率：河牌圈收紧对手范围后，胜率要明显低于对随机牌', () {
+    // 顶对弱踢（K9）在 K-J-8-2-3 的河牌面。
+    final hole = _cs('Ks 9h');
+    final board = _cs('Kd Jc 8h 2s 3d');
+    // 对手连开三枪的范围：两对以上为主，一对留一点，纯空气极少。
+    double inRange(List<Card> h, HandScore s) => s.category.rank >= 2
+        ? 1.0
+        : (s.category.rank == 1 ? 0.3 : 0.04);
+
+    double vsRangeWith(int seed) => Odds.equityVsRange(
+          heroHole: hole,
+          board: board,
+          inRange: inRange,
+          trials: 4000,
+          random: Random(seed),
+        ).win;
+
+    final vsRandom = Odds.equity(
+      heroHole: hole,
+      board: board,
+      trials: 4000,
+      random: Random(1),
+    ).win;
+    final vsRange = vsRangeWith(1);
+    final vsRange2 = vsRangeWith(2);
+
+    expect(vsRandom, greaterThan(0.85)); // 对随机牌，顶对是大优势
+    // 早先的实现把牌堆里相邻两张配成一手（整个牌堆只凑出十几个组合），
+    // 范围等于没生效，同样条件下会算出 ≈0.87（跟对随机牌差不多）。
+    expect(vsRange, lessThan(0.70),
+        reason: '收紧到「连开三枪」的范围后，胜率应掉到六成上下');
+    expect(vsRange, greaterThan(0.50)); // 但也不至于被打死
+    expect(vsRange2, closeTo(vsRange, 0.05)); // 换随机种子结果稳定
   });
 
   test('翻前范围：位置越靠后开池越宽，大盲防守最宽', () {

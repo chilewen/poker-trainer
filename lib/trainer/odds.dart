@@ -109,7 +109,7 @@ class Odds {
   }
 
   /// 带对手范围限制的蒙特卡洛胜率：对手的底牌不再完全随机，
-  /// 而是按 [inRange] 给出的概率筛选（弃牌重抽有限次）。
+  /// 而是按 [inRange] 给出的权重抽样（权重高的底牌出现得多）。
   ///
   /// 真人玩家不会把对手当随机牌来算胜率——对手没弃牌，
   /// 说明他的范围本来就偏向强牌，这个偏置让胜率估计更接近实战。
@@ -141,19 +141,26 @@ class Odds {
 
     // 河牌圈公共牌已发完：对手的组合权重整套都是固定的，
     // 先算一次「权重表」，之后每次模拟直接从表里抽，省掉重复评估。
+    //
+    // 表里必须是**所有**两张组合（C(45,2)=990 手）。按 `i += 2` 把
+    // 相邻两张配成一手是错的：牌堆按花色/点数排列，那样只会剩下
+    // 「同花色 + 相邻点数」那十几手牌，范围失真得离谱——河牌顶对
+    // 会算出 86% 胜率（几乎等于「对随机牌」），跟注自然就过宽了。
     List<List<Card>>? riverPairs;
     List<double>? riverWeights;
     var riverTotal = 0.0;
     if (needBoard == 0) {
       riverPairs = [];
       riverWeights = [];
-      for (var i = 0; i + 1 < unknown.length; i += 2) {
-        final cand = [unknown[i], unknown[i + 1]];
-        final w = inRange(cand, HandEvaluator.bestOf([...cand, ...board]));
-        if (w <= 0) continue;
-        riverPairs.add(cand);
-        riverWeights.add(w);
-        riverTotal += w;
+      for (var i = 0; i < unknown.length; i++) {
+        for (var j = i + 1; j < unknown.length; j++) {
+          final cand = [unknown[i], unknown[j]];
+          final w = inRange(cand, HandEvaluator.bestOf([...cand, ...board]));
+          if (w <= 0) continue;
+          riverPairs.add(cand);
+          riverWeights.add(w);
+          riverTotal += w;
+        }
       }
     }
 
