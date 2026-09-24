@@ -1741,13 +1741,16 @@ void main() {
         reason: '顺子同理（${pct(straight.donk)}）');
   });
 
-  /// 单挑：英雄（按钮位）开池、AI（大盲）跟注；翻后 AI 先过牌、
-  /// 英雄每条街都按 [frac] 池下注，统计 AI 在 [street] 面对下注的应对。
+  /// 单挑：英雄开池（溜入）、AI 补到 100，翻后 AI 先过牌、英雄按
+  /// [frac] 池下注，统计 AI 在 [street] 面对下注的应对。
   ///
-  /// 这就是「过牌-加注」的那个位置：AI 本街已经过了牌，再加注算过牌-加注。
+  /// 默认 [oop] = true：AI 坐大盲（没位置），这就是「过牌-加注」的那个
+  /// 位置——AI 本街已经过了牌，再加注算过牌-加注。
+  /// [oop] = false 时把按钮换给 AI（有位置），底池构成完全一样，只差位置，
+  /// 用来对比同一个局面下有/没位置的差别。
   ({double fold, double call, double raise, int total}) aiVsCheckBet(
       String hole, String board, double frac,
-      {Street street = Street.flop, int seeds = 150}) {
+      {Street street = Street.flop, int seeds = 150, bool oop = true}) {
     var fold = 0, call = 0, raise = 0, total = 0;
     for (var seed = 0; seed < seeds; seed++) {
       final rnd = Random(seed);
@@ -1759,6 +1762,7 @@ void main() {
         ..addPlayer('hero', '我')
         ..addPlayer('ai', 'AI');
       final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+      if (!oop) g.buttonIndex = 0; // startHand 里 +1 → 按钮换给 AI
       g.startHand(
         holeOverride: {'ai': _cs(hole), 'hero': _cs('6c 5c')},
         boardOverride: _cs(board),
@@ -1801,7 +1805,13 @@ void main() {
         }
         if (g.street == Street.preflop) {
           if (!facing) {
-            g.apply('hero', ActionType.raise, amount: 300);
+            // 有位置的那一路让英雄过牌就好，两边底池构成一样（2bb），
+            // 否则「翻前谁加注」会把范围强度也带进来，比不出位置的效果。
+            if (oop) {
+              g.apply('hero', ActionType.raise, amount: 300);
+            } else {
+              g.apply('hero', ActionType.check);
+            }
             continue;
           }
           g.apply('hero', ActionType.call);
@@ -2059,19 +2069,47 @@ void main() {
         reason: '有位置该收价值就收（过牌 ${pct(set.check)}）');
   });
 
+  test('位置差异：浮牌是位置的特权，没位置不拿空气乱跟', () {
+    // 同一手（A高 + 后门花）、同一个 1/3 池翻牌下注、同一个底池构成，
+    // 只差有没有位置。以前两边频率一模一样（探针：有位置 25% vs 没位置
+    // 26%），等于「位置」这个变量在跟注决策里根本不存在——没位置的 AI
+    // 一样爱浮牌，跟一张之后还得在不利位置打后面两条街，成牌也榨不出价值。
+    String pct(double v) => '${(100 * v).round()}%';
+    const hole = 'Ad 10d';
+    const board = '9d 7c 2c';
+    final ip = aiVsCheckBet(hole, board, 0.33, seeds: 200, oop: false);
+    final oop = aiVsCheckBet(hole, board, 0.33, seeds: 200);
+
+    expect(ip.total, greaterThan(100), reason: '有位置样本要够（n=${ip.total}）');
+    expect(oop.total, greaterThan(100), reason: '没位置样本要够（n=${oop.total}）');
+    expect(ip.call, greaterThan(0.2),
+        reason: '有位置的 A 高 + 后门花该浮牌（跟 ${pct(ip.call)}）');
+    expect(oop.call, lessThan(ip.call - 0.15),
+        reason: '没位置浮牌要明显更少（跟 ${pct(oop.call)} vs '
+            '${pct(ip.call)}）');
+    expect(oop.fold, greaterThan(ip.fold + 0.1),
+        reason: '没位置更多直接放弃（弃 ${pct(oop.fold)} vs '
+            '${pct(ip.fold)}）');
+  });
+
   test('浮牌：后门花 + 两张高张不会见注就弃', () {
     // 8-7-2 这种小牌面：A 高配后门花是真人最爱跟一张的浮牌。
     const board = '8h 7d 2s';
-    final float = aiVsCheckBet('As Qs', board, 0.5, seeds: 150);
-    final dry = aiVsCheckBet('As Qd', board, 0.5, seeds: 150);
+    // 有位置：后门花该跟一张看转牌，纯高张（没后门）就该收手。
+    final float = aiVsCheckBet('As Qs', board, 0.5, seeds: 150, oop: false);
+    final dry = aiVsCheckBet('As Qd', board, 0.5, seeds: 150, oop: false);
     String pct(double v) => '${(100 * v).round()}%';
 
     expect(float.call, greaterThan(dry.call + 0.08),
         reason: '有后门花才值得跟一张看转牌 '
             '(${pct(float.call)} vs ${pct(dry.call)})');
-    // 但浮牌是少数派：大注不浮、没位置的浮牌也不能变成「什么都跟」。
-    expect(float.fold, greaterThan(0.4),
+    // 但浮牌是少数派：主体还是弃牌。
+    expect(float.fold, greaterThan(0.2),
         reason: '浮牌只是混入的频率，主体还是弃牌（弃 ${pct(float.fold)}）');
+    // 没位置：浮牌是位置的特权，同样的牌别乱跟。
+    final floatOop = aiVsCheckBet('As Qs', board, 0.5, seeds: 150);
+    expect(floatOop.fold, greaterThan(0.8),
+        reason: '没位置不该拿 A 高乱浮牌（弃 ${pct(floatOop.fold)}）');
   });
 
   test('翻牌 c-bet：干面是范围小注（不看牌力都打），湿面才挑牌', () {

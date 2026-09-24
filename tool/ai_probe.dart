@@ -43,6 +43,11 @@ class _Result {
 /// 单挑牌桌：player0 = AI（按钮/小盲），player1 = 英雄（大盲）。
 /// [heroFirst] 指定英雄在每条街的第一次行动，其余时候一律跟注。
 /// 记录 AI 在 [target] 街的第一次决策。
+///
+/// [oop] = true 时把按钮换给英雄，AI 坐大盲（没位置），翻牌得先过牌——
+/// 用来对比同一个局面下有/没位置的差别。
+/// [facingOnly] = true 时只记录「面对下注/加注」的那次决策，不然没位置
+/// 这一侧记录到的都是「先说话时怎么打」，比不出面对下注的应对。
 _Result _sample({
   required String hole,
   required String heroHole,
@@ -53,6 +58,8 @@ _Result _sample({
   AiStyle style = AiStyle.tightAggressive,
   int stack = 10000,
   int bb = 100,
+  bool oop = false,
+  bool facingOnly = false,
 }) {
   final res = _Result();
   for (var seed = 0; seed < seeds; seed++) {
@@ -65,6 +72,7 @@ _Result _sample({
       ..addPlayer('hero', 'Hero');
     final ai = AiPlayer(style, random: rnd);
     final boardCards = cs(board);
+    if (oop) g.buttonIndex = 0; // startHand 里 +1 → 英雄坐按钮
     g.startHand(
       holeOverride: {'ai': cs(hole), 'hero': cs(heroHole)},
       boardOverride: boardCards,
@@ -79,7 +87,8 @@ _Result _sample({
       final legal = p.actions;
       if (p.player.id == 'ai') {
         final d = ai.decide(g, p.player);
-        if (!recorded && g.street == target) {
+        final facing = g.currentBet > p.player.streetBet;
+        if (!recorded && g.street == target && (!facingOnly || facing)) {
           recorded = true;
           res.add(
             d,
@@ -123,6 +132,31 @@ _Result _sample({
 void main() {
   void show(String name, _Result r) =>
       print('${name.padRight(34)} $r');
+
+  /// 同一个局面、同一手牌、同一个下注尺度，只差 AI 有没有位置。
+  void pos(String name,
+      {required String hole,
+      required String board,
+      double frac = 0.5,
+      Street street = Street.flop,
+      AiStyle style = AiStyle.tightAggressive}) {
+    _Result run({required bool oop}) => _sample(
+          hole: hole,
+          heroHole: '4c 3s',
+          board: board,
+          target: street,
+          style: style,
+          oop: oop,
+          facingOnly: true,
+          heroFirst: {street: (type: ActionType.bet, frac: frac)},
+        );
+    final ip = run(oop: false);
+    final oop = run(oop: true);
+    print('${name.padRight(30)} '
+        '有位置 n=${ip.total.toString().padLeft(3)} $ip');
+    print('${''.padRight(30)} '
+        '没位置 n=${oop.total.toString().padLeft(3)} $oop');
+  }
 
   print('== 翻牌圈（无人下注）== ');
   show('听花 AKs on Qd7d2c',
@@ -185,6 +219,19 @@ void main() {
   show('河牌两对（面对 1/2 池 bet）',
       _sample(hole: '9h 7d', heroHole: '3c 2h', board: 'Qh 9d 7c 5h 2s', target: Street.river,
           heroFirst: {Street.river: (type: ActionType.bet, frac: 0.5)}));
+
+  print('');
+  print('== 位置对照：面对下注时，有位置 vs 没位置 ==');
+  pos('空气+后门花 Ad10d on 9d7c2c', hole: 'Ad 10d', board: '9d 7c 2c', frac: 0.33);
+  pos('空气+后门花 Kh9h on As7h2c', hole: 'Kh 9h', board: 'As 7h 2c');
+  pos('卡顺 76 on A92', hole: '7h 6h', board: 'As 9d 2c');
+  pos('花听 AKs on Qd7d2c', hole: 'Ad Kd', board: 'Qd 7d 2c');
+  pos('底对 Ah2h on Qh7d2c', hole: 'Ah 2h', board: 'Qh 7d 2c');
+  pos('顶对弱踢 Qh3h on Qd7c2s', hole: 'Qh 3h', board: 'Qd 7c 2s');
+  pos('miss 花（转牌 2/3 池）', hole: 'Ad Kd', board: 'Qd 7d 2c 5h',
+      frac: 0.66, street: Street.turn);
+  pos('底对（转牌 2/3 池）', hole: 'Ah 2h', board: 'Qh 7d 2c 5h',
+      frac: 0.66, street: Street.turn);
 
   print('');
   print('== 松凶风格对照 == ');

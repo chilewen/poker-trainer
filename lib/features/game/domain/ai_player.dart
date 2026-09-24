@@ -1237,13 +1237,17 @@ class AiPlayer {
       // 对手的加注正好给我们一次 3-bet 的机会——超对/顶对要是从来不加回去，
       // 对手拿听牌和空气随便抬我们一手就能把强牌打走。频率压一半，
       // 剩下的还是跟注，免得自己的跟注范围全是中等牌。
+      //
+      // 倍率只留一点点：以前给到 1.5，等于「没位置的强牌一律比有位置更
+      // 爱加」（实测翻牌顶对顶踢：没位置 78% vs 有位置 56%）。位置差的
+      // 方向应该相反——没位置的人加注之后还要在不利位置打后面两条街。
       if (canRaise &&
           spot.raisesThisStreet <= 2 &&
           _roll(base *
               _aggression *
               _p.aggressionScale *
               (read.texture.wetness > 0.6 ? 0.8 : 1.0) *
-              (checkRaise ? 1.5 : 1.0) *
+              (checkRaise ? 1.1 : 1.0) *
               (spot.villainRaisedThisStreet ? 0.5 : 1.0))) {
         return _raise(game, me, 0.8);
       }
@@ -1270,7 +1274,10 @@ class AiPlayer {
       if (bigBet) need *= spot.polarizedBet ? 1.12 : 1.2;
       if (facingRaise) need *= 1.25; // 面对加注：顶对也得收着点
       // 没位置的中等牌很难兑现胜率（后面还有人、也控制不了底池大小）。
-      if (!spot.inPosition) need *= 1.12;
+      // 探针里同一个局面（同一张牌、同样尺度）有位置和没位置的跟注率
+      // 只差 4 个点，等于位置这一维在跟注决策上几乎没生效——现在抬到
+      // 能让「有位置薄跟、没位置收手」看得出来。
+      if (!spot.inPosition) need *= 1.22;
       need *= callFactor; // 抓诈唬牌：对手越疯越要跟，越闷越要弃
       final scary = !facingManiac &&
           bigBet &&
@@ -1314,7 +1321,9 @@ class AiPlayer {
       if (!facingRaise) need *= 1 - _p.callSlack;
       if (bigBet) need *= stab ? 0.85 : 1.35;
       if (facingRaise) need *= 1.85; // 第二对去跟一个加注基本是送
-      if (!spot.inPosition) need *= 1.1;
+      // 一对牌是「抓诈唬」的牌：没位置抓的人，后面还有一整条街要挨打，
+      // 而且河牌拿不到薄价值，门槛本来就该比有位置高一档。
+      if (!spot.inPosition) need *= 1.2;
       need *= callFactor; // 对手越爱开火越该抓、越闷越该走
       // 底对、第二对也能拿来反击：频率比中等牌低，但只要有这个频率，
       // 对手就不能拿「加注 = 大牌」来读我们，我们的跟注范围也才有掩护。
@@ -1388,6 +1397,9 @@ class AiPlayer {
     var need = potOdds * (spot.villainStrength > 0.75 ? 1.08 : 1.0);
     if (spot.betSizeRel >= 1.2) need *= 1.1;
     need *= _callVsReadFactor(game, me); // 疯子付得出隐含赔率，岩石付不出
+    // 没位置的听牌不好兑现：跟注之后转牌还得先挨一枪，成牌了也很难
+    // 在后面两条街收满价值（先说话的人收不到薄价值）。
+    if (!spot.inPosition) need *= 1.08;
     if (!spot.villainRaisedThisStreet) {
       need *= 1 - 0.6 * _p.callSlack; // 跟注站连听牌都买得更便宜
     }
@@ -1420,7 +1432,13 @@ class AiPlayer {
     };
     // 自己先过牌再被下注 = 过牌-加注，这是没位置时保护过牌范围的主力；
     // 没先过牌时（只是接着打）加注更容易撞上对手的真牌，频率要收着。
-    if (!spot.checkedThisStreet) base *= 0.5;
+    //
+    // 但过牌-加注是「强牌 + 听牌」的武器，不是一对弱牌的：拿底对/第二对
+    // 去过牌-加注，打走的是更差的牌、留下来的全是更好的牌，等于把一手有
+    // 摊牌价值的牌变成纯诈唬。以前这个倍率对所有牌力一视同仁，结果没位置
+    // 的弱成牌加注率是有位置的 3 倍（实测转牌底对：没位置 8% vs 有位置
+    // 2%），方向正好反了——没位置本来就该更少加注。
+    if (!spot.checkedThisStreet || !medium) base *= 0.5;
     if (spot.opponents >= 2) base *= 0.35; // 多人底池别拿一对乱加
     if (spot.isThreeBetPot) base *= 0.7; // 3bet 底池大家范围都强
     base *= 1 - 0.6 * spot.villainStrength; // 对手线越强越少加
@@ -1462,7 +1480,13 @@ class AiPlayer {
     if (back == 0) return 0.0;
     var f = 0.45 * back * _aggression * _p.aggressionScale;
     f *= 1 - 0.5 * spot.villainStrength;
-    return f.clamp(0.0, 0.45);
+    // 位置是浮牌的全部意义：有位置跟一张，转牌对手过牌就能把底池收走，
+    // 成牌与否都能在后面两条街控池；没位置跟一张，是在不利位置陪人打
+    // 后面两条街，成牌也榨不出价值。真人没位置几乎不浮牌（要么过牌-加
+    // 注、要么直接放弃），之前两边频率完全一样（探针：有位置 25% vs
+    // 没位置 26%），等于「位置」这个变量在这个决策里根本不存在。
+    f *= spot.inPosition ? 1.4 : 0.25;
+    return f.clamp(0.0, spot.inPosition ? 0.5 : 0.15);
   }
 
   /// 听牌加注（半诈唬加注）的频率。
