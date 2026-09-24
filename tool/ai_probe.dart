@@ -140,15 +140,21 @@ void main() {
       double frac = 0.5,
       Street street = Street.flop,
       AiStyle style = AiStyle.tightAggressive}) {
+    // 转牌/河牌的对照要把翻牌也串起来（英雄翻牌也要开一枪），不然
+    // 「AI 自己把两条街都打了」的手数根本轮不到面对下注，样本会空掉。
+    final script = <Street, ({ActionType type, double frac})>{
+      if (street != Street.flop) Street.flop: (type: ActionType.bet, frac: 0.5),
+      street: (type: ActionType.bet, frac: frac),
+    };
     _Result run({required bool oop}) => _sample(
           hole: hole,
-          heroHole: '4c 3s',
+          heroHole: '4c 5d',
           board: board,
           target: street,
           style: style,
           oop: oop,
           facingOnly: true,
-          heroFirst: {street: (type: ActionType.bet, frac: frac)},
+          heroFirst: script,
         );
     final ip = run(oop: false);
     final oop = run(oop: true);
@@ -228,9 +234,16 @@ void main() {
   pos('花听 AKs on Qd7d2c', hole: 'Ad Kd', board: 'Qd 7d 2c');
   pos('底对 Ah2h on Qh7d2c', hole: 'Ah 2h', board: 'Qh 7d 2c');
   pos('顶对弱踢 Qh3h on Qd7c2s', hole: 'Qh 3h', board: 'Qd 7c 2s');
-  pos('miss 花（转牌 2/3 池）', hole: 'Ad Kd', board: 'Qd 7d 2c 5h',
+  pos('顶对顶踢 AhKd on Kh8d3c', hole: 'Ah Kd', board: 'Kh 8d 3c');
+  pos('花听（转牌 2/3 池）', hole: 'Ad Kd', board: 'Qd 7d 2c 5h',
       frac: 0.66, street: Street.turn);
-  pos('底对（转牌 2/3 池）', hole: 'Ah 2h', board: 'Qh 7d 2c 5h',
+  pos('花听+底对（转牌）', hole: 'Ah 2h', board: 'Qh 7d 2c 5h',
+      frac: 0.66, street: Street.turn);
+  // 下面两行才是「没有听牌的一对牌」：挑牌时注意别让底牌和公共牌凑出
+  // 同花听/顺子听（前两行的「底对」其实都带着花听，量出来的是听牌那一档）。
+  pos('底对（转牌 2/3 池）', hole: 'Ad 2h', board: 'Qh 7d 2c 5s',
+      frac: 0.66, street: Street.turn);
+  pos('第二对（转牌 2/3 池）', hole: '8h 7s', board: 'Kh 8d 3c 5s',
       frac: 0.66, street: Street.turn);
 
   print('');
