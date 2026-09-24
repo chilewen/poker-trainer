@@ -18,14 +18,21 @@ class LobbyScreen extends ConsumerWidget {
     final heroStack = session?.stackOf(TableController.heroId);
     // 磁盘上有档、内存里还没桌 → 这是「继续上局」；桌已经开着 → 「回到牌桌」。
     final restoring = table.sessionNeedsRestore;
+    final handNo = (session?.handsPlayed ?? 0) + 1;
+    final subtitle = session == null
+        ? ''
+        : session.handInProgress
+            // 上一手没打完就退出了：进去是接着打这一手。
+            ? '${session.label} · 第 $handNo 手进行中，接着打'
+            : '${session.label} · 第 $handNo 手'
+                '${heroStack == null ? '' : ' · 我的筹码 $heroStack'}';
     return ListView(
       padding: const EdgeInsets.all(12),
       children: [
         if (session != null) ...[
           _LobbyCard(
             title: restoring ? '继续上局' : '回到牌桌',
-            subtitle: '${session.label} · 第 ${session.handsPlayed + 1} 手'
-                '${heroStack == null ? '' : ' · 我的筹码 $heroStack'}',
+            subtitle: subtitle,
             icon: Icons.play_circle_fill,
             colors: const [Color(0xFF8A5A00), Color(0xFFE0A02A)],
             actionLabel: restoring ? '继续' : '回去',

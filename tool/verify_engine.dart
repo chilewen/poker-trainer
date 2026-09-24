@@ -493,6 +493,35 @@ void main() {
       '挤压尺度：TT 大盲再加注，有人跟注时加得更大 '
       '($squeezeWithCaller > $squeezeNoCaller)');
 
+  // --- 短筹码推/弃：真人不会再「开小注再弃给 3bet」，而是直接推 ---
+  final shove15 = PreflopRanges.shoveOpen(Seat.btn, 15);
+  final shove10 = PreflopRanges.shoveOpen(Seat.btn, 10);
+  final shove5 = PreflopRanges.shoveOpen(Seat.btn, 5);
+  check(combos(shove15) < combos(shove10) && combos(shove10) < combos(shove5),
+      '推/弃范围：筹码越浅推得越宽 '
+      '(15bb ${pct(shove15)} < 10bb ${pct(shove10)} < 5bb ${pct(shove5)})');
+  final shoveEp10 = PreflopRanges.shoveOpen(Seat.ep, 10);
+  final shoveCo10 = PreflopRanges.shoveOpen(Seat.co, 10);
+  check(combos(shoveEp10) < combos(shoveCo10) &&
+          combos(shoveCo10) < combos(shove10),
+      '推/弃范围：位置越靠后推得越宽 '
+      '(EP ${pct(shoveEp10)} < CO ${pct(shoveCo10)} < BTN ${pct(shove10)})');
+  check(combos(shove10) > 0.25 * 1326 && combos(shove10) < 0.45 * 1326,
+      '推/弃范围：10bb 按钮位大约 25~45%');
+  check(has(shove10, 'Ah Ad') && has(shove10, 'As 5s') && !has(shove10, '7h 2c'),
+      '推/弃范围：10bb 按钮位推 A5s、不推 72o');
+
+  final shove82 = shoveAt(hole: '7h 2c', stackBb: 8);
+  final shoveA5s8 = shoveAt(hole: 'As 5s', stackBb: 8);
+  final shoveAA8 = shoveAt(hole: 'Ah Ad', stackBb: 8);
+  final shoveA5s60 = shoveAt(hole: 'As 5s', stackBb: 60);
+  check(shoveA5s8 > 0 && shoveAA8 > 0,
+      '短筹码：8bb 按钮位拿 A5s / AA 直接全下 ($shoveA5s8 / $shoveAA8)');
+  check(shove82 < 0, '短筹码：8bb 也不会拿 72o 乱推');
+  check(shoveAA8 == 800, '短筹码：全下额就是全部筹码（800）');
+  check(shoveA5s60 < 0 || shoveA5s60 > 246,
+      '深筹码：60bb 不会拿 A5s 推全下，照常开小注 ($shoveA5s60)');
+
   // 座位识别：9 人桌按钮、小盲、大盲、枪口、劫位各就各位。
   final g9 = GameEngine(random: Random(3));
   for (var i = 0; i < 9; i++) {
@@ -702,6 +731,17 @@ void main() {
       '尺度混合：混合只打散尺寸，平均尺度基本不动 '
       '(${dryCbet.frac.toStringAsFixed(3)} 池，基准 0.384)');
 
+  // --- 翻前尺度混合：同一个位置不再永远开同一个尺寸 ---
+  final openSizes = preflopOpenSizes();
+  check(openSizes.n > 80, '翻前尺度：样本够多（${openSizes.n} 次开池）');
+  check(openSizes.distinct >= 3,
+      '翻前尺度：按钮位开池会换档，不是永远一个尺寸 '
+      '(${openSizes.sizes.toSet().toList()..sort()})');
+  // 3 × 0.82 = 2.46bb = 246；加权平均 ×1.015 ≈ 250。
+  check((openSizes.avg - 246).abs() < 14,
+      '翻前尺度：换档只打散尺寸，平均尺度基本不动 '
+      '(${openSizes.avg.toStringAsFixed(1)}，基准 246)');
+
   // --- 诈唬选牌：挡住对手强牌的那张牌，决定这一枪敢不敢开 ---
   // 同一块「K 高、三张方片、没有顺面」的牌面，同一手垃圾牌，
   // 只差一张 A♦（挡掉对手坚果花）就是两种打法。
@@ -888,6 +928,70 @@ void main() {
     }
   }
   return (callRate: total == 0 ? 0.0 : calls / total, total: total);
+}
+
+/// 按钮位拿 AA 开池的尺度分布：同一个位置、同一手牌，
+/// 真人会在小一点/正常/大一点之间换档，但平均值应该基本不动。
+({double avg, int distinct, int n, List<int> sizes}) preflopOpenSizes(
+    {int seeds = 120}) {
+  final sizes = <int>[];
+  for (var seed = 0; seed < seeds; seed++) {
+    final rnd = Random(seed);
+    final g = GameEngine(
+      config: const GameConfig(
+          startingStack: 10000, smallBlind: 50, bigBlind: 100),
+      random: rnd,
+    );
+    for (var i = 0; i < 6; i++) {
+      g.addPlayer('p$i', 'P$i');
+    }
+    // 6 人桌第一手按钮在 p0：小盲 p1、大盲 p2、枪口 p3，
+    // 把枪口到劫位全弃掉，就轮到按钮位开池。
+    g.startHand(holeOverride: {'p0': cs('Ah Ad')});
+    for (var i = 3; i < 6; i++) {
+      g.apply('p$i', ActionType.fold);
+    }
+    final p = g.pendingAction().player;
+    if (p.id != 'p0') continue;
+    final d = AiPlayer(AiStyle.tightAggressive, random: rnd).decide(g, p);
+    if (d.type == ActionType.raise && d.amountTo != null) {
+      sizes.add(d.amountTo!);
+    }
+  }
+  var sum = 0;
+  for (final s in sizes) {
+    sum += s;
+  }
+  return (
+    avg: sizes.isEmpty ? 0.0 : sum / sizes.length,
+    distinct: sizes.toSet().length,
+    n: sizes.length,
+    sizes: sizes,
+  );
+}
+
+/// 短筹码推/弃实测：按钮位拿着 [hole]、筹码 [stackBb] 个大盲，
+/// 前面一路弃到它。返回全下额；没推（弃牌/小注）返回 -1。
+int shoveAt({required String hole, required double stackBb}) {
+  final rnd = Random(1);
+  final g = GameEngine(
+    config: const GameConfig(
+        startingStack: 10000, smallBlind: 50, bigBlind: 100),
+    random: rnd,
+  );
+  final stack = (stackBb * 100).round();
+  for (var i = 0; i < 6; i++) {
+    g.addPlayer('p$i', 'P$i', stack: i == 0 ? stack : 10000);
+  }
+  g.startHand(holeOverride: {'p0': cs(hole)});
+  for (var i = 3; i < 6; i++) {
+    g.apply('p$i', ActionType.fold);
+  }
+  final p = g.pendingAction().player;
+  if (p.id != 'p0') return -1;
+  final d = AiPlayer(AiStyle.tightAggressive, random: rnd).decide(g, p);
+  final allIn = p.streetBet + p.stack;
+  return d.type == ActionType.raise && d.amountTo == allIn ? d.amountTo! : -1;
 }
 
 /// 翻牌圈 c-bet 的尺度：AI 拿顶对顶踢（[hole]）面对一张没人下注的牌面，

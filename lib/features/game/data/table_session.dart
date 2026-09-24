@@ -33,6 +33,7 @@ class TableSession {
     required this.buttonIndex,
     required this.handsPlayed,
     required this.savedAt,
+    this.handSnapshot,
   });
 
   /// 本局唯一标识：内存里的牌桌与它一致，说明「就是这一桌」，不必重建。
@@ -54,6 +55,15 @@ class TableSession {
   final int handsPlayed;
 
   final DateTime savedAt;
+
+  /// 存档时正在进行的那手牌（[GameEngine.toSnapshotJson] 的结果）。
+  ///
+  /// 非空 = 这一手打到一半就退出了：接着打同一手牌。
+  /// 空 = 停在两手之间：恢复后直接发下一手。
+  final Map<String, Object?>? handSnapshot;
+
+  /// 存档是不是「打到一半」的。
+  bool get handInProgress => handSnapshot != null;
 
   /// 取某个座位的筹码；没有这个座位时返回 null。
   int? stackOf(String id) {
@@ -80,6 +90,7 @@ class TableSession {
         'buttonIndex': buttonIndex,
         'handsPlayed': handsPlayed,
         'savedAt': savedAt.millisecondsSinceEpoch,
+        if (handSnapshot != null) 'hand': handSnapshot,
       };
 
   factory TableSession.fromJson(Map<String, Object?> json) => TableSession(
@@ -101,5 +112,7 @@ class TableSession {
         handsPlayed: (json['handsPlayed']! as num).toInt(),
         savedAt:
             DateTime.fromMillisecondsSinceEpoch((json['savedAt']! as num).toInt()),
+        // 老存档（或两手之间的存档）没有 'hand' 字段，按「两手之间」处理。
+        handSnapshot: (json['hand'] as Map?)?.cast<String, Object?>(),
       );
 }

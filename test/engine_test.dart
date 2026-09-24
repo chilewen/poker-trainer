@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
@@ -662,6 +663,110 @@ void main() {
         reason: '对手见注就弃时不超池，改用小注换跟注');
   });
 
+  test('短筹码：按推/弃来打，不做「开小注再弃给 3bet」', () {
+    // 按钮位、前面一路弃到它：8bb 拿 A5s 该直接推全下，72o 该扔。
+    int shoveAt(String hole, double stackBb) {
+      final rnd = Random(1);
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      );
+      final stack = (stackBb * 100).round();
+      for (var i = 0; i < 6; i++) {
+        g.addPlayer('p$i', 'P$i', stack: i == 0 ? stack : 10000);
+      }
+      g.startHand(holeOverride: {'p0': _cs(hole)});
+      for (var i = 3; i < 6; i++) {
+        g.apply('p$i', ActionType.fold);
+      }
+      final p = g.pendingAction().player;
+      if (p.id != 'p0') return -1;
+      final d = AiPlayer(AiStyle.tightAggressive, random: rnd).decide(g, p);
+      final allIn = p.streetBet + p.stack;
+      return d.type == ActionType.raise && d.amountTo == allIn
+          ? d.amountTo!
+          : -1;
+    }
+
+    expect(shoveAt('Ah Ad', 8), 800, reason: '8bb 拿 AA 直接推，全下额就是全部筹码');
+    expect(shoveAt('As 5s', 8), 800, reason: '8bb 按钮位 A5s 也在推/弃范围里');
+    expect(shoveAt('7h 2c', 8), -1, reason: '短筹码也不会拿 72o 乱推');
+    expect(shoveAt('As 5s', 60), -1, reason: '深筹码照常开小注，不推全下');
+
+    // 范围本身：筹码越浅越宽、位置越靠后越宽。
+    int combos(PreflopRange r) {
+      var n = 0;
+      for (final hi in Rank.values) {
+        for (final lo in Rank.values) {
+          if (hi.value < lo.value) continue;
+          if (hi == lo) {
+            if (r.contains(PreflopHand.of(
+                [Card(hi, Suit.spades), Card(lo, Suit.hearts)]))) {
+              n += 6;
+            }
+            continue;
+          }
+          if (r.contains(PreflopHand.of(
+              [Card(hi, Suit.spades), Card(lo, Suit.spades)]))) {
+            n += 4;
+          }
+          if (r.contains(PreflopHand.of(
+              [Card(hi, Suit.spades), Card(lo, Suit.hearts)]))) {
+            n += 12;
+          }
+        }
+      }
+      return n;
+    }
+
+    expect(combos(PreflopRanges.shoveOpen(Seat.btn, 15)),
+        lessThan(combos(PreflopRanges.shoveOpen(Seat.btn, 10))),
+        reason: '筹码越浅推得越宽');
+    expect(combos(PreflopRanges.shoveOpen(Seat.btn, 10)),
+        lessThan(combos(PreflopRanges.shoveOpen(Seat.btn, 5))));
+    expect(combos(PreflopRanges.shoveOpen(Seat.ep, 10)),
+        lessThan(combos(PreflopRanges.shoveOpen(Seat.btn, 10))),
+        reason: '位置越靠后推得越宽');
+  });
+
+  test('翻前尺度：按钮位开池会换档，平均尺度不变', () {
+    // 同一个位置、同一手牌，真人不会永远开同一个尺寸——固定尺度最容易被读死。
+    final sizes = <int>[];
+    for (var seed = 0; seed < 60; seed++) {
+      final rnd = Random(seed);
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      );
+      for (var i = 0; i < 6; i++) {
+        g.addPlayer('p$i', 'P$i');
+      }
+      // 6 人桌第一手按钮在 p0，枪口到劫位全弃掉就轮到它开池。
+      g.startHand(holeOverride: {'p0': _cs('Ah Ad')});
+      for (var i = 3; i < 6; i++) {
+        g.apply('p$i', ActionType.fold);
+      }
+      final p = g.pendingAction().player;
+      if (p.id != 'p0') continue;
+      final d = AiPlayer(AiStyle.tightAggressive, random: rnd).decide(g, p);
+      if (d.type == ActionType.raise && d.amountTo != null) {
+        sizes.add(d.amountTo!);
+      }
+    }
+    expect(sizes.length, greaterThan(40));
+    expect(sizes.toSet().length, greaterThanOrEqualTo(3),
+        reason: '按钮位开池不该永远是一个尺寸（实测 $sizes）');
+    var sum = 0;
+    for (final s in sizes) {
+      sum += s;
+    }
+    final avg = sum / sizes.length;
+    expect((avg - 246).abs(), lessThan(14),
+        reason: '换档只打散尺寸，平均尺度基本不动（实测 $avg，基准 246）');
+  });
+
   test('存档：一局的桌面快照能原样存回来，坏存档不会崩', () async {
     final file = File('${Directory.systemTemp.path}/poker_session_test.json');
     final store = TableSessionStore(file);
@@ -776,6 +881,8 @@ void main() {
     first.engine.players[1].stack = 7200;
     first.engine.buttonIndex = 3;
     first.handsPlayed = 5;
+    // 标记这一手已结束 = 存档停在两手之间（打到一半的存档另有用例覆盖）。
+    first.engine.handOver = true;
     await first.persistSession();
     final sessionId = first.savedSession!.id;
 
@@ -816,6 +923,174 @@ void main() {
     second.resumeSession();
     expect(second.hero.stack, heroBefore);
     expect(second.engine.buttonIndex, buttonBefore);
+  });
+
+  test('引擎快照：打到一半存下来，恢复后接着打完一模一样', () {
+    const config =
+        GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
+    GameEngine fresh() => GameEngine(config: config, random: Random(17))
+      ..addPlayer('hero', '我')
+      ..addPlayer('ai0', '紧凶·AI1')
+      ..addPlayer('ai1', '松被动·AI2')
+      ..startHand();
+
+    final a = fresh();
+    for (var i = 0; i < 4; i++) {
+      final p = a.pendingAction().player;
+      a.apply(p.id, ActionType.call);
+    }
+    expect(a.handOver, isFalse, reason: '要在手牌中途存快照');
+
+    final b = GameEngine.fromSnapshotJson(
+      a.toSnapshotJson(),
+      config: config,
+      random: Random(17),
+    );
+    expect(b.street, a.street);
+    expect(b.buttonIndex, a.buttonIndex);
+    expect(b.potTotal(), a.potTotal());
+    expect(b.board.map((c) => c.notation), a.board.map((c) => c.notation));
+    expect(b.pendingAction().player.id, a.pendingAction().player.id,
+        reason: '轮到的还是同一个人');
+    for (var i = 0; i < a.players.length; i++) {
+      expect(b.players[i].stack, a.players[i].stack);
+      expect(b.players[i].streetBet, a.players[i].streetBet);
+      expect(b.players[i].totalBet, a.players[i].totalBet);
+      expect([for (final c in b.players[i].holeCards) c.notation],
+          [for (final c in a.players[i].holeCards) c.notation]);
+    }
+
+    // 两边按同样的动作打完：连后面几条街发的牌都要一致（牌堆顺序没丢）。
+    var guard = 0;
+    while (!a.handOver && !b.handOver && guard++ < 200) {
+      for (final e in [a, b]) {
+        final p = e.pendingAction().player;
+        e.apply(p.id, ActionType.call);
+      }
+    }
+    expect(a.handOver, isTrue);
+    expect(b.handOver, isTrue);
+    expect(b.board.map((c) => c.notation), a.board.map((c) => c.notation));
+    for (var i = 0; i < a.players.length; i++) {
+      expect(b.players[i].stack, a.players[i].stack);
+    }
+  });
+
+  test('存档：牌局打到一半退出，回来接着把这一手打完', () async {
+    final dir = Directory.systemTemp.createTempSync('poker_midhand');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final file = File('${dir.path}/session.json');
+    const config =
+        GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
+
+    final first = TableController(
+      sessionStore: TableSessionStore(file),
+      random: Random(9),
+      aiThinkTime: Duration.zero,
+    );
+    first.startRealTable(
+        label: '实战 单挑 · 50/100', config: config, playerCount: 2);
+    // 打几个动作，停在手牌中途（没打完就「退出 App」）。
+    var steps = 0;
+    while (!first.engine.handOver && steps++ < 3) {
+      if (first.heroToAct) first.heroAct(ActionType.call);
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(first.engine.handOver, isFalse, reason: '用例要在手牌中途退出');
+
+    final handId = first.engine.lastHand!.id;
+    final boardBefore = [for (final c in first.engine.board) c.notation];
+    final potBefore = first.engine.potTotal();
+    final streetBefore = first.engine.street;
+    final actorBefore = first.engine.pendingAction().player.id;
+    final stacksBefore = [for (final p in first.engine.players) p.stack];
+    final holeBefore = [
+      for (final p in first.engine.players)
+        [for (final c in p.holeCards) c.notation],
+    ];
+
+    // 每个动作之后都会自动落盘 —— 不用等 App 正常退出，被杀也留得下。
+    final raw = jsonDecode(await file.readAsString()) as Map<String, Object?>;
+    expect(raw['hand'] != null, isTrue, reason: '打到一半也要落盘');
+
+    // 模拟 App 被杀：内存全丢，只剩磁盘上的存档。
+    final second = TableController(
+      sessionStore: TableSessionStore(file),
+      random: Random(9),
+      aiThinkTime: Duration.zero,
+    );
+    await second.loadSession();
+    expect(second.savedSession!.handInProgress, isTrue,
+        reason: '存档里带着「打到一半」的那一手');
+    expect(second.sessionNeedsRestore, isTrue);
+    expect(second.resumeSession(), isTrue);
+
+    // 接着打的是同一手牌：底牌、公共牌、底池、轮次、行动者都一样。
+    expect(second.engine.handOver, isFalse);
+    expect(second.engine.lastHand!.id, handId);
+    expect([for (final c in second.engine.board) c.notation], boardBefore);
+    expect(second.engine.potTotal(), potBefore);
+    expect(second.engine.street, streetBefore);
+    expect(second.engine.pendingAction().player.id, actorBefore);
+    expect([for (final p in second.engine.players) p.stack], stacksBefore);
+    expect(
+        [
+          for (final p in second.engine.players)
+            [for (final c in p.holeCards) c.notation],
+        ],
+        holeBefore);
+    expect(second.handsPlayed, first.handsPlayed);
+
+    // 接着打完：这一手照常进历史。
+    var guard = 0;
+    while (!second.engine.handOver && guard++ < 400) {
+      if (second.heroToAct) second.heroAct(ActionType.call);
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+    expect(second.engine.handOver, isTrue, reason: '这一手要能打完');
+    expect(second.handsPlayed, first.handsPlayed + 1);
+    expect(second.history.first.id, handId, reason: '记下的就是续上的这一手');
+  });
+
+  test('存档：一手打完后不再存这半截，下一手照常重新发牌', () async {
+    final dir = Directory.systemTemp.createTempSync('poker_between');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final file = File('${dir.path}/session.json');
+    const config =
+        GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
+
+    final first = TableController(
+      sessionStore: TableSessionStore(file),
+      random: Random(21),
+      aiThinkTime: Duration.zero,
+    );
+    first.startRealTable(
+        label: '实战 单挑 · 50/100', config: config, playerCount: 2);
+    var guard = 0;
+    while (!first.engine.handOver && guard++ < 400) {
+      if (first.heroToAct) first.heroAct(ActionType.fold);
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+    expect(first.engine.handOver, isTrue);
+    final finishedId = first.engine.lastHand!.id;
+    final handsAfter = first.handsPlayed;
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    final raw = jsonDecode(await file.readAsString()) as Map<String, Object?>;
+    expect(raw['hand'] == null, isTrue, reason: '两手之间不存半截手牌');
+
+    final second = TableController(
+      sessionStore: TableSessionStore(file),
+      random: Random(21),
+      aiThinkTime: Duration.zero,
+    );
+    await second.loadSession();
+    expect(second.savedSession!.handInProgress, isFalse);
+    second.resumeSession();
+    expect(second.handsPlayed, handsAfter, reason: '打过的手机数带回来');
+    expect(second.engine.handOver, isFalse, reason: '恢复后直接发下一手');
+    expect(second.engine.lastHand!.id, isNot(finishedId),
+        reason: '上一手已经结算，不该重开同一手');
   });
 
   test('补码：补满至起始买入', () {

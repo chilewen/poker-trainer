@@ -451,6 +451,17 @@ class AiPlayer {
 
     // ---- 无人加注：开池拉升，或便宜溜入看翻牌 ----
     if (raises == 0) {
+      // 短筹码（≤ 15bb）：这里真人打的是「推 / 弃」，而不是开 2~3bb
+      // 再弃给别人的 3bet——那样既白送筹码，又把该拿的弃牌率让掉了。
+      if (stackBb <= 15 && toCall < me.stack) {
+        final shove =
+            PreflopRanges.shoveOpen(seat, stackBb).shifted(_p.openShift + w);
+        if (shove.contains(hand)) return _jam(me);
+        // 大盲不用补钱，牌烂也别扔（免费看翻牌）；其余位置直接放弃。
+        return toCall > 0
+            ? const AiDecision(ActionType.fold)
+            : const AiDecision(ActionType.check);
+      }
       var openRange = PreflopRanges.open(seat).shifted(_p.openShift + w);
       // 前面已经有人溜入：非同花牌容易被后面压制，收紧一点。
       if (spot.limpers > 0) {
@@ -492,7 +503,7 @@ class AiPlayer {
       final fourBet = PreflopRanges.valueFourBet.shifted(_p.threeBetShift + w);
       if (fourBet.contains(hand)) {
         if (toCall >= me.stack || shortStack) {
-          return const AiDecision(ActionType.raise); // 全下
+          return _jam(me); // 真的是全下（以前这里只是最小加注）
         }
         return const AiDecision(ActionType.call);
       }
@@ -521,7 +532,7 @@ class AiPlayer {
 
     // 价值 3bet：没位置就加得重一点，压掉对手的跟注赔率。
     if (defense.valueThreeBet) {
-      if (toCall >= me.stack) return const AiDecision(ActionType.raise);
+      if (toCall >= me.stack) return _jam(me);
       return AiDecision(ActionType.raise, amountTo: _threeBetSize(game, spot));
     }
     // 轻 3bet（A5s、KQo 这类有阻断牌/成牌潜力的牌）：针对后位偷盲，
@@ -537,12 +548,13 @@ class AiPlayer {
               lateOpen &&
               PreflopRanges.isLightThreeBetHand(hand));
       if (mayLight) {
-        return AiDecision(ActionType.raise, amountTo: game.currentBet * 3);
+        final light = _mixSize((game.currentBet * 3).toDouble()).round();
+        return AiDecision(ActionType.raise, amountTo: light);
       }
     }
     // 短筹码：与其翻后打小球，不如直接推进去（弃牌率 + 摊牌胜率）。
     if (shortStack && toCall < me.stack && score >= 10.0) {
-      return const AiDecision(ActionType.raise);
+      return _jam(me);
     }
     // 冷跟防守：位置、加注规模、筹码深度全部由范围表决定。
     if (defense.call && toCall <= me.stack / 2) {
@@ -553,9 +565,14 @@ class AiPlayer {
 
   /// 开池加注的尺度：位置好可以开小一点（省筹码、还能拿下盲注），
   /// 前位开大一点；每多一个溜入者多加 1bb（隔离他们，也把底池做大）。
-  int _openSize(GameEngine game, int bb, int limpers, Seat seat) =>
-      (bb * (_p.openSizeBb * PreflopRanges.openSizeFactor(seat) + limpers))
-          .round();
+  ///
+  /// 最后再过一遍尺度混合：真人不会「按钮位永远 2.46bb、前位永远 3bb」，
+  /// 而是在小一点/正常/大一点之间换档——固定尺度是最容易被对手读死的。
+  int _openSize(GameEngine game, int bb, int limpers, Seat seat) {
+    final base =
+        bb * (_p.openSizeBb * PreflopRanges.openSizeFactor(seat) + limpers);
+    return _mixSize(base).round();
+  }
 
   /// 3bet / 挤压尺度：有位置约 3 倍开池、没位置 4 倍（没位置要加得
   /// 更多才能压掉对手的跟注赔率），每个已经进池的人再多加 1bb
@@ -564,7 +581,9 @@ class AiPlayer {
     final potBased = game.currentBet * (spot.inPosition ? 3 : 4);
     final floor = game.currentBet * 3;
     final callers = game.config.bigBlind * spot.limpers;
-    return max(max(potBased, floor) + callers, floor);
+    final size = max(max(potBased, floor) + callers, floor);
+    // 同样换档，但 3 倍开池这条底线不能破（没位置时加不够就是白送赔率）。
+    return max(floor, _mixSize(size.toDouble()).round());
   }
 
   // ---------- 翻牌后：读牌 → 读人 → 下注/跟注/加注 ----------
@@ -622,7 +641,10 @@ class AiPlayer {
 
     // 读线：对手连着几条街开火，他范围里的「空气 / 弱对」就该大幅缩水——
     // 真人就是这么收窄范围的，而不是只看这一条街的下注大小。
-    final airKeep = 1 - 0.22 * spot.priorAgg;
+    // 只开一枪的人范围里还有一堆弱牌；连开三枪的范围是两极的：
+    // 真东西 + 少量诈唬，中间那些「随便跟一下」的一对牌基本没了。
+    final lineAgg = spot.priorAgg + (spot.facingBet ? 0.8 : 0.0);
+    final airKeep = (1 - 0.22 * lineAgg).clamp(0.25, 1.0);
 
     return (hole, score) {
       final pre = preflopWeight(hole);
@@ -939,7 +961,19 @@ class AiPlayer {
       }
       return const AiDecision(ActionType.fold);
     }
-    // 5) 弱牌/空气：弃牌为主，极少数情况诈唬加注。
+    // 5) 弱成牌（一对但被压制：底对、第二对弱踢、顶对弱踢、被盖过的口袋对）：
+    //    这是真人的「抓诈唬」主力。河牌跟注范围里大半就是这种一对牌——
+    //    见注就弃等于告诉对手「你随便开火我都走」，会被诈到破产。
+    //    所以按赔率抓，只是门槛比中等牌高：大注少抓、疯子多抓、岩石不抓。
+    if (read.tier == HandTier.weak) {
+      if (spot.spr <= 1.0) return const AiDecision(ActionType.call);
+      var need = potOdds * (spot.villainStrength > 0.7 ? 1.7 : 1.35);
+      if (bigBet) need *= 1.35;
+      if (!spot.inPosition) need *= 1.1;
+      need *= callFactor; // 对手越爱开火越该抓、越闷越该走
+      if (equity() >= need) return const AiDecision(ActionType.call);
+    }
+    // 6) 空气：弃牌为主，极少数情况诈唬加注。
     if (canRaise && _roll(_bluffRaiseChance(game, me, spot, read))) {
       _registerFire(game.street, _PlanKind.pureBluff);
       return _raise(game, me, 0.8);
@@ -1045,8 +1079,7 @@ class AiPlayer {
   AiDecision _jam(PlayerState me) =>
       AiDecision(ActionType.bet, amountTo: me.streetBet + me.stack);
 
-  /// 下注到本街总额：底池的 [frac]。
-  /// 尺度混合：真人打同一个牌面、同一手牌也不会永远用一个尺寸，
+  /// 尺度混合：真人不会永远用一个尺寸——翻前开池、翻后下注都一样，
   /// 而是在「小一点 / 正常 / 大一点」之间换档。这既是真人的习惯，
   /// 也让对手没法靠下注尺度反推我们的牌力（固定尺度是最容易被抓的机器味）。
   ///
@@ -1058,6 +1091,7 @@ class AiPlayer {
     return frac;
   }
 
+  /// 下注到本街总额：底池的 [frac]（再按 [_mixSize] 换一次档）。
   AiDecision _bet(GameEngine game, PlayerState me, double frac) {
     final pot = game.potTotal();
     final add = max(game.config.bigBlind, (pot * _mixSize(frac)).round());

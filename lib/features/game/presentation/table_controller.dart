@@ -111,6 +111,9 @@ class TableController extends ChangeNotifier {
   /// 内存里这张桌对应的存档 id；null = 还没开过桌。
   String? _sessionId;
 
+  /// 落盘串行化：动作很密时后一次写必须压过前一次，不能交错。
+  Future<void> _writes = Future<void>.value();
+
   /// 当前这张桌已经打完多少手（存档恢复时一起带回来）。
   int handsPlayed = 0;
 
@@ -131,10 +134,11 @@ class TableController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 把当前桌面状态落盘（开新桌、每手结束各存一次）。
+  /// 把当前桌面状态落盘。
+  ///
+  /// 开新桌、每个动作、每手结束都会落一次：哪怕中途退出（甚至被系统杀掉），
+  /// 回来也能接着打——这一手没打完就接着打完，打完了就发下一手。
   Future<void> persistSession() async {
-    final store = sessionStore;
-    if (store == null) return;
     final session = TableSession(
       id: _sessionId ??= 'table-${DateTime.now().microsecondsSinceEpoch}',
       label: tableLabel,
@@ -151,10 +155,27 @@ class TableController extends ChangeNotifier {
       buttonIndex: engine.buttonIndex,
       handsPlayed: handsPlayed,
       savedAt: DateTime.now(),
+      handSnapshot: _inProgressSnapshot(),
     );
     savedSession = session;
     notifyListeners();
-    await store.save(session);
+    final store = sessionStore;
+    if (store == null) return;
+    // 串行写：动作密集时保证最后落盘的就是最新状态；单次写失败不拖垮后续存档。
+    _writes = _writes.then((_) => store.save(session)).catchError((Object _) {});
+    await _writes;
+  }
+
+  /// 正在进行的那手牌的快照；停在两手之间（或还没发牌）时返回 null。
+  Map<String, Object?>? _inProgressSnapshot() =>
+      engine.handOver || engine.lastHand == null
+          ? null
+          : engine.toSnapshotJson();
+
+  /// 每个动作之后落一次盘，让牌局随时可续。
+  void _saveProgress() {
+    if (engine.handOver || sessionStore == null) return;
+    unawaited(persistSession());
   }
 
   /// 继续上局：把存档里的那张桌原样搬回来，然后发下一手。
@@ -182,7 +203,13 @@ class TableController extends ChangeNotifier {
       ..clear()
       ..addAll(rebuilt.ais);
     _sessionId = s.id;
-    _beginHand();
+    if (s.handInProgress && !engine.handOver && engine.lastHand != null) {
+      // 上一手打到一半：原样接着打完，不重发牌。
+      notifyListeners();
+      _pump();
+    } else {
+      _beginHand();
+    }
     return true;
   }
 
@@ -242,6 +269,7 @@ class TableController extends ChangeNotifier {
     }
     engine.startHand();
     notifyListeners();
+    unawaited(persistSession()); // 一手刚发下来就落盘，随时关掉都接得上
     _pump();
   }
 
@@ -263,6 +291,7 @@ class TableController extends ChangeNotifier {
       boardOverride: hand.board,
     );
     notifyListeners();
+    unawaited(persistSession());
     _pump();
   }
 
@@ -271,6 +300,7 @@ class TableController extends ChangeNotifier {
     if (!heroToAct) return;
     engine.apply(heroId, type, amount: amountTo);
     notifyListeners();
+    _saveProgress();
     _pump();
   }
 
@@ -310,6 +340,7 @@ class TableController extends ChangeNotifier {
       final d = ai.decide(engine, pending.player);
       engine.apply(pending.player.id, d.type, amount: d.amountTo);
       notifyListeners();
+      _saveProgress();
       _pump();
     }));
   }

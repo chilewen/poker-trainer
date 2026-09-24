@@ -464,4 +464,86 @@ class GameEngine {
       lastHand?.netResult[p.id] = (winnings[p.id] ?? 0) - p.totalBet;
     }
   }
+
+  // ---------- 快照：一手牌打到一半也能原样接着打 ----------
+
+  /// 把当前这手牌的完整状态序列化（含余下牌堆的顺序）。
+  ///
+  /// App 中途退出时靠它接着打完同一手牌：底牌、公共牌、各家下注、
+  /// 当前行动者都不变；牌堆顺序一起存下来，后面几条街发出来的牌
+  /// 与原局完全一致（不会重洗牌）。
+  Map<String, Object?> toSnapshotJson() => {
+        'buttonIndex': buttonIndex,
+        'street': _street.name,
+        'actorIndex': _actorIndex,
+        'remainingToAct': _remainingToAct,
+        'minRaise': _minRaise,
+        'handOver': handOver,
+        'board': [for (final c in board) c.notation],
+        'deck': [for (final c in _deck) c.notation],
+        'boardOverride': [for (final c in _boardOverride) c.notation],
+        'players': [
+          for (final p in players)
+            {
+              'id': p.id,
+              'name': p.name,
+              'stack': p.stack,
+              'streetBet': p.streetBet,
+              'totalBet': p.totalBet,
+              'folded': p.folded,
+              'allIn': p.allIn,
+              'hole': [for (final c in p.holeCards) c.notation],
+            },
+        ],
+        if (lastHand != null) 'hand': lastHand!.toJson(),
+      };
+
+  /// 按 [toSnapshotJson] 的快照重建引擎，可直接接着 [pendingAction]/[apply] 打。
+  ///
+  /// 快照自带座位与筹码，因此不需要再 [addPlayer]；[config] 与 [random]
+  /// 由调用方给出（快照里不存这两样）。
+  factory GameEngine.fromSnapshotJson(
+    Map<String, Object?> json, {
+    GameConfig config = const GameConfig(),
+    Random? random,
+  }) {
+    final engine = GameEngine(config: config, random: random);
+    for (final raw in (json['players']! as List)) {
+      final m = (raw! as Map).cast<String, Object?>();
+      final p = PlayerState(
+        id: m['id']! as String,
+        name: m['name']! as String,
+        stack: (m['stack']! as num).toInt(),
+      )
+        ..streetBet = (m['streetBet']! as num).toInt()
+        ..totalBet = (m['totalBet']! as num).toInt()
+        ..folded = m['folded']! as bool
+        ..allIn = m['allIn']! as bool;
+      for (final c in (m['hole']! as List)) {
+        p.holeCards.add(Card.parse(c! as String));
+      }
+      engine.players.add(p);
+    }
+    engine.buttonIndex = (json['buttonIndex']! as num).toInt();
+    engine._street = Street.values.byName(json['street']! as String);
+    engine._actorIndex = (json['actorIndex']! as num).toInt();
+    engine._remainingToAct = (json['remainingToAct']! as num).toInt();
+    engine._minRaise = (json['minRaise']! as num).toInt();
+    engine.handOver = json['handOver']! as bool;
+    for (final c in (json['board']! as List)) {
+      engine.board.add(Card.parse(c! as String));
+    }
+    for (final c in (json['deck']! as List)) {
+      engine._deck.add(Card.parse(c! as String));
+    }
+    for (final c in (json['boardOverride']! as List)) {
+      engine._boardOverride.add(Card.parse(c! as String));
+    }
+    final hand = json['hand'];
+    if (hand != null) {
+      engine.lastHand =
+          HandHistory.fromJson((hand as Map).cast<String, Object?>());
+    }
+    return engine;
+  }
 }

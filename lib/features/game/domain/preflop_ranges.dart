@@ -364,6 +364,82 @@ class PreflopRanges {
         Seat.bb => 1.0,
       };
 
+  // ---------- 短筹码：推 / 弃 ----------
+
+  /// 短筹码（≤ 15bb）的开池全下范围：真人这时候打的是「推 / 弃」，
+  /// 不会开个小注、再弃给别人的 3bet——那样既白送筹码又漏掉弃牌率。
+  ///
+  /// 表里那一档对应 12bb：每浅 2bb 整体放宽一档，每深 2bb 收紧一档
+  /// （15bb 就收一档）。位置越靠后（后面要过的人越少）范围越宽。
+  static PreflopRange shoveOpen(Seat seat, double stackBb) {
+    final steps = ((12 - stackBb) / 2).floor().clamp(-1, 4);
+    final base = switch (seat) {
+      // 55+ / ATs+ / AQo+ / 同花大牌 / QTs+  ≈ 10%
+      Seat.ep => const PreflopRange(
+          pair: 5,
+          suitedAce: 10,
+          offsuitAce: 12,
+          suitedBroadway: 10,
+          suitedGapper: 11,
+        ),
+      // 44+ / A9s+ / AQo+ / 同花大牌 / 98s+  ≈ 12%
+      Seat.mp => const PreflopRange(
+          pair: 4,
+          suitedAce: 9,
+          offsuitAce: 12,
+          suitedBroadway: 10,
+          suitedConnector: 9,
+          suitedGapper: 11,
+        ),
+      // 33+ / A8s+ / ATo+ / KQo / 76s+ / T8s+  ≈ 17%
+      Seat.co => const PreflopRange(
+          pair: 3,
+          suitedAce: 8,
+          offsuitAce: 10,
+          suitedBroadway: 10,
+          offsuitBroadway: 12,
+          suitedConnector: 8,
+          suitedGapper: 10,
+        ),
+      // 22+ / A4s+ / A8o+ / KTo+ / 65s+ / 86s+ / 其它同花  ≈ 33%
+      Seat.btn => const PreflopRange(
+          pair: 2,
+          suitedAce: 4,
+          offsuitAce: 8,
+          suitedBroadway: 10,
+          offsuitBroadway: 10,
+          suitedConnector: 6,
+          suitedGapper: 7,
+          suitedAny: 6,
+          offsuitConnector: 8,
+          offsuitAny: 11,
+        ),
+      // 小盲只需要过一个对手，可以推得比按钮还宽  ≈ 45%
+      Seat.sb => const PreflopRange(
+          pair: 2,
+          suitedAce: 3,
+          offsuitAce: 7,
+          suitedBroadway: 10,
+          offsuitBroadway: 10,
+          suitedConnector: 5,
+          suitedGapper: 6,
+          suitedAny: 5,
+          offsuitConnector: 7,
+          offsuitAny: 10,
+        ),
+      // 大盲（对溜入者隔离全下）：后面还有人，范围要实
+      Seat.bb => const PreflopRange(
+          pair: 5,
+          suitedAce: 10,
+          offsuitAce: 12,
+          suitedBroadway: 10,
+          suitedConnector: 9,
+          suitedGapper: 11,
+        ),
+    };
+    return base.shifted(-steps);
+  }
+
   // ---------- 面对加注 ----------
 
   /// 再加注（3bet）的价值范围，随加注者位置放宽。

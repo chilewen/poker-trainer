@@ -119,7 +119,6 @@ class Odds {
     int opponents = 1,
     required RangePredicate inRange,
     int trials = 400,
-    int maxResample = 4,
     Random? random,
   }) {
     if (heroHole.length != 2) {
@@ -140,6 +139,24 @@ class Odds {
     ];
     final needBoard = 5 - board.length;
 
+    // 河牌圈公共牌已发完：对手的组合权重整套都是固定的，
+    // 先算一次「权重表」，之后每次模拟直接从表里抽，省掉重复评估。
+    List<List<Card>>? riverPairs;
+    List<double>? riverWeights;
+    var riverTotal = 0.0;
+    if (needBoard == 0) {
+      riverPairs = [];
+      riverWeights = [];
+      for (var i = 0; i + 1 < unknown.length; i += 2) {
+        final cand = [unknown[i], unknown[i + 1]];
+        final w = inRange(cand, HandEvaluator.bestOf([...cand, ...board]));
+        if (w <= 0) continue;
+        riverPairs.add(cand);
+        riverWeights.add(w);
+        riverTotal += w;
+      }
+    }
+
     var wins = 0;
     var ties = 0;
     for (var t = 0; t < trials; t++) {
@@ -151,20 +168,34 @@ class Odds {
       var heroWins = true;
       var heroTies = false;
       for (var o = 0; o < opponents; o++) {
-        // 在剩余牌里从前向后试组合：落到范围内就用，试满次数就用第一个。
-        var chosen = <Card>[rest[0], rest[1]];
-        var chosenScore =
-            HandEvaluator.bestOf([...chosen, ...runout]);
-        var weight = inRange(chosen, chosenScore);
-        for (var k = 1; k <= maxResample; k++) {
-          if (weight >= 1.0 || rng.nextDouble() < weight) break;
-          final i = k * 2;
-          if (i + 1 >= rest.length) break;
-          final cand = [rest[i], rest[i + 1]];
-          final candScore = HandEvaluator.bestOf([...cand, ...runout]);
-          chosen = cand;
-          chosenScore = candScore;
-          weight = inRange(cand, candScore);
+        // 按权重抽对手的底牌：范围里权重低的牌就按比例少出现。
+        // （以前是「试几次不中就随便拿一手」，那等于把对手的范围
+        // 掺成随机牌，会系统性高估我方胜率、导致跟注过宽。）
+        List<Card> chosen;
+        HandScore chosenScore;
+        final fixed = needBoard == 0 && o == 0 ? riverPairs : null;
+        if (fixed != null && riverTotal > 0) {
+          chosen = _pickWeighted(fixed, riverWeights!, riverTotal, rng);
+          chosenScore = HandEvaluator.bestOf([...chosen, ...runout]);
+        } else {
+          final pairs = <List<Card>>[];
+          final weights = <double>[];
+          var total = 0.0;
+          for (var i = 0; i + 1 < rest.length; i += 2) {
+            final cand = [rest[i], rest[i + 1]];
+            final w = inRange(cand, HandEvaluator.bestOf([...cand, ...runout]));
+            if (w <= 0) continue;
+            pairs.add(cand);
+            weights.add(w);
+            total += w;
+          }
+          if (total <= 0) {
+            // 范围里一手都没有（正常的范围谓词不会这样）：退化成随机牌。
+            chosen = [rest[0], rest[1]];
+          } else {
+            chosen = _pickWeighted(pairs, weights, total, rng);
+          }
+          chosenScore = HandEvaluator.bestOf([...chosen, ...runout]);
         }
         rest.remove(chosen[0]);
         rest.remove(chosen[1]);
@@ -188,6 +219,17 @@ class Odds {
       tie: ties / trials,
       trials: trials,
     );
+  }
+
+  /// 按权重从候选组合里抽一组（权重越高越可能出现）。
+  static List<Card> _pickWeighted(
+      List<List<Card>> pairs, List<double> weights, double total, Random rng) {
+    var r = rng.nextDouble() * total;
+    for (var i = 0; i < weights.length; i++) {
+      r -= weights[i];
+      if (r <= 0) return pairs[i];
+    }
+    return pairs.last;
   }
 
   /// 翻牌后 outs 数：听牌成牌张数。
