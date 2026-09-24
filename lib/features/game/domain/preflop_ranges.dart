@@ -527,6 +527,34 @@ class PreflopRanges {
     offsuitBroadway: 12,
   );
 
+  /// 没位置跟 3bet 的范围：只留有牌力的那一半（TT+ / AQs+ / AKo / KQs）。
+  ///
+  /// 靠位置的投机牌（小对子、同花连张、ATs 这类）没位置一律不跟——翻后
+  /// 先行动、中一对也不够打，只会把筹码一条街一条街送出去。以前这里根本
+  /// 没有这一档：没位置的人面对 3bet 除了 4bet 就是 100% 弃牌，连带 KK/QQ
+  /// 都被扔了（紧凶还剩 4bet 兜底，跟注站连 4bet 都不打，直接弃）。
+  /// 一条「永远不会用强牌跟注」的线，对手拿任意两张牌 3bet 都是赚的。
+  static const PreflopRange callThreeBetOop = PreflopRange(
+    pair: 10,
+    suitedAce: 12, // AQs+
+    suitedBroadway: 12, // KQs
+    offsuitBroadway: 13, // AKo
+  );
+
+  /// 跟注站面对 3bet 的跟注范围：不看位置，把「有 A 的同花、同花连张、
+  /// 对子」全带上。跟注站的区别不是「拿垃圾牌也跟」，而是它们不会因为
+  /// 没位置、或者筹码不够深就把一手能玩的牌扔掉——面对 3bet 只有两个
+  /// 反应：跟，或者真的没牌才弃。以前这里给它们的是「有位置 + 深筹码」
+  /// 的紧凶范围，等于把跟注站打成了全场最紧的人。
+  static const PreflopRange callThreeBetStation = PreflopRange(
+    pair: 2, // 任何对子（跟注站也会拿 22 进去买三条）
+    suitedAce: 2, // 任何同花 A（含 A5s~A2s）
+    suitedBroadway: 10, // KQs~JTs
+    offsuitBroadway: 11, // AJo+ / KQo
+    suitedConnector: 6, // 76s+
+    suitedGapper: 8, // T8s+
+  );
+
   // 有位置防守：对子买三条 + 同花牌 + 高张，非同花杂牌不跟。
   static const _ipDefend = PreflopRange(
     pair: 2,

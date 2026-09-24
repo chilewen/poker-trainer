@@ -732,6 +732,13 @@ void main() {
         reason: '转牌空白牌继续开火、发 A 就收手 '
             '(${(100 * blank).toStringAsFixed(0)}% vs '
             '${(100 * ace).toStringAsFixed(0)}%)');
+    // 光有先后顺序不够：以前两档是 33% / 12%，顺序也对，但那是「被跟一次
+    // 就基本放弃」——对手跟一张翻牌就能白捡后面两条街。真人的第二枪在
+    // 空白牌上接近一半，出高张也留两成出头。
+    expect(blank, greaterThan(0.35),
+        reason: '空白牌的第二枪不能低到三成（${(100 * blank).round()}%）');
+    expect(ace, greaterThan(0.15),
+        reason: '发 A 也得留一部分第二枪（${(100 * ace).round()}%）');
   });
 
   test('诈唬选牌：握着坚果花阻断牌时，河牌更敢开火', () {
@@ -1058,6 +1065,97 @@ void main() {
         reason: '300bb 深筹码可以买三条（跟 ${p55deep.call}/200）');
     final tt = aiFacingThreeBet('10h 10d');
     expect(tt.fold, 0, reason: 'TT 不会弃给 3bet');
+  });
+
+  /// 3 人桌：按钮 p0 开 300 → 小盲 p1 3bet 900 → 大盲 p2（AI）面对 3bet。
+  /// 这是「没位置跟 3bet」的那条线。
+  ({int raise, int call, int fold, int n}) aiFacingThreeBetOop(String hole,
+      {int seeds = 200, AiStyle style = AiStyle.tightAggressive,
+      int stack = 10000}) {
+    var raise = 0, call = 0, fold = 0, n = 0;
+    for (var seed = 0; seed < seeds; seed++) {
+      final rnd = Random(seed);
+      final g = GameEngine(
+        config: GameConfig(
+            startingStack: stack, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      );
+      for (var i = 0; i < 3; i++) {
+        g.addPlayer('p$i', 'P$i');
+      }
+      g.startHand(holeOverride: {
+        'p0': _cs('4c 3c'),
+        'p1': _cs('8c 7d'),
+        'p2': _cs(hole),
+      });
+      g.apply('p0', ActionType.raise, amount: 300);
+      g.apply('p1', ActionType.raise, amount: 900);
+      final p = g.pendingAction().player;
+      if (p.id != 'p2') fail('轮到的是 ${p.id}，不是 p2');
+      n++;
+      final d = AiPlayer(style, random: rnd).decide(g, p);
+      switch (d.type) {
+        case ActionType.raise:
+          raise++;
+        case ActionType.call:
+          call++;
+        default:
+          fold++;
+      }
+    }
+    return (raise: raise, call: call, fold: fold, n: n);
+  }
+
+  test('翻前防守 3bet：没位置只跟有牌力的那一半，不会把 KK/QQ 白扔', () {
+    // 以前「跟 3bet」的范围不分位置，没位置的人除了 4bet 就是 100% 弃牌，
+    // 连 KK/QQ/AK 都被扔掉（跟注站连 4bet 都不打，弃得最狠）。一条永远
+    // 不会用强牌跟注的线，对手拿任意两张牌 3bet 都是赚的。
+    for (final hole in ['Kh Kd', 'Qh Qd', 'As Ks', 'Ah Kd']) {
+      final r = aiFacingThreeBetOop(hole);
+      expect(r.fold, 0, reason: '$hole 没位置也不能弃给 3bet');
+      expect(r.call + r.raise, r.n, reason: '$hole 要么跟要么 4bet');
+    }
+    final kkStation = aiFacingThreeBetOop('Kh Kd', style: AiStyle.loosePassive);
+    expect(kkStation.fold, 0, reason: '跟注站也不会把 KK 扔了');
+
+    // 有牌力的：TT/KQs 跟；靠位置的投机牌没位置一律不留。
+    final tt = aiFacingThreeBetOop('10h 10d');
+    expect((tt.call + tt.raise) / tt.n, greaterThan(0.7),
+        reason: 'TT 没位置也要继续（跟 ${tt.call}）');
+    final kqs = aiFacingThreeBetOop('Kh Qh');
+    expect(kqs.call / kqs.n, greaterThan(0.6),
+        reason: 'KQs 可以跟（跟 ${kqs.call}）');
+    final ats = aiFacingThreeBetOop('Ah 10h');
+    expect(ats.fold / ats.n, greaterThan(0.6),
+        reason: 'ATs 没位置不跟 3bet（投机牌）');
+    final sc = aiFacingThreeBetOop('7h 6h');
+    expect(sc.fold / sc.n, greaterThan(0.85),
+        reason: '76s 没位置别跟 3bet（弃 ${sc.fold}）');
+  });
+
+  test('翻前防守 3bet：跟注站不看位置也不看深度，不是全场最紧的人', () {
+    // 跟注站的弱点本来就是「什么都不弃」：拿 22 / 76s / A5s 面对 3bet 是
+    // 跟注，不像紧手那样「没位置、筹码不够深就扔」。以前这里给它们的也
+    // 是紧凶那套范围（还要有位置），等于把全场最松的人打成了最紧的人。
+    ({int raise, int call, int fold, int n}) station(String hole) =>
+        aiFacingThreeBetOop(hole, style: AiStyle.loosePassive);
+    for (final hole in ['2h 2d', '7h 6h', 'Ad 5d', 'Kc Jc']) {
+      final r = station(hole);
+      expect(r.call / r.n, greaterThan(0.4),
+          reason: '跟注站拿 $hole 面对 3bet 是跟注（跟 ${r.call}/${r.n}）');
+    }
+    // 但也不是什么都跟：真正的垃圾牌照样弃。
+    final trash = station('8h 3d');
+    expect(trash.fold, trash.n, reason: '83o 面对 3bet 还是得弃');
+
+    // 有位置的跟注站同样不挑深度（以前非极深筹码要把小对子摘掉）。
+    final ip = aiFacingThreeBet('2h 2d', style: AiStyle.loosePassive);
+    expect((ip.call + ip.raise) / 200, greaterThan(0.4),
+        reason: '按钮位跟注站也会用小对子跟 3bet（跟+加 ${ip.call + ip.raise}/200）');
+    // 紧凶在同一个点亮起的差别必须在：不然「风格」就白叫了。
+    final tightIp = aiFacingThreeBet('2h 2d');
+    expect(tightIp.fold / 200, greaterThan(0.9),
+        reason: '紧凶 100bb 不买三条（弃 ${tightIp.fold}/200）');
   });
 
   test('翻前 4bet：QQ+/AK 面对方 3bet 会再加注回去，不是一路慢打', () {

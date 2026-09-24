@@ -564,17 +564,24 @@ class AiPlayer {
       // 22~88 那一档（买三条）只在极深的筹码里跟：3bet 底池的 SPR 低到
       // 100bb 深度中三条也赢不回 3bet 的价钱，真人这时要么弃、要么拿去
       // 4bet 诈唬，跟注是最差的选择。
-      final callRange = stackBb >= 200
-          ? PreflopRanges.callThreeBet
-          : PreflopRanges.callThreeBet.withoutSmallPairs();
+      // 跟注站不看位置也不看深度：能玩的牌就进池（见 callThreeBetStation）。
+      final station = _p.wideLimp || _p.limpsAnyPrice;
+      // 其它风格：有位置才用整个跟注范围（含投机牌），没位置只跟有牌力的。
+      final callRange = station
+          ? PreflopRanges.callThreeBetStation
+          : (!spot.inPosition
+              ? PreflopRanges.callThreeBetOop
+              : (stackBb >= 200
+                  ? PreflopRanges.callThreeBet
+                  : PreflopRanges.callThreeBet.withoutSmallPairs()));
       final shifted = callRange.shifted(w);
       // 投机的那一半（小对子 / 同花连张）混着跟：真人对这些边缘牌不是
       // 每次都跟，一部分直接弃，跟注范围才不会宽到对手一开火就收走。
       // 松的性格跟得多一点（_looseness 0.9~1.15）。
-      final specFreq = (0.45 + (_looseness - 0.9) * 2.0).clamp(0.3, 0.8);
+      final specFreq =
+          (station ? 0.6 : 0.45 + (_looseness - 0.9) * 2.0).clamp(0.3, 0.8);
       final deepCall = !shortStack &&
           stackBb >= 80 &&
-          spot.inPosition &&
           toCall <= me.stack / 3 &&
           shifted.contains(hand) &&
           (PreflopRanges.callThreeBetCore.contains(hand) || _roll(specFreq));
@@ -1011,10 +1018,13 @@ class AiPlayer {
 
     var f = 1.0;
     final pairsPrev = prev.any((c) => c.rank == card.rank);
-    if (_isBlankCard(game)) f *= 1.25; // 空白牌
+    if (_isBlankCard(game)) f *= 1.45; // 空白牌
     // 比牌面都大的高张（尤其 A）：跟注方的范围里全是这种牌，
-    // 转牌一发到就把「第二枪」收掉——真人这时候弃得比谁都干脆。
-    if (card.rank.value > prevMax) f *= 0.6;
+    // 转牌一发到就该收手——但也不能一见到高张就整条线扔了。
+    // 以前这里是 0.6 倍，配上下面的系数，拿到空气的转牌第二枪只剩 13%，
+    // 等于告诉对手「转牌出高张就随便跟」：他只要跟一张翻牌，就能白捡
+    // 之后两条街的底池（我们的开火频率比真人的弃牌频率还低）。
+    if (card.rank.value > prevMax) f *= 0.8;
     if (pairsPrev) f *= 0.8; // 公对面：不容易被相信
     if (read.texture.maxSuitCount >= 3) f *= 0.75; // 第三张同花
     if (read.hasDraw || read.tier >= HandTier.medium) f *= 1.15;
@@ -1123,10 +1133,13 @@ class AiPlayer {
     }
     // 3bet 底池：大家范围都很强、筹码又浅，硬诈唬的弃牌率明显更低。
     if (spot.isThreeBetPot) base *= 0.6;
-    // 诈唬线延续：前一条街已经开过火，河牌没成牌也要能再开一枪。
+    // 诈唬线延续：前一条街已经开过火，后面没成牌也要能再开一枪。
+    // 纯诈唬这一档从 1.4 提到 1.7：翻牌 c-bet 被跟之后，真人转牌接着
+    // 开的比例在四成上下（空白牌更多），以前只有三成出头，等于自己把
+    // 「被跟了就放弃」写在了脸上——对手跟一张翻牌就能白捡后面两条街。
     final plan = _plan;
     if (plan != null && game.street.index > plan.street.index) {
-      base *= plan.kind == _PlanKind.semiBluff ? 2.0 : 1.4;
+      base *= plan.kind == _PlanKind.semiBluff ? 2.0 : 1.7;
     }
     // 第二枪选牌：发出来的牌对跟注方越没用，越值得接着开火。
     base *= _barrelFactor(game, read);
