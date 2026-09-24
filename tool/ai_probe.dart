@@ -17,6 +17,10 @@ class _Result {
   final Map<String, int> counts = {};
   int total = 0;
 
+  /// 并行分片时「这一格不归本片跑」——注意跟 total==0（真收不到样本，
+  /// 比如 AI 翻前就弃掉的格子）不是一回事，分片时两者都不能当对方用。
+  bool skipped = false;
+
   /// [pot] = 决策时的底池，[ref] = 加注前的最高注（下注时为 0）。
   /// 下注/加注不按绝对筹码分类，而是按「相对底池的档位」（5% 一档）——
   /// 尺度混合之后同一个局面会有好几档尺寸，绝对数字看着就是一团乱麻。
@@ -70,6 +74,13 @@ _Result _sample({
   bool oop = false,
   bool facingOnly = false,
 }) {
+  // 分片键只由「这是哪个局面」组成，故意不含 oop / preflopScript：
+  // pos() 的有/没位置是同一格的两条线，必须落在同一片，不然两条线会被
+  // 拆到不同进程、拼回来的对照就不成对了。
+  final shardKey = '$hole|$heroHole|$board|$target|$style|'
+      '${heroFirst.entries.map((e) => '${e.key}:${e.value.type}:${e.value.frac}').join(',')}';
+  if (!probeShardMine(shardKey)) return _Result()..skipped = true;
+
   final res = _Result();
   for (var seed = 0; seed < probeSeeds(seeds); seed++) {
     final rnd = Random(seed);
@@ -145,8 +156,21 @@ _Result _sample({
 }
 
 void main() {
-  void show(String name, _Result r) =>
-      print('${name.padRight(34)} $r');
+  if (probeShardTotal > 1) {
+    print('# ai_probe 分片 $probeShardIndex/$probeShardTotal（tool/regression.sh 会按序号拼回来）');
+  }
+  // 并行分片（PROBE_SHARD=k/n）下：段标题只有第 0 片打，免得四份 log 拼起来
+  // 每个标题重复四遍；每条用例只由「分到它的那一片」打印。整跑时这里全部
+  // 走默认分支，输出跟以前一模一样。
+  final sharded = probeShardTotal > 1;
+  void sec(String line) {
+    if (!sharded || probeShardIndex == 0) print(line);
+  }
+
+  void show(String name, _Result r) {
+    if (r.skipped) return;
+    print('${name.padRight(34)} $r');
+  }
 
   /// 同一个局面、同一手牌、同一个下注尺度，只差 AI 有没有位置。
   void pos(String name,
@@ -189,13 +213,14 @@ void main() {
         );
     final ip = run(oop: false);
     final oop = run(oop: true);
+    if (ip.skipped) return;
     print('${name.padRight(30)} '
         '有位置 n=${ip.total.toString().padLeft(3)} $ip');
     print('${''.padRight(30)} '
         '没位置 n=${oop.total.toString().padLeft(3)} $oop');
   }
 
-  print('== 翻牌圈（无人下注）== ');
+  sec('== 翻牌圈（无人下注）== ');
   show('听花 AKs on Qd7d2c',
       _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c', target: Street.flop));
   show('两头顺 98 on 762r',
@@ -211,8 +236,8 @@ void main() {
   show('顶对顶踢 AQ on Qh7d2c',
       _sample(hole: 'Ah Qd', heroHole: '3c 2h', board: 'Qh 7d 2c', target: Street.flop));
 
-  print('');
-  print('== 翻牌圈（英雄下注 1/2 池）== ');
+  sec('');
+  sec('== 翻牌圈（英雄下注 1/2 池）== ');
   show('听花 面对方 bet',
       _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c', target: Street.flop,
           heroFirst: {Street.flop: (type: ActionType.bet, frac: 0.5)}));
@@ -253,8 +278,8 @@ void main() {
       _sample(hole: 'Ah 2h', heroHole: '3c 4h', board: 'Qc 7d 2s 5h', target: Street.turn,
           heroFirst: {Street.turn: (type: ActionType.bet, frac: 0.33)}));
 
-  print('');
-  print('== 转牌圈（听牌未成，对手一直过牌）== ');
+  sec('');
+  sec('== 转牌圈（听牌未成，对手一直过牌）== ');
   show('听花转牌（无人下注）',
       _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c 5h', target: Street.turn));
   show('听花转牌（面对 1/2 池 bet）',
@@ -264,10 +289,10 @@ void main() {
       _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c 5h', target: Street.turn,
           heroFirst: {Street.turn: (type: ActionType.bet, frac: 1.2)}));
 
-  print('');
-  print('== 翻牌 vs 转牌：同一个牌力的防守范围该不该收窄 == ');
+  sec('');
+  sec('== 翻牌 vs 转牌：同一个牌力的防守范围该不该收窄 == ');
   for (final frac in [0.5, 0.66]) {
-    print('-- 第二对 87，对手下 ${(100 * frac).round()}% 池 --');
+    sec('-- 第二对 87，对手下 ${(100 * frac).round()}% 池 --');
     show('  翻牌',
         _sample(hole: '8h 7s', heroHole: '3c 4h', board: 'Kh 8d 3c', target: Street.flop,
             heroFirst: {Street.flop: (type: ActionType.bet, frac: frac)}));
@@ -279,8 +304,8 @@ void main() {
             }));
   }
 
-  print('');
-  print('== 无人下注时的薄价值/控池 == ');
+  sec('');
+  sec('== 无人下注时的薄价值/控池 == ');
   show('翻牌第二对（无人下注）',
       _sample(hole: '8h 7s', heroHole: '3c 2h', board: 'Kh 8d 3c', target: Street.flop));
   show('转牌第二对（无人下注）',
@@ -292,8 +317,8 @@ void main() {
   show('河牌底对（无人下注）',
       _sample(hole: 'Ah 4h', heroHole: '3c 2h', board: 'Qc 7d 4s 5h 9d', target: Street.river));
 
-  print('');
-  print('== 河牌圈（听牌已经错过）== ');
+  sec('');
+  sec('== 河牌圈（听牌已经错过）== ');
   show('miss 花（无人下注）',
       _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c 5h 9s', target: Street.river));
   show('miss 花（面对 1/4 池 bet）',
@@ -348,8 +373,8 @@ void main() {
       _sample(hole: '9h 7d', heroHole: '3c 2h', board: 'Qh 9d 7c 5h 2s', target: Street.river,
           heroFirst: {Street.river: (type: ActionType.bet, frac: 0.5)}));
 
-  print('');
-  print('== 位置对照：面对下注时，有位置 vs 没位置 ==');
+  sec('');
+  sec('== 位置对照：面对下注时，有位置 vs 没位置 ==');
   pos('空气+后门花 Ad10d on 9d7c2c', hole: 'Ad 10d', board: '9d 7c 2c', frac: 0.33);
   pos('空气+后门花 Kh9h on As7h2c', hole: 'Kh 9h', board: 'As 7h 2c');
   pos('卡顺 76 on A92', hole: '7h 6h', board: 'As 9d 2c');
@@ -369,8 +394,8 @@ void main() {
   pos('第二对（转牌 2/3 池）', hole: '8h 7s', board: 'Kh 8d 3c 5s',
       frac: 0.66, street: Street.turn);
 
-  print('');
-  print('== 河牌小注抓诈唬：有位置 vs 没位置 == ');
+  sec('');
+  sec('== 河牌小注抓诈唬：有位置 vs 没位置 == ');
   pos('A 高（河牌 1/4 池）', hole: 'Ad Kd', board: 'Qd 7d 2c 5h 9s',
       frac: 0.25, street: Street.river);
   pos('A 高（河牌 1/3 池）', hole: 'Ad Kd', board: 'Qd 7d 2c 5h 9s',
@@ -382,8 +407,8 @@ void main() {
   pos('第二对（河牌 2/3 池）', hole: '8h 7s', board: 'Kh 8d 3c 5h 9s',
       frac: 0.66, street: Street.river);
 
-  print('');
-  print('== 松凶风格对照 == ');
+  sec('');
+  sec('== 松凶风格对照 == ');
   show('听花（无人下注）LAG',
       _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c', target: Street.flop,
           style: AiStyle.looseAggressive));
@@ -402,8 +427,8 @@ void main() {
           style: AiStyle.looseAggressive,
           heroFirst: {Street.river: (type: ActionType.bet, frac: 0.5)}));
 
-  print('');
-  print('== 松被动风格对照 == ');
+  sec('');
+  sec('== 松被动风格对照 == ');
   show('听花（无人下注）LP',
       _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c', target: Street.flop,
           style: AiStyle.loosePassive));

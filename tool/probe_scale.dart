@@ -14,3 +14,33 @@ final double probeSeedScale =
 int probeSeeds(int seeds) => probeSeedScale >= 1
     ? seeds
     : max(15, (seeds * probeSeedScale).round());
+
+/// 并行分片：PROBE_SHARD=k/n 时只跑「哈希落在第 k 片」的用例。
+///
+/// 探针的每一格都是独立重放（自己的种子序列、自己的牌局），所以分片只改变
+/// 「这一格谁来跑」，不改任何一格的结果：几片各自的输出按顺序拼起来，和整跑
+/// 逐例一致，只是顺序按分片重排。
+///
+/// tool/regression.sh 用它把最重的 ai_probe 拆成 4 个进程并行（19s → 6s）。
+/// 默认不设 = 整跑，行为跟以前完全一样。
+final String _probeShard = Platform.environment['PROBE_SHARD'] ?? '';
+
+int _parseShard(int part) {
+  final bits = _probeShard.split('/');
+  if (bits.length != 2) return part == 0 ? 0 : 1;
+  return int.tryParse(bits[part]) ?? (part == 0 ? 0 : 1);
+}
+
+final int probeShardIndex = _parseShard(0);
+final int probeShardTotal = _parseShard(1);
+
+/// 分片键用自己算的 FNV-1a，不依赖 String.hashCode：哈希必须是**跨进程**
+/// 确定的，否则几片各自算成不一样的分法，用例要么漏跑要么重跑。
+bool probeShardMine(String key) {
+  if (probeShardTotal <= 1) return true;
+  var h = 0x811c9dc5;
+  for (final unit in key.codeUnits) {
+    h = ((h ^ unit) * 0x01000193) & 0x7fffffff;
+  }
+  return h % probeShardTotal == probeShardIndex;
+}

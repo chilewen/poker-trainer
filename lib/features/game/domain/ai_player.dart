@@ -260,6 +260,10 @@ class _VillainRead {
 ///    （[HandReading.blockerScore]：坚果花阻断 / 补顺的牌 / A 阻断），
 ///    拿什么都没挡到的牌就老实过牌——真人和按钮精灵最大的区别就在这。
 class AiPlayer {
+
+  // TEMPDEBUG 临时探针钩子（测完就删）
+  static void Function(String tag, double equity, double need, String street,
+      double betSizeRel, bool facingRaise)? debugCall;
   AiPlayer(this.style, {Random? random}) : _random = random ?? Random() {
     // 同一风格的每个 AI 也有自己的性格，避免所有人打成一模一样。
     _aggression = 0.85 + _random.nextDouble() * 0.3;
@@ -1397,6 +1401,7 @@ class AiPlayer {
           _roll(_valueRaiseChance(game, me, spot, read))) {
         return _raise(game, me, 0.75);
       }
+      debugCall?.call('medium', equity(), need, game.street.name, spot.betSizeRel, facingRaise);
       if (!scary && _callMix(equity(), need)) {
         return const AiDecision(ActionType.call);
       }
@@ -1473,6 +1478,7 @@ class AiPlayer {
           _roll(_valueRaiseChance(game, me, spot, read))) {
         return _raise(game, me, 0.75);
       }
+      debugCall?.call('weak', equity(), need, game.street.name, spot.betSizeRel, facingRaise);
       if (_callMix(equity(), need)) return const AiDecision(ActionType.call);
       // 一对牌是拿来抓诈唬的，赔率不够就老实弃——拿它去加注诈唬等于
       // 把更差的牌打走、被更好的牌跟注（「有摊牌价值的牌不诈唬」）。
@@ -1506,7 +1512,7 @@ class AiPlayer {
         !facingRaise &&
         spot.opponents == 1 &&
         read.overcards >= 1 &&
-        _callMix(equity(), potOdds * 0.7)) {
+        (() { debugCall?.call('air', equity(), potOdds * 0.7, game.street.name, spot.betSizeRel, facingRaise); return _callMix(equity(), potOdds * 0.7); })()) {
       return const AiDecision(ActionType.call);
     }
     // 极少数情况诈唬加注。
