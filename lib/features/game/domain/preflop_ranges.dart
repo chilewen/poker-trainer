@@ -340,6 +340,30 @@ class PreflopRanges {
           ),
       };
 
+  /// 大盲面对溜入者时的「隔离加注」范围：溜入的人范围又宽又弱，用一手
+  /// 强而线性的牌把他们打散，顺便把底池做大、把主动权拿到自己手里。
+  static const PreflopRange isolateLimpers = PreflopRange(
+    pair: 4,
+    suitedAce: 8,
+    offsuitAce: 11,
+    suitedBroadway: 10,
+    offsuitBroadway: 12,
+    suitedConnector: 8,
+    suitedGapper: 9,
+    suitedAny: 9,
+  );
+
+  /// 开池加注大小的位置系数：前位开得大一点（要保护、要隔离），
+  /// 后位偷盲可以小一点（同样能拿下盲注，还省筹码）。
+  static double openSizeFactor(Seat seat) => switch (seat) {
+        Seat.ep => 1.0,
+        Seat.mp => 0.95,
+        Seat.co => 0.88,
+        Seat.btn => 0.82,
+        Seat.sb => 1.0, // 小盲没位置，照前位开
+        Seat.bb => 1.0,
+      };
+
   // ---------- 面对加注 ----------
 
   /// 再加注（3bet）的价值范围，随加注者位置放宽。
@@ -459,13 +483,19 @@ class PreflopRanges {
     int threeBetWidth = 0,
     int callWidth = 0,
   }) {
-    final value = valueThreeBet(raiser).shifted(threeBetWidth);
+    // 前面已经有人跟注：底池里的死钱更多，再加注（挤压）的收益更高，
+    // 所以价值范围可以放宽一档——这是真人 squeeze 的由来。
+    final squeeze = callers > 0;
+    final value = valueThreeBet(raiser)
+        .shifted(threeBetWidth + (squeeze ? -1 : 0));
     if (value.contains(hand)) {
       return (valueThreeBet: true, lightThreeBet: false, call: false);
     }
 
-    // 轻 3bet 只针对后位开池（真正的偷盲），且位置不能太差。
-    final light = (raiser == Seat.co || raiser == Seat.btn || raiser == Seat.sb) &&
+    // 轻 3bet 只针对后位开池（真正的偷盲），且位置不能太差；
+    // 有人跟注时弃牌率虽然低一点，但死钱多，仍然值得偶尔挤一把。
+    final late = raiser == Seat.co || raiser == Seat.btn || raiser == Seat.sb;
+    final light = late &&
         (inPosition || seat == Seat.sb || seat == Seat.bb) &&
         isLightThreeBetHand(hand);
 

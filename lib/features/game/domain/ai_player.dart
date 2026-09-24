@@ -172,6 +172,25 @@ class _Plan {
   final _PlanKind kind;
 }
 
+/// 对某个对手的观察记录：只统计「公开信息」（翻后的下注/跟注/弃牌），
+/// 每桌每个 AI 各存一份，跨手牌累积，用来做针对性的剥削调整。
+class _VillainRead {
+  int seen = 0; // 翻后面对下注的次数
+  int folded = 0;
+  int called = 0;
+  int raised = 0;
+  int hands = 0; // 一起打完的手牌数
+
+  /// 翻后面对下注的弃牌率；样本太少时退回中性先验 0.45。
+  double get foldToBet => seen < 4 ? 0.45 : folded / seen;
+
+  /// 是不是「跟注站」：面对下注几乎不弃牌，还很少加注。
+  bool get station => seen >= 6 && foldToBet <= 0.28 && raised <= seen * 0.15;
+
+  /// 是不是「一压就跑」：面对下注弃得特别多。
+  bool get folder => seen >= 6 && foldToBet >= 0.6;
+}
+
 /// 规则型 AI：翻牌前查「位置感知的范围表」（[PreflopRanges]），
 /// 翻牌后「读牌 + 读人」。风格差异全部通过 [_Profile] 参数体现。
 ///
@@ -183,7 +202,13 @@ class _Plan {
 ///    （对手范围同样按他翻前的位置与动作来收紧），
 ///    再和底池赔率、隐含赔率、位置、下注尺度结合；
 /// 4. 听牌主动半诈唬（有弃牌率也保有成牌概率），没成牌就按计划
-///    在转牌/河牌决定继续开火还是放弃，而不是无脑跟注到底。
+///    在转牌/河牌决定继续开火还是放弃，而不是无脑跟注到底；
+/// 5. 全程「读人」：把每个对手翻后面对下注的弃牌/跟注/加注记进档案
+///    （[_VillainRead]），遇到一压就跑的对手多诈唬，遇到跟注站就
+///    少诈唬、下大注收价值——这才是真人最像人的那部分；
+/// 6. 诈唬也会「选牌」：只挑挡掉对手强牌的那几张去开火
+///    （[HandReading.blockerScore]：坚果花阻断 / 补顺的牌 / A 阻断），
+///    拿什么都没挡到的牌就老实过牌——真人和按钮精灵最大的区别就在这。
 class AiPlayer {
   AiPlayer(this.style, {Random? random}) : _random = random ?? Random() {
     // 同一风格的每个 AI 也有自己的性格，避免所有人打成一模一样。
@@ -205,6 +230,107 @@ class AiPlayer {
   String? _planHandId;
   _Plan? _plan;
 
+  /// 对每个对手的观察（key = 玩家 id）。跨手牌累积，不重置。
+  final Map<String, _VillainRead> _reads = {};
+
+  List<ActionRecord>? _scanList; // 正在统计的那一手动作表（引擎会持续追加）
+  int _readCursor = 0; // 已经统计到的位置
+  final Map<Street, bool> _streetAggro = {};
+
+  /// 把「公开动作」扫进对手档案：翻后谁面对下注弃了、跟了、加了。
+  /// 只看动作，不看底牌——真人也是这么读人的。
+  ///
+  /// 注意：对手弃牌结束一手时，我们不会再有决策机会，那一手剩下的动作
+  /// 靠 [_scanList] 记住的动作表在下一次决策时补扫，不然「一压就跑」
+  /// 的对手永远攒不够样本。
+  void _observe(GameEngine game, PlayerState me) {
+    final hand = game.lastHand;
+    if (hand == null) return;
+    if (!identical(hand.actions, _scanList)) {
+      final prev = _scanList;
+      if (prev != null) _ingest(prev, me);
+      _scanList = hand.actions;
+      _readCursor = 0;
+      _streetAggro.clear();
+      for (final r in _reads.values) {
+        r.hands++;
+      }
+    }
+    _ingest(hand.actions, me);
+  }
+
+  void _ingest(List<ActionRecord> actions, PlayerState me) {
+    if (actions.length <= _readCursor) return;
+    final batch = actions.sublist(_readCursor);
+    _readCursor = actions.length;
+    for (final a in batch) {
+      // 「是否面对下注」由这条街上谁先开的火决定——包括我们自己下的注。
+      final facedBet = _streetAggro[a.street] ?? false;
+      if (a.type == ActionType.bet || a.type == ActionType.raise) {
+        _streetAggro[a.street] = true;
+      }
+      if (a.actorId == me.id) continue;
+      if (a.street == Street.preflop) continue; // 翻前范围另有位置表
+      final r = _reads.putIfAbsent(a.actorId, _VillainRead.new);
+      switch (a.type) {
+        case ActionType.fold:
+          if (facedBet) {
+            r.seen++;
+            r.folded++;
+          }
+        case ActionType.call:
+          if (facedBet) {
+            r.seen++;
+            r.called++;
+          }
+        case ActionType.raise:
+          r.raised++;
+          if (facedBet) r.seen++;
+        case ActionType.bet:
+        case ActionType.check:
+          break;
+      }
+    }
+  }
+
+  /// 对某个对手的观察摘要：一起打过多少手、翻后面对下注弃了几次、
+  /// 弃牌率是多少。供调试与「教练界面」显示用，不参与决策。
+  ({int hands, int seen, double foldToBet})? readOf(String playerId) {
+    final r = _reads[playerId];
+    if (r == null) return null;
+    return (hands: r.hands, seen: r.seen, foldToBet: r.foldToBet);
+  }
+
+  /// 当前底池里还在的对手（能弃牌的、能跟注的）。
+  List<_VillainRead> _readsOf(GameEngine game, PlayerState me) => [
+        for (final p in game.active)
+          if (p.id != me.id) _reads[p.id],
+      ].whereType<_VillainRead>().toList();
+
+  /// 剥削因子：对手翻后爱弃牌就多诈唬，是跟注站就别装了。
+  double _exploitBluffFactor(GameEngine game, PlayerState me) {
+    final reads = _readsOf(game, me);
+    if (reads.isEmpty) return 1.0;
+    var sum = 0.0;
+    for (final r in reads) {
+      sum += r.station
+          ? 0.45
+          : (r.folder ? 1.45 : 0.55 + 0.9 * r.foldToBet);
+    }
+    return (sum / reads.length).clamp(0.35, 1.6);
+  }
+
+  /// 价值因子：对手爱跟注（跟注站）就打得更大、更粘。
+  double _exploitValueFactor(GameEngine game, PlayerState me) {
+    final reads = _readsOf(game, me);
+    if (reads.isEmpty) return 1.0;
+    var sum = 0.0;
+    for (final r in reads) {
+      sum += r.station ? 1.25 : (r.folder ? 0.9 : 1.0 + 0.3 * (0.45 - r.foldToBet));
+    }
+    return (sum / reads.length).clamp(0.85, 1.3);
+  }
+
   /// 登记一次诈唬开火：延续上一条街的诈唬线，或开一条新的。
   void _registerFire(Street street, _PlanKind kind) {
     final p = _plan;
@@ -219,6 +345,7 @@ class AiPlayer {
       _planHandId = handId;
       _plan = null; // 换手牌 = 计划作废
     }
+    _observe(game, me); // 顺手把对手的动作记进档案
     final spot = _Spot.of(game, me);
     final raw = game.street == Street.preflop
         ? _preflop(game, me, spot)
@@ -284,16 +411,20 @@ class AiPlayer {
       }
       final openable = openRange.contains(hand);
       if (toCall == 0) {
-        // 大盲免费看牌：只有强牌才主动加注（隔离溜入者 / 反偷盲）。
-        if (openable && spot.limpers > 0) {
-          return AiDecision(ActionType.raise,
-              amountTo: _openSize(game, bb, spot.limpers));
+        // 大盲免费看牌：前面有人溜入时用「隔离范围」加注（溜入者范围
+        // 又宽又弱，拿强牌就该把他们打散、把底池做大），否则过牌。
+        if (spot.limpers > 0) {
+          final iso = PreflopRanges.isolateLimpers.shifted(_p.openShift + w);
+          if (iso.contains(hand)) {
+            return AiDecision(ActionType.raise,
+                amountTo: _openSize(game, bb, spot.limpers, seat));
+          }
         }
         return const AiDecision(ActionType.check);
       }
       if (openable && me.stack > 0) {
         return AiDecision(ActionType.raise,
-            amountTo: _openSize(game, bb, spot.limpers));
+            amountTo: _openSize(game, bb, spot.limpers, seat));
       }
       // 溜入 / 补齐：位置越好、价格越便宜越愿意；跟注站几乎什么都跟。
       final cheap = toCall <= bb;
@@ -344,8 +475,7 @@ class AiPlayer {
     // 价值 3bet：没位置就加得重一点，压掉对手的跟注赔率。
     if (defense.valueThreeBet) {
       if (toCall >= me.stack) return const AiDecision(ActionType.raise);
-      return AiDecision(ActionType.raise,
-          amountTo: game.currentBet * (spot.inPosition ? 3 : 4));
+      return AiDecision(ActionType.raise, amountTo: _threeBetSize(game, spot));
     }
     // 轻 3bet（A5s、KQo 这类有阻断牌/成牌潜力的牌）：针对后位偷盲，
     // 既保护自己的范围，也让对手不敢随便开池。范围表给出「能不能打」，
@@ -374,9 +504,21 @@ class AiPlayer {
     return const AiDecision(ActionType.fold);
   }
 
-  /// 开池加注到 ~3bb（跟注站 2bb；每多一个溜入者多加 1bb）。
-  int _openSize(GameEngine game, int bb, int limpers) =>
-      (bb * (_p.openSizeBb + limpers)).round();
+  /// 开池加注的尺度：位置好可以开小一点（省筹码、还能拿下盲注），
+  /// 前位开大一点；每多一个溜入者多加 1bb（隔离他们，也把底池做大）。
+  int _openSize(GameEngine game, int bb, int limpers, Seat seat) =>
+      (bb * (_p.openSizeBb * PreflopRanges.openSizeFactor(seat) + limpers))
+          .round();
+
+  /// 3bet / 挤压尺度：有位置约 3 倍开池、没位置 4 倍（没位置要加得
+  /// 更多才能压掉对手的跟注赔率），每个已经进池的人再多加 1bb
+  /// （挤压时不能让跟注者用便宜价格跟进来），但不低于 3 倍当前注。
+  int _threeBetSize(GameEngine game, _Spot spot) {
+    final potBased = game.currentBet * (spot.inPosition ? 3 : 4);
+    final floor = game.currentBet * 3;
+    final callers = game.config.bigBlind * spot.limpers;
+    return max(max(potBased, floor) + callers, floor);
+  }
 
   // ---------- 翻牌后：读牌 → 读人 → 下注/跟注/加注 ----------
 
@@ -457,21 +599,55 @@ class AiPlayer {
     final multiway = spot.opponents >= 2;
     final texture = read.texture;
 
-    // 1) 怪兽牌：偶尔慢打（干面 + 单挑），其余大注收价值。
+    // 读人：对手是跟注站就少诈唬、多打价值；一压就跑就多开火。
+    final valueFactor = _exploitValueFactor(game, me);
+    // 第二枪选牌：转牌/河牌这张新牌是不是适合继续开火。
+    final barrel = _barrelFactor(game, read);
+    final river = game.street == Street.river;
+
+    // 0) 底池已经很大（SPR 很低）：强牌不用再分批下注，直接推进去。
+    if (spot.spr <= 2.5 && read.tier == HandTier.monster) {
+      return _jam(me);
+    }
+    if (spot.spr <= 1.5 && read.tier == HandTier.strong) {
+      return _jam(me);
+    }
+    // 1) 怪兽牌：偶尔慢打（干面 + 单挑 + 不是河牌），其余大注收价值。
     if (read.tier == HandTier.monster) {
-      if (texture.isDry && !multiway && _roll(0.22)) {
+      if (!river && texture.isDry && !multiway && _roll(0.22)) {
         return const AiDecision(ActionType.check);
       }
-      return _bet(game, me, 0.75);
+      // 河牌是最后一次收价值的机会：对手肯付钱就用超池（1.2 倍底池），
+      // 对一压就跑的对手不超池——小注换来跟注更划算。
+      if (river && !multiway && !_villainFoldsALot(game, me) && _roll(0.5)) {
+        return _bet(game, me, (1.2 * valueFactor).clamp(0.8, 1.5));
+      }
+      final frac =
+          _valueFrac(spot, texture.wetness > 0.55 ? 0.7 : 0.6) * valueFactor;
+      return _bet(game, me, frac.clamp(0.3, 1.1));
     }
-    // 2) 强牌：价值下注，湿面加大尺度保护。
+    // 2) 强牌：价值下注，湿面加大尺度保护；3bet 底池用小注（范围都很强，
+    //    下注是为了把筹码慢慢放进去，不是为了把人打跑）。
+    //    对跟注站下得更大（他会付钱），对爱弃牌的人下小一点。
+    //    没位置时有一部分要过牌：真人靠这些过牌保护自己的过牌范围，
+    //    也让对手不敢随便在后面偷池——这些牌会在面对下注时转成过牌-加注。
+    //    只在翻牌圈这么打：真人不会拿顶对连过两条街，把价值全漏掉。
+    if (read.tier == HandTier.strong &&
+        game.street == Street.flop &&
+        !spot.inPosition &&
+        !multiway &&
+        _roll(texture.isDry ? 0.3 : 0.18)) {
+      return const AiDecision(ActionType.check);
+    }
     if (read.tier == HandTier.strong) {
-      return _bet(game, me, texture.wetness > 0.55 ? 0.7 : 0.6);
+      final frac =
+          _valueFrac(spot, texture.wetness > 0.55 ? 0.7 : 0.6) * valueFactor;
+      return _bet(game, me, frac.clamp(0.3, 1.1));
     }
     // 3) 听牌：半诈唬（听牌转诈唬的第一步）。
     //    有弃牌率，被跟注也还有 outs，比纯空气诈唬合理得多。
     if (read.hasDraw && read.tier <= HandTier.medium) {
-      if (_roll(_semiBluffChance(read, spot))) {
+      if (_roll(_semiBluffChance(read, spot, barrel))) {
         _registerFire(game.street, _PlanKind.semiBluff);
         return _bet(game, me, 0.6);
       }
@@ -483,17 +659,62 @@ class AiPlayer {
       final thin = (multiway ? 0.2 : 0.45) *
           _aggression *
           _p.aggressionScale *
-          (texture.wetness > 0.6 ? 0.6 : 1.0);
-      if (_roll(thin)) return _bet(game, me, 0.45);
+          (texture.wetness > 0.6 ? 0.6 : 1.0) *
+          valueFactor;
+      if (_roll(thin)) return _bet(game, me, 0.45 * valueFactor);
       return const AiDecision(ActionType.check);
     }
     // 5) 没牌力：按计划延续诈唬，或找机会开火。
-    if (_roll(_bluffChance(game, spot, read))) {
+    if (_roll(_bluffChance(game, me, spot, read))) {
       _registerFire(game.street, _PlanKind.pureBluff);
-      return _bet(game, me, game.street == Street.river ? 0.7 : 0.55);
+      // 河牌拿着阻断牌（A / 坚果花阻断）时用超池诈唬：对手的强牌被
+      // 我们的阻断牌挡掉，超池更容易逼他弃牌。
+      // 坚果花阻断，或者 A 阻断 + 牌面三张同花：这两个是真人最爱的
+      // 超池诈唬牌——对手的强牌被挡住，超池逼他弃牌最划算。
+      final nutBluff = read.nutFlushBlocker ||
+          (read.hasAceBlocker && read.texture.maxSuitCount >= 3);
+      if (river && !multiway && nutBluff && _roll(0.35)) {
+        return _bet(game, me, 1.25);
+      }
+      // 阻断牌够硬就用偏重的尺度：弃牌率换来的收益比小注更高。
+      if (river && read.blockerScore >= 0.5 && _roll(0.4)) {
+        return _bet(game, me, 0.9);
+      }
+      return _bet(game, me, river ? 0.7 : 0.55);
     }
     _plan = null; // 过牌 = 放弃这条诈唬线
     return const AiDecision(ActionType.check);
+  }
+
+  /// 第二枪 / 第三枪的选牌：新发出来的这张牌对谁更有利？
+  ///
+  /// - 空白牌（比前面任何牌都小）几乎没帮到跟注方 → 继续开火收益高；
+  /// - 高张（尤其 A/K）更容易打中跟注方的范围 → 收手；
+  /// - 公对面、第三张同花、顺子面 → 对手成牌的可能性变大，别硬开；
+  /// - 自己这条街变强了（多了听牌或成了牌）→ 有底气接着打。
+  double _barrelFactor(GameEngine game, HandReading read) {
+    if (game.street != Street.turn && game.street != Street.river) return 1.0;
+    final board = game.board;
+    if (board.length < 4) return 1.0;
+    final prev = board.sublist(0, board.length - 1);
+    final card = board.last;
+    final prevMax = prev.map((c) => c.rank.value).reduce(max);
+
+    var f = 1.0;
+    final pairsPrev = prev.any((c) => c.rank == card.rank);
+    if (card.rank.value < prevMax && !pairsPrev) f *= 1.25; // 空白牌
+    if (card.rank.value > prevMax + 1) f *= 0.7; // 高张打中跟注方
+    if (pairsPrev) f *= 0.8; // 公对面：不容易被相信
+    if (read.texture.maxSuitCount >= 3) f *= 0.75; // 第三张同花
+    if (read.hasDraw || read.tier >= HandTier.medium) f *= 1.15;
+    return f.clamp(0.4, 1.5);
+  }
+
+  /// 对手是不是「一压就跑」：对他们没必要把价值打太满。
+  bool _villainFoldsALot(GameEngine game, PlayerState me) {
+    final reads = _readsOf(game, me);
+    if (reads.length != 1) return false; // 多人底池里总有人会跟
+    return reads.first.folder;
   }
 
   /// 位置调整：紧凶很在意位置，松凶在哪个位置都敢压。
@@ -503,13 +724,14 @@ class AiPlayer {
   }
 
   /// 半诈唬频率：听牌越强、位置越好、人越少越敢打。
-  double _semiBluffChance(HandReading read, _Spot spot) {
+  double _semiBluffChance(HandReading read, _Spot spot, double barrel) {
     var base = switch (read.drawOuts) {
       >= 12 => 0.72, // 花顺双听
       >= 8 => 0.55, // 花听 / 两头顺
       >= 4 => 0.26, // 卡顺
       _ => 0.0,
     };
+    base *= barrel; // 转牌/河牌发出来的牌适不适合继续开火
     if (read.nutFlushDraw) base += 0.06;
     base *= _p.semiBluffScale;
     base *= _bluffiness;
@@ -523,14 +745,20 @@ class AiPlayer {
   }
 
   /// 纯诈唬频率：位置、人数、牌面、对手牌线、是否延续计划。
-  double _bluffChance(GameEngine game, _Spot spot, HandReading read) {
+  double _bluffChance(
+      GameEngine game, PlayerState me, _Spot spot, HandReading read) {
     final river = game.street == Street.river;
-    var base = (river ? 0.22 : 0.36) * _p.bluffScale;
+    var base = (river ? 0.23 : 0.38) * _p.bluffScale;
     base *= _bluffiness;
+    // 读人：对手翻后爱弃牌就多开火，是跟注站就别浪费筹码。
+    base *= _exploitBluffFactor(game, me);
     // 有摊牌价值（弱成牌）别乱开火；中等牌更不该演空气。
     if (read.tier == HandTier.weak) base *= 0.35;
     if (read.tier >= HandTier.medium) base *= 0.1;
     base *= _positionFactor(spot, 1.2, 0.85);
+    // 诈唬选牌：真人不会拿「什么也没挡到」的牌乱开火。握着坚果花/顺子的
+    // 阻断牌（[HandReading.blockerScore]）时对手接不动，才值得加大频率。
+    base *= 0.85 + 0.5 * read.blockerScore;
     if (spot.opponents >= 3) {
       base *= 0.35;
     } else if (spot.opponents == 2) {
@@ -541,11 +769,15 @@ class AiPlayer {
     if (game.street == Street.flop && spot.isPreflopAggressor) {
       base *= read.texture.isDry ? 2.0 : 1.4;
     }
+    // 3bet 底池：大家范围都很强、筹码又浅，硬诈唬的弃牌率明显更低。
+    if (spot.isThreeBetPot) base *= 0.6;
     // 诈唬线延续：前一条街已经开过火，河牌没成牌也要能再开一枪。
     final plan = _plan;
     if (plan != null && game.street.index > plan.street.index) {
       base *= plan.kind == _PlanKind.semiBluff ? 2.0 : 1.4;
     }
+    // 第二枪选牌：发出来的牌对跟注方越没用，越值得接着开火。
+    base *= _barrelFactor(game, read);
     if (spot.checkedThrough) base *= 1.3; // 前一条街都过牌，牌面更可能没人要
     base *= 1 - 0.4 * spot.villainStrength;
     return base.clamp(0.0, 0.8);
@@ -559,16 +791,28 @@ class AiPlayer {
     final bigBet = spot.betSizeRel >= 0.7;
     final smallBet = spot.betSizeRel <= 0.35;
     final canRaise = spot.canRaise && spot.toCall < me.stack;
+    // 我这条街先过了牌 → 现在的加注就是过牌-加注，频率要明显提上去。
+    final checkRaise = spot.checkedThisStreet && canRaise;
+    // 转牌/河牌发出来的牌适不适合继续开火。
+    final barrel = _barrelFactor(game, read);
 
     // 1) 怪兽牌：价值加注；加注战里已经打太多就转为跟注。
+    //    底池相对筹码已经很大时，加注就是全下。
     if (read.tier == HandTier.monster) {
+      if (spot.spr <= 2.5 && canRaise) return _jam(me);
       if (!canRaise || spot.raisesThisStreet >= 3) {
         return const AiDecision(ActionType.call);
       }
       return _raise(game, me, 0.85);
     }
+    // 2) 强牌 + 低 SPR：筹码已经套进去了，没有弃牌的道理。
+    if (read.tier == HandTier.strong && spot.spr <= 1.5) {
+      if (canRaise) return _jam(me);
+      return const AiDecision(ActionType.call);
+    }
     // 2) 强牌：加注频率随街道递减（真人不会拿顶对在河牌乱加），
     //    面对大注/强线时以控池跟注为主，湿面偶尔也要懂得放手。
+    //    自己先过牌再面对下注 = 过牌-加注，频率明显更高。
     if (read.tier == HandTier.strong) {
       if (bigBet || spot.villainStrength > 0.8) {
         if (bigBet &&
@@ -589,14 +833,15 @@ class AiPlayer {
           _roll(base *
               _aggression *
               _p.aggressionScale *
-              (read.texture.wetness > 0.6 ? 0.8 : 1.0))) {
+              (read.texture.wetness > 0.6 ? 0.8 : 1.0) *
+              (checkRaise ? 1.8 : 1.0))) {
         return _raise(game, me, 0.8);
       }
       return const AiDecision(ActionType.call);
     }
     // 3) 听牌：半诈唬加注 or 按（隐含）赔率跟注 or 放弃。
     if (read.hasDraw) {
-      if (canRaise && _roll(_semiBluffRaiseChance(read, spot))) {
+      if (canRaise && _roll(_semiBluffRaiseChance(read, spot, barrel))) {
         _registerFire(game.street, _PlanKind.semiBluff);
         return _raise(game, me, 0.75);
       }
@@ -604,8 +849,11 @@ class AiPlayer {
     }
     // 4) 中等牌：按赔率跟注，面对大注/强线弃牌；小注时偶尔反击。
     if (read.tier == HandTier.medium) {
+      if (spot.spr <= 1.2) return const AiDecision(ActionType.call);
       var need = potOdds * (spot.villainStrength > 0.7 ? 1.3 : 1.1);
       if (bigBet) need *= 1.2;
+      // 没位置的中等牌很难兑现胜率（后面还有人、也控制不了底池大小）。
+      if (!spot.inPosition) need *= 1.12;
       final scary = bigBet &&
           spot.villainStrength > 0.8 &&
           read.texture.wetness > 0.6;
@@ -619,7 +867,7 @@ class AiPlayer {
       return const AiDecision(ActionType.fold);
     }
     // 5) 弱牌/空气：弃牌为主，极少数情况诈唬加注。
-    if (canRaise && _roll(_bluffRaiseChance(game, spot, read))) {
+    if (canRaise && _roll(_bluffRaiseChance(game, me, spot, read))) {
       _registerFire(game.street, _PlanKind.pureBluff);
       return _raise(game, me, 0.8);
     }
@@ -632,7 +880,7 @@ class AiPlayer {
     if (spot.toCall <= 0) return const AiDecision(ActionType.check);
     // 河牌听牌已死：不再跟注买牌，改为小频率诈唬（有阻断牌时更合理）。
     if (game.street == Street.river) {
-      if (spot.canRaise && _roll(_bluffRaiseChance(game, spot, read))) {
+      if (spot.canRaise && _roll(_bluffRaiseChance(game, me, spot, read))) {
         _registerFire(game.street, _PlanKind.pureBluff);
         return _raise(game, me, 0.75);
       }
@@ -656,7 +904,7 @@ class AiPlayer {
   }
 
   /// 听牌加注（半诈唬加注）的频率。
-  double _semiBluffRaiseChance(HandReading read, _Spot spot) {
+  double _semiBluffRaiseChance(HandReading read, _Spot spot, double barrel) {
     if (!spot.inPosition && spot.opponents > 1) return 0.03;
     var base = read.isComboDraw
         ? 0.35
@@ -665,24 +913,39 @@ class AiPlayer {
     base *= _bluffiness * _aggression;
     if (spot.opponents >= 2) base *= 0.4;
     if (spot.betSizeRel >= 0.8) base *= 0.4; // 大注不硬凑
+    // 第二枪选牌：发出来的牌帮不到对手才值得用听牌加注施压。
+    base *= barrel;
+    // 先过牌再对下注加注（过牌-加注）本来就是没位置时打听牌的主力。
+    if (spot.checkedThisStreet) base *= 1.5;
     return base.clamp(0.0, 0.5);
   }
 
   /// 诈唬加注（含河牌未成牌的最后一枪）的频率。
-  double _bluffRaiseChance(GameEngine game, _Spot spot, HandReading read) {
+  double _bluffRaiseChance(
+      GameEngine game, PlayerState me, _Spot spot, HandReading read) {
     if (spot.opponents > 1) return 0.0;
     var base = (game.street == Street.river ? 0.06 : 0.05) *
         _p.bluffRaiseScale;
     base *= _bluffiness;
+    base *= _exploitBluffFactor(game, me);
     if (spot.betSizeRel <= 0.35) base *= 2.0; // 对手小注 = 牌力偏弱
     if (spot.betSizeRel >= 0.75) base *= 0.35; // 大注通常是真牌，别硬顶
     if (spot.villainStrength > 0.7) base *= 0.4;
     if (spot.inPosition) base *= 1.3;
-    if (read.hasAceBlocker) base *= 1.2;
+    // 诈唬选牌：阻断牌越硬，被跟注的概率越低。
+    base *= 1 + 0.4 * read.blockerScore;
     return base.clamp(0.0, 0.2);
   }
 
   // ---------- 下注/加注额度 ----------
+
+  /// 价值下注的尺度：3bet 底池用小注（小 SPR，分批把筹码放进去）。
+  double _valueFrac(_Spot spot, double frac) =>
+      spot.isThreeBetPot ? frac * 0.7 : frac;
+
+  /// 筹码全下（引擎会按合法动作自动变成下注或加注）。
+  AiDecision _jam(PlayerState me) =>
+      AiDecision(ActionType.bet, amountTo: me.streetBet + me.stack);
 
   /// 下注到本街总额：底池的 [frac]。
   AiDecision _bet(GameEngine game, PlayerState me, double frac) {
@@ -739,6 +1002,9 @@ class _Spot {
   _Spot({
     required this.seat,
     required this.raiserSeat,
+    required this.checkedThisStreet,
+    required this.spr,
+    required this.isThreeBetPot,
     required this.toCall,
     required this.pot,
     required this.opponents,
@@ -761,6 +1027,18 @@ class _Spot {
 
   /// 翻前最后一个加注者在什么位置；没人加注时为 null。
   final Seat? raiserSeat;
+
+  /// 我在这条街上已经过牌了：此时面对下注再加注就是「过牌-加注」，
+  /// 是没位置时最有力的武器（真人靠它保护自己的过牌范围）。
+  final bool checkedThisStreet;
+
+  /// 筹码底池比：我的筹码 / 当前底池。SPR 越小越该「一把梭」，
+  /// 越大越该用位置和小注慢慢来。
+  final double spr;
+
+  /// 翻前被 3bet 及以上（含自己 3bet 被抓）的底池：范围都很强，
+  /// 诈唬的弃牌率明显更低，尺度也要相应调整。
+  final bool isThreeBetPot;
 
   final int toCall;
   final int pot;
@@ -818,8 +1096,12 @@ class _Spot {
 
     var raisesThisStreet = 0;
     var villainAgg = 0;
+    var checkedThisStreet = false;
     for (final a in actions) {
       if (a.street != game.street) continue;
+      if (a.actorId == me.id && a.type == ActionType.check) {
+        checkedThisStreet = true;
+      }
       final aggressive = a.type == ActionType.raise ||
           (a.type == ActionType.bet && game.street != Street.preflop);
       if (!aggressive) continue;
@@ -836,12 +1118,19 @@ class _Spot {
     } else {
       position = 0.25 + 0.75 * (((rel - 1 + n) % n) / (n - 1));
     }
+    // 翻后行动顺序是「按钮的下家先动、按钮最后动」。谁后面还有活人，
+    // 谁就没位置。注意不能按座位序号简单往后扫：单挑时按钮位在大盲
+    // 「前面」，那样会把按钮位算成没位置（其实它闭圈、最有利）。
+    final myOrder = rel == 0 ? n : rel; // 按钮位 = 最后一个行动
     var inPosition = true;
-    for (var d = 1; d < n; d++) {
-      final other = game.players[(meIdx + d) % n];
+    for (var i = 0; i < n; i++) {
+      final other = game.players[i];
       if (other.id == me.id || other.folded) continue;
-      inPosition = false;
-      break;
+      final otherRel = (i - game.buttonIndex + n) % n;
+      if ((otherRel == 0 ? n : otherRel) > myOrder) {
+        inPosition = false;
+        break;
+      }
     }
 
     // 前一条街是否全部过牌（没人下注）——转牌/河牌判断对手牌线时用。
@@ -855,6 +1144,7 @@ class _Spot {
 
     final betSizeRel =
         toCall > 0 ? toCall / max(bb, pot - toCall) : 0.0;
+    final spr = me.stack / max(pot, 1);
 
     var vs = switch (preflopRaises) {
       0 => 0.25,
@@ -869,6 +1159,9 @@ class _Spot {
     return _Spot(
       seat: PreflopRanges.seatOf(game, me),
       raiserSeat: raiserSeat,
+      checkedThisStreet: checkedThisStreet,
+      spr: spr,
+      isThreeBetPot: preflopRaises >= 2,
       toCall: toCall,
       pot: pot,
       opponents: game.active.length - 1,

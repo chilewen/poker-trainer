@@ -110,6 +110,8 @@ class HandReading {
     required this.nutFlushDraw,
     required this.backdoorFlush,
     required this.hasAceBlocker,
+    required this.nutFlushBlocker,
+    required this.straightBlocker,
     required this.overcards,
   });
 
@@ -200,6 +202,59 @@ class HandReading {
         ? flushOuts + straightOuts - 2 // 花顺双听有重叠（同花顺 outs）
         : flushOuts + straightOuts;
 
+    // ---------- 阻断牌：诈唬选牌 ----------
+    // 真人挑诈唬牌不是随便挑：优先拿那些「挡掉对手跟注范围里最强牌」的
+    // 底牌去开火。挡得越多，对手能接的强牌越少，这一枪越容易成功。
+    final boardSet = board.toSet();
+    final holeSet = hole.toSet();
+
+    // 坚果花阻断：牌面已经摆出 3 张以上同花（对手可能成花），而我手里
+    // 握着的正是这个花色「还没亮出来的最大一张」（通常是 A；A 在公共牌上
+    // 就是 K）——对手的坚果花被我挡掉了一半组合。
+    var nutFlushBlocker = false;
+    final suitAll = <Suit, Set<Card>>{};
+    for (final c in [...hole, ...board]) {
+      suitAll.putIfAbsent(c.suit, () => <Card>{}).add(c);
+    }
+    for (final e in suitAll.entries) {
+      final onBoard = e.value.where(boardSet.contains).length;
+      if (onBoard < 3) continue;
+      if (!holeSet.any((c) => c.suit == e.key)) continue;
+      // 该花色里「没亮出来」的最大一张，是不是在我手上？
+      for (var rank = Rank.ace.value; rank >= 2; rank--) {
+        final onBoardThisRank = e.value
+            .where((c) => c.rank.value == rank)
+            .any(boardSet.contains);
+        if (onBoardThisRank) continue;
+        if (e.value.any((c) => c.rank.value == rank && holeSet.contains(c))) {
+          nutFlushBlocker = true;
+        }
+        break; // 只看最大的那张
+      }
+    }
+
+    // 顺子阻断：牌面已经摆出 3 张以上的顺子料，我手里那张正好是补顺的牌。
+    var straightBlocker = false;
+    if (board.length >= 3) {
+      for (final window in _straightWindows) {
+        var onBoard = 0;
+        for (final r in window) {
+          if (boardRanks.contains(r)) onBoard++;
+        }
+        if (onBoard < 3) continue;
+        for (final r in window) {
+          if (!boardRanks.contains(r) && holeRanks.contains(r)) {
+            straightBlocker = true;
+          }
+        }
+      }
+    }
+
+    final overcards =
+        board.isEmpty ? 0 : hole.where((c) => c.rank.value > boardMax).length;
+    final hasAceBlocker = hole.any((c) => c.rank == Rank.ace) &&
+        !boardRanks.contains(Rank.ace.value);
+
     return HandReading._(
       texture: texture,
       category: category,
@@ -214,10 +269,10 @@ class HandReading {
       drawOuts: drawOuts,
       nutFlushDraw: nutFlushDraw,
       backdoorFlush: backdoorFlush,
-      hasAceBlocker: hole.any((c) => c.rank == Rank.ace) &&
-          !boardRanks.contains(Rank.ace.value),
-      overcards:
-          board.isEmpty ? 0 : hole.where((c) => c.rank.value > boardMax).length,
+      hasAceBlocker: hasAceBlocker,
+      nutFlushBlocker: nutFlushBlocker,
+      straightBlocker: straightBlocker,
+      overcards: overcards,
     );
   }
 
@@ -310,7 +365,25 @@ class HandReading {
 
   /// 手上是否有 A（挡掉对手 AA/AK，做诈唬时的阻断牌）。
   final bool hasAceBlocker;
+
+  /// 是否握着坚果花的阻断牌（对手的最大同花组合少了一半）。
+  final bool nutFlushBlocker;
+
+  /// 是否握着补顺的牌（挡掉对手的顺子组合）。
+  final bool straightBlocker;
+
   final int overcards;
+
+  /// 诈唬选牌分（0~1）：真人挑诈唬牌就是看这个——挡掉对手跟注范围里的
+  /// 强牌越多，这手「没牌的牌」越适合开火。
+  double get blockerScore {
+    var s = 0.0;
+    if (hasAceBlocker) s += 0.3;
+    if (nutFlushBlocker) s += 0.5;
+    if (straightBlocker) s += 0.3;
+    if (overcards >= 2) s += 0.15;
+    return s.clamp(0.0, 1.0);
+  }
 
   bool get hasFlushDraw => flushOuts > 0;
   bool get hasStraightDraw => straightOuts > 0;
@@ -332,6 +405,7 @@ class HandReading {
     if (hasFlushDraw) buf.write(nutFlushDraw ? ' ·坚果花听' : ' ·花听');
     if (hasStraightDraw) buf.write(' ·顺听$straightOuts');
     buf.write(' outs=$drawOuts');
+    if (blockerScore >= 0.6) buf.write(' ·阻断');
     return buf.toString();
   }
 }

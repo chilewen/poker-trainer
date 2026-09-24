@@ -48,6 +48,32 @@ void main() {
     expect(HandReading.of(_cs('Ad Kd'), _cs('Qd 7d 2c 5h 9s')).drawOuts, 0);
   });
 
+  test('读牌：阻断牌（诈唬选牌用）', () {
+    // 牌面三张方片，手里握着 A♦：对手的坚果花被挡掉。
+    final nut = HandReading.of(_cs('Ad 6c'), _cs('Kd 8d 2c 4h 9d'));
+    expect(nut.nutFlushBlocker, isTrue);
+    expect(nut.blockerScore, greaterThan(0.7));
+
+    // 手里是 J♦（A♦ 还在牌堆里）→ 什么都没挡掉。
+    final low = HandReading.of(_cs('Jd 6c'), _cs('Kd 8d 2c 4h 9d'));
+    expect(low.nutFlushBlocker, isFalse);
+    expect(low.blockerScore, 0.0);
+
+    // A♦ 已经在公共牌上，手里的 K♦ 就成了坚果花阻断。
+    expect(HandReading.of(_cs('Ah 6c'), _cs('Kh 8h 2h')).nutFlushBlocker,
+        isTrue);
+    // 公共牌只有两张同花：谈不上坚果花阻断。
+    expect(HandReading.of(_cs('Ah 6c'), _cs('Kd 8d 2c 4h 9d')).nutFlushBlocker,
+        isFalse);
+
+    // 顺子阻断：牌面 9-8-7，手里的 T 正好补顺。
+    expect(HandReading.of(_cs('10d 6c'), _cs('9h 8c 7d')).straightBlocker,
+        isTrue);
+
+    // 空气牌什么都没挡到。
+    expect(HandReading.of(_cs('7c 2d'), _cs('As Kd Qc')).blockerScore, 0.0);
+  });
+
   test('翻前范围：位置越靠后开池越宽，大盲防守最宽', () {
     final ep = PreflopRanges.open(Seat.ep);
     final btn = PreflopRanges.open(Seat.btn);
@@ -106,6 +132,276 @@ void main() {
     final btn = g.players[g.buttonIndex];
     expect(PreflopRanges.seatOf(g, btn), Seat.btn);
     expect(ai.decide(g, btn).type, ActionType.raise, reason: '按钮位 A4s 开池');
+  });
+
+  test('位置：单挑时按钮位知道自己在闭圈（顶对直接下注，不慢打）', () {
+    // 单挑的翻后顺序是「大盲先动、按钮最后动」，按钮位是有位置的一方。
+    // 曾经把按钮位算成没位置，导致它拿顶对也在慢打。
+    for (var seed = 0; seed < 20; seed++) {
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: Random(seed),
+      )
+        ..addPlayer('ai', 'AI') // 按钮 / 小盲
+        ..addPlayer('hero', '我'); // 大盲
+      g.startHand(
+        holeOverride: {'ai': _cs('Ah Qd'), 'hero': _cs('3c 2h')},
+        boardOverride: _cs('Qh 7d 2c'),
+      );
+      final ai = AiPlayer(AiStyle.tightAggressive, random: Random(seed));
+      var flopActed = false;
+      var bet = false;
+      var guard = 0;
+      while (!g.handOver && guard++ < 100) {
+        final p = g.pendingAction();
+        if (p.player.id == 'ai') {
+          final d = ai.decide(g, p.player);
+          if (g.street == Street.flop) {
+            flopActed = true;
+            bet = d.type == ActionType.bet;
+            break;
+          }
+          g.apply('ai', d.type, amount: d.amountTo);
+          continue;
+        }
+        final legal = p.actions;
+        final wants = legal.any((a) => a.type == ActionType.call)
+            ? ActionType.call
+            : ActionType.check;
+        g.apply('hero', wants);
+      }
+      expect(flopActed, isTrue);
+      expect(bet, isTrue, reason: '有位置的顶对应该直接下注');
+    }
+  });
+
+  test('读人：AI 会把对手「见注就弃」记进档案，并据此调整打法', () {
+    final ai = AiPlayer(AiStyle.tightAggressive, random: Random(7));
+    // 英雄坐按钮位（翻前先动），AI 坐大盲（翻后先动）。
+    // 英雄翻后见注就弃，AI 应该很快读出「一压就跑」。
+    final read = <String, int>{};
+    for (var i = 0; i < 30; i++) {
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: Random(1000 + i),
+      )
+        ..addPlayer('hero', '我')
+        ..addPlayer('ai', 'AI');
+      g.startHand(
+        holeOverride: {'ai': _cs('7h 2c'), 'hero': _cs('9c 8d')},
+        boardOverride: _cs('As Kd Qc'),
+      );
+      var guard = 0;
+      while (!g.handOver && guard++ < 200) {
+        final p = g.pendingAction();
+        if (p.player.id == 'ai') {
+          final d = ai.decide(g, p.player);
+          if (g.street == Street.flop && d.type == ActionType.bet) {
+            read['bet'] = (read['bet'] ?? 0) + 1;
+          }
+          g.apply('ai', d.type, amount: d.amountTo);
+          continue;
+        }
+        final legal = p.actions;
+        final facing = legal.any((a) => a.type == ActionType.call);
+        final wants = g.street == Street.preflop
+            ? ActionType.call
+            : (facing ? ActionType.fold : ActionType.check);
+        g.apply(
+            'hero',
+            legal.any((a) => a.type == wants)
+                ? wants
+                : legal.first.type);
+      }
+    }
+    final r = ai.readOf('hero');
+    expect(r, isNotNull, reason: 'AI 应该已经观察过英雄');
+    expect(r!.hands, greaterThan(20));
+    expect(r.seen, greaterThan(5), reason: '攒到了足够「面对下注」的样本');
+    expect(r.foldToBet, 1.0, reason: '英雄翻后见注就弃 = 弃牌率 100%');
+  });
+
+  test('第二枪选牌：转牌发空白牌继续开火，发 A 就收手', () {
+    // 转牌这张新牌对谁更有利，决定还要不要开第二枪。
+    double betRate(String turn) {
+      var fire = 0, total = 0;
+      for (var seed = 0; seed < 200; seed++) {
+        final rnd = Random(seed);
+        final g = GameEngine(
+          config: const GameConfig(
+              startingStack: 10000, smallBlind: 50, bigBlind: 100),
+          random: rnd,
+        )
+          ..addPlayer('ai', 'AI')
+          ..addPlayer('hero', '我');
+        final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+        g.startHand(
+          holeOverride: {'ai': _cs('9h 8h'), 'hero': _cs('3c 2h')},
+          boardOverride: _cs('Ks 7d 2c $turn'),
+        );
+        var guard = 0;
+        var recorded = false;
+        while (!g.handOver && guard++ < 300) {
+          final p = g.pendingAction();
+          if (p.player.id == 'ai') {
+            final d = ai.decide(g, p.player);
+            if (!recorded && g.street == Street.turn) {
+              recorded = true;
+              total++;
+              if (d.type == ActionType.bet) fire++;
+            }
+            g.apply('ai', d.type, amount: d.amountTo);
+            continue;
+          }
+          final legal = p.actions;
+          final facing = legal.any((a) => a.type == ActionType.call);
+          final wants = facing ? ActionType.call : ActionType.check;
+          g.apply('hero',
+              legal.any((a) => a.type == wants) ? wants : legal.first.type);
+        }
+      }
+      return total == 0 ? 0 : fire / total;
+    }
+
+    final blank = betRate('3h'); // 比 K 小的空白牌
+    final ace = betRate('Ah'); // 高张 A：更容易打中跟注方
+    expect(blank, greaterThan(ace + 0.05),
+        reason: '转牌空白牌继续开火、发 A 就收手 '
+            '(${(100 * blank).toStringAsFixed(0)}% vs '
+            '${(100 * ace).toStringAsFixed(0)}%)');
+  });
+
+  test('诈唬选牌：握着坚果花阻断牌时，河牌更敢开火', () {
+    double betRate(String hole, String board) {
+      var fire = 0, total = 0;
+      for (var seed = 0; seed < 200; seed++) {
+        final rnd = Random(seed);
+        final g = GameEngine(
+          config: const GameConfig(
+              startingStack: 10000, smallBlind: 50, bigBlind: 100),
+          random: rnd,
+        )
+          ..addPlayer('ai', 'AI')
+          ..addPlayer('hero', '我');
+        final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+        g.startHand(
+          holeOverride: {'ai': _cs(hole), 'hero': _cs('3c 2h')},
+          boardOverride: _cs(board),
+        );
+        var guard = 0;
+        var recorded = false;
+        while (!g.handOver && guard++ < 300) {
+          final p = g.pendingAction();
+          if (p.player.id == 'ai') {
+            final d = ai.decide(g, p.player);
+            if (!recorded && g.street == Street.river) {
+              recorded = true;
+              total++;
+              if (d.type == ActionType.bet) fire++;
+            }
+            g.apply('ai', d.type, amount: d.amountTo);
+            continue;
+          }
+          final legal = p.actions;
+          final facing = legal.any((a) => a.type == ActionType.call);
+          final wants = facing ? ActionType.call : ActionType.check;
+          g.apply('hero',
+              legal.any((a) => a.type == wants) ? wants : legal.first.type);
+        }
+      }
+      return total == 0 ? 0 : fire / total;
+    }
+
+    // 同一块牌面、同样是「打不中」的垃圾牌，只差一张 A♦。
+    final nut = betRate('Ad 6c', 'Kd 8d 2c 4h 9d');
+    final plain = betRate('Jc 6c', 'Kd 8d 2c 4h 9d');
+    expect(nut, greaterThan(plain + 0.05),
+        reason: '挡掉对手坚果花的那张牌能让它多开火 '
+            '(${(100 * nut).toStringAsFixed(0)}% vs '
+            '${(100 * plain).toStringAsFixed(0)}%)');
+  });
+
+  test('河牌怪兽牌：会用超池收价值，但面对「一压就跑」的对手不超池', () {
+    // AI 拿 77 在 K 高牌面（转牌前都是空气），到河牌击中三条。
+    ({double overbetRate, double avgFrac, int bets}) run(
+        {required bool villainFolds}) {
+      final ai = AiPlayer(AiStyle.tightAggressive, random: Random(7));
+      ({bool bet, double frac}) play(int seed, String hole, String board,
+          bool record) {
+        final g = GameEngine(
+          config: const GameConfig(
+              startingStack: 10000, smallBlind: 50, bigBlind: 100),
+          random: Random(seed),
+        )
+          ..addPlayer('hero', '我')
+          ..addPlayer('ai', 'AI');
+        g.startHand(
+          holeOverride: {'ai': _cs(hole), 'hero': _cs('3c 2h')},
+          boardOverride: _cs(board),
+        );
+        var bet = false;
+        var frac = 0.0;
+        var guard = 0;
+        while (!g.handOver && guard++ < 300) {
+          final p = g.pendingAction();
+          if (p.player.id == 'ai') {
+            final d = ai.decide(g, p.player);
+            if (record && g.street == Street.river && !bet) {
+              bet = d.type == ActionType.bet;
+              if (bet) {
+                final pot = g.potTotal();
+                frac = pot == 0
+                    ? 0
+                    : ((d.amountTo ?? 0) - p.player.streetBet) / pot;
+              }
+            }
+            g.apply('ai', d.type, amount: d.amountTo);
+            continue;
+          }
+          final legal = p.actions;
+          final facing = legal.any((a) => a.type == ActionType.call);
+          final wants = !facing
+              ? ActionType.check
+              : (villainFolds ? ActionType.fold : ActionType.call);
+          g.apply('hero',
+              legal.any((a) => a.type == wants) ? wants : legal.first.type);
+        }
+        return (bet: bet, frac: frac);
+      }
+
+      // 热身：让 AI 记住这位对手会不会跑。
+      for (var i = 0; i < 80; i++) {
+        play(1000 + i, '4h 3h', 'Qd 7d 2c', false);
+      }
+
+      var bets = 0, overs = 0;
+      var sum = 0.0;
+      for (var i = 0; i < 300; i++) {
+        final r = play(700 + i, '7h 7d', '2c Kd 9s 3h 7s', true);
+        if (!r.bet) continue;
+        bets++;
+        sum += r.frac;
+        if (r.frac > 1.0) overs++;
+      }
+      return (
+        overbetRate: bets == 0 ? 0.0 : overs / bets,
+        avgFrac: bets == 0 ? 0.0 : sum / bets,
+        bets: bets,
+      );
+    }
+
+    final station = run(villainFolds: false);
+    final folder = run(villainFolds: true);
+    expect(station.bets, greaterThan(30));
+    expect(station.overbetRate, greaterThan(0.25),
+        reason: '对跟注站会用超池压价值 '
+            '(${(100 * station.overbetRate).toStringAsFixed(0)}%，'
+            '平均 ${station.avgFrac.toStringAsFixed(2)} 倍底池)');
+    expect(station.avgFrac, greaterThan(1.0));
+    expect(folder.overbetRate, 0.0,
+        reason: '对手见注就弃时不超池，改用小注换跟注');
   });
 
   test('补码：补满至起始买入', () {

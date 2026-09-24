@@ -121,8 +121,10 @@ void main() {
       _sample(hole: '9h 8h', heroHole: '3c 2h', board: '7s 6h 2d', target: Street.flop));
   show('卡顺 76 on A92',
       _sample(hole: '7h 6h', heroHole: '3c 2h', board: 'As 9d 2c', target: Street.flop));
-  show('空气 32o on AKQ',
-      _sample(hole: '3h 2h', heroHole: '9c 8d', board: 'As Kd Qc', target: Street.flop));
+  // 用 87s 而不是 72o：翻前范围表里的牌才会真的走到翻牌圈，
+  // 否则 AI 翻前就弃了、这一格永远是空的（87s 在 AKQ 上仍是纯空气）。
+  show('空气 87s on AKQ',
+      _sample(hole: '8h 7h', heroHole: '9c 8d', board: 'As Kd Qc', target: Street.flop));
   show('三条 99 on 9s6h2d',
       _sample(hole: '9h 9d', heroHole: '3c 2h', board: '9s 6h 2d', target: Street.flop));
   show('顶对顶踢 AQ on Qh7d2c',
@@ -137,10 +139,10 @@ void main() {
       _sample(hole: '7h 6h', heroHole: '3c 2h', board: 'As 9d 2c', target: Street.flop,
           heroFirst: {Street.flop: (type: ActionType.bet, frac: 0.5)}));
   show('空气 面对方 pot bet',
-      _sample(hole: '3h 2h', heroHole: '9c 8d', board: 'As Kd Qc', target: Street.flop,
+      _sample(hole: '8h 7h', heroHole: '9c 8d', board: 'As Kd Qc', target: Street.flop,
           heroFirst: {Street.flop: (type: ActionType.bet, frac: 1.0)}));
   show('底对 面对方 pot bet',
-      _sample(hole: 'Ah 2d', heroHole: '3c 4h', board: 'Qh 7d 2c', target: Street.flop,
+      _sample(hole: 'Ah 2h', heroHole: '3c 4h', board: 'Qh 7d 2c', target: Street.flop,
           heroFirst: {Street.flop: (type: ActionType.bet, frac: 1.0)}));
 
   print('');
