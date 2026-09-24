@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:poker_trainer/engine/game.dart';
 import 'package:poker_trainer/engine/types.dart';
+import 'package:poker_trainer/features/game/data/table_session.dart';
+import 'package:poker_trainer/features/game/domain/ai_player.dart';
 import 'package:poker_trainer/features/game/presentation/game_screen.dart';
 import 'package:poker_trainer/features/game/presentation/table_controller.dart';
 
@@ -49,16 +51,19 @@ void main() {
     // 本局累计也一起显示（还没打完任何一手，本局 = 本手）。
     expect(find.text('本局 -50'), findsOneWidget);
 
-    // 这一条不能压到标题那一行：药丸声明的高度不够时，它会往上顶进
-    // AppBar 的标题区（中文字体比测试字体更高，真机上更明显）。
-    final strip = find.byWidgetPredicate(
-        (w) => w.runtimeType.toString() == '_NetStrip');
+    // 两个数字要和桌名挤在同一行（不再单独占一条），顺序是桌名在前。
     final titleRect = tester.getRect(find.textContaining('实战 单挑 · 第 1 手'));
-    final stripRect = tester.getRect(strip);
-    expect(stripRect.top, greaterThanOrEqualTo(titleRect.bottom),
-        reason: '输赢条要落在标题下面，不能盖住桌名/手数');
-    expect(stripRect.height, lessThanOrEqualTo(30),
-        reason: '高度别超过 AppBar.bottom 声明的那 30px');
+    final handRect = tester.getRect(find.text('本手 -50'));
+    final sessRect = tester.getRect(find.text('本局 -50'));
+    expect((handRect.center.dy - titleRect.center.dy).abs(), lessThan(2),
+        reason: '本手要和标题同一行');
+    expect((sessRect.center.dy - titleRect.center.dy).abs(), lessThan(2),
+        reason: '本局要和标题同一行');
+    expect(handRect.left, greaterThanOrEqualTo(titleRect.right),
+        reason: '数字排在桌名右边');
+    expect(sessRect.left, greaterThan(handRect.right),
+        reason: '本局排在本手右边');
+    expect(tester.takeException(), isNull, reason: '这一行不能溢出');
 
     // 弃牌走完这一手：数字换成最终结果，和结算条里的「本手输赢」一致。
     table.heroAct(ActionType.fold);
@@ -71,5 +76,68 @@ void main() {
     expect(find.textContaining('第 1 手'), findsOneWidget,
         reason: '结算时手数还停在刚打完的这一手');
     expect(find.text('本手 -50'), findsOneWidget);
+  });
+
+  testWidgets('续局后标题仍然不带盲注', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final table =
+        TableController(random: Random(5), aiThinkTime: Duration.zero);
+    await tester.pumpWidget(ProviderScope(
+      overrides: [tableProvider.overrideWith((ref) => table)],
+      child: MaterialApp(
+        theme: ThemeData(splashFactory: InkRipple.splashFactory),
+        home: const GameScreen(autoStart: false),
+      ),
+    ));
+
+    // 冷启动「继续上局」：以前这里直接拿存档里的完整 label 当桌名，
+    // 标题就又变成「实战 9人桌 · 50/100 · 第 1 手」。
+    table.savedSession = TableSession(
+      id: 'table-1',
+      label: '实战 9人桌 · 50/100',
+      name: '实战 9人桌',
+      config: config,
+      styles: [AiStyle.tightAggressive.name, AiStyle.loosePassive.name],
+      seats: const [
+        SessionSeat(id: 'hero', name: '我', stack: 10000),
+        SessionSeat(id: 'ai0', name: '紧凶·AI1', stack: 10000),
+        SessionSeat(id: 'ai1', name: '松被动·AI2', stack: 10000),
+      ],
+      buttonIndex: 0,
+      handsPlayed: 0,
+      savedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+    );
+    expect(table.resumeSession(), isTrue);
+    // 恢复后 AI 可能先行动：把这一手走完，别给测试留等待计时器。
+    var guard = 0;
+    while (!table.engine.handOver && guard++ < 60) {
+      if (table.heroToAct) table.heroAct(ActionType.fold);
+      await tester.pump(const Duration(milliseconds: 1));
+    }
+
+    expect(find.textContaining('实战 9人桌 · 第 1 手'), findsOneWidget);
+    expect(find.textContaining('50/100'), findsNothing);
+  });
+
+  testWidgets('窄屏 320：两个数字和桌名挤在同一行也不溢出', (tester) async {
+    tester.view.physicalSize = const Size(320, 568);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final table = await pumpTable(tester);
+    // 赢一大把的极端数字：本手 +12800（缩写成 1.3万）、本局 -34500。
+    expect(find.text('本手 -50'), findsOneWidget);
+    expect(find.text('本局 -50'), findsOneWidget);
+
+    final titleRect =
+        tester.getRect(find.textContaining('实战 单挑 · 第 1 手'));
+    final handRect = tester.getRect(find.text('本手 -50'));
+    expect(handRect.left, greaterThanOrEqualTo(titleRect.right),
+        reason: '窄屏上也要把两个数字摆在桌名右边');
+    expect(tester.takeException(), isNull, reason: '窄屏这一行不能溢出');
+    expect(table.heroHandNet, -50);
   });
 }

@@ -158,6 +158,7 @@ class TableController extends ChangeNotifier {
     final session = TableSession(
       id: _sessionId ??= 'table-${DateTime.now().microsecondsSinceEpoch}',
       label: tableLabel,
+      name: tableName,
       config: _config,
       styles: [
         for (final p in engine.players)
@@ -212,7 +213,8 @@ class TableController extends ChangeNotifier {
     _generation++;
     replayingHand = null;
     tableLabel = s.label;
-    tableName = s.label;
+    // 标题用不带盲注的桌名：老存档没有 'name' 时 TableSession 会从 label 里剪。
+    tableName = s.name;
     _config = s.config;
     handsPlayed = s.handsPlayed;
     _heroNetTotal = s.heroNet;

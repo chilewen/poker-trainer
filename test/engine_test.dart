@@ -2414,6 +2414,7 @@ void main() {
     final session = TableSession(
       id: 'table-1',
       label: '实战 6人桌 · 50/100',
+      name: '实战 6人桌',
       config: const GameConfig(
           startingStack: 10000, smallBlind: 50, bigBlind: 100),
       styles: [AiStyle.tightAggressive.name, AiStyle.loosePassive.name],
@@ -2468,6 +2469,7 @@ void main() {
     final session = TableSession(
       id: 'table-2',
       label: '单挑 · 松凶',
+      name: '单挑 · 松凶',
       config: const GameConfig(
           startingStack: 2000, smallBlind: 10, bigBlind: 20),
       styles: [AiStyle.looseAggressive.name],
@@ -2752,6 +2754,55 @@ void main() {
     expect(t.heroHandNet, t.lastHand!.netResult[TableController.heroId],
         reason: '标题里的数字必须等于结算数值');
     expect(t.handsPlayed, 1);
+  });
+
+  test('继续上局：标题桌名跟着存档回来，不带盲注', () async {
+    final dir = Directory.systemTemp.createTempSync('pt_session_name');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final file = File('${dir.path}/session.json');
+    const config =
+        GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
+
+    final first = TableController(
+      sessionStore: TableSessionStore(file),
+      random: Random(31),
+      aiThinkTime: Duration.zero,
+    );
+    // 大厅/存档用带盲注的完整标签，对局页标题只用桌名。
+    first.startRealTable(name: '实战 9人桌', config: config, playerCount: 3);
+    expect(first.tableLabel, '实战 9人桌 · 50/100');
+    expect(first.tableName, '实战 9人桌');
+    await first.persistSession();
+
+    // 存档里单独存了不带盲注的桌名，恢复时不至于拿 label 当标题。
+    final raw =
+        jsonDecode(await file.readAsString()) as Map<String, Object?>;
+    expect(raw['name'], '实战 9人桌');
+    expect(raw['label'], '实战 9人桌 · 50/100');
+
+    final cold = TableController(
+      sessionStore: TableSessionStore(file),
+      random: Random(32),
+      aiThinkTime: Duration.zero,
+    );
+    await cold.loadSession();
+    expect(cold.resumeSession(), isTrue);
+    expect(cold.tableName, '实战 9人桌', reason: '续局后标题还是不带盲注');
+    expect(cold.tableLabel, '实战 9人桌 · 50/100',
+        reason: '大厅卡片仍然要能看到盲注');
+
+    // 老存档没有 'name' 字段：从 label 里把盲注后缀剪掉，别让标题带上 50/100。
+    final legacy = Map<String, Object?>.from(raw)..remove('name');
+    await file.writeAsString(jsonEncode(legacy));
+    final legacyCold = TableController(
+      sessionStore: TableSessionStore(file),
+      random: Random(33),
+      aiThinkTime: Duration.zero,
+    );
+    await legacyCold.loadSession();
+    expect(legacyCold.savedSession!.name, '实战 9人桌');
+    expect(legacyCold.resumeSession(), isTrue);
+    expect(legacyCold.tableName, '实战 9人桌');
   });
 
   test('本局累计：本手跟着筹码走，本局跟着存档走', () async {

@@ -99,15 +99,8 @@ class _GameScreenState extends ConsumerState<GameScreen> {
         backgroundColor: _bg,
         foregroundColor: Colors.white70,
         elevation: 0,
+        // 桌名、手数、本手/本局输赢都在这一行里（不再单开一条）。
         title: _TableTitle(table: table),
-        // 标题下面一条：本手 / 本局输赢。标题那一行放不下两个数字
-        // （窄屏还要给返回键和两个按钮留位置），单开一条更清楚。
-        // 高度要留够：药丸本身（字号 12 + 上下内边距 + 描边）约 23px，
-        // 加下边距已经超过 24——声明小了这条会往上压住标题那一行。
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(30),
-          child: _NetStrip(table: table),
-        ),
         actions: [
           IconButton(
             tooltip: '行动路线',
@@ -930,10 +923,12 @@ class _ActionBarState extends State<_ActionBar> {
   }
 }
 
-/// 顶部标题：桌名 · 第几手。
+/// 顶部标题一行：桌名 · 第几手 + 本手输赢 + 本局输赢。
 ///
-/// 盲注级别不在导航栏里显示（大厅卡片和存档里已经有），数字都在下面
-/// 那条 [_NetStrip] 上。
+/// 盲注级别不在导航栏里显示（大厅卡片和存档里已经有）。
+/// 「本手」是这一手牌的输赢（进行中就是实时值，打完就是最终结果，和结算
+/// 条里的「本手赢利/亏损」是同一个数）；「本局」是坐在这张桌上从头到现在
+/// 的累计。数字窄屏也要放得下，所以桌名是弹性宽度（放不下先压缩它）。
 class _TableTitle extends StatelessWidget {
   const _TableTitle({required this.table});
 
@@ -946,42 +941,28 @@ class _TableTitle extends StatelessWidget {
     final handNo = table.engine.handOver
         ? (table.handsPlayed < 1 ? 1 : table.handsPlayed)
         : table.handsPlayed + 1;
-    return Text(
-      // 还没发牌时只写桌名，发下来就一直带手数（第 1 手也显示，
-      // 以前要等第一手打完才冒出手数，标题会突然变长）。
-      table.lastHand == null
-          ? table.tableName
-          : '${table.tableName} · 第 $handNo 手',
-      overflow: TextOverflow.ellipsis,
-      style: const TextStyle(fontSize: 15),
-    );
-  }
-}
-
-/// 标题下面那条：本手输赢 + 本局输赢。
-///
-/// 「本手」是这一手牌的输赢（进行中就是实时值，打完就是最终结果，
-/// 和结算条里的「本手赢利/亏损」是同一个数）；「本局」是坐在这张桌上
-/// 从头到现在的累计。
-class _NetStrip extends StatelessWidget {
-  const _NetStrip({required this.table});
-
-  final TableController table;
-
-  @override
-  Widget build(BuildContext context) {
     final hand = table.heroHandNet;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 5),
-      child: Row(
-        children: [
-          if (hand != null) ...[
-            _NetChip(label: '本手', value: hand),
-            const SizedBox(width: 6),
-          ],
-          _NetChip(label: '本局', value: table.heroSessionNet),
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Flexible(
+          child: Text(
+            // 还没发牌时只写桌名，发下来就一直带手数（第 1 手也显示，
+            // 以前要等第一手打完才冒出手数，标题会突然变长）。
+            table.lastHand == null
+                ? table.tableName
+                : '${table.tableName} · 第 $handNo 手',
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 15),
+          ),
+        ),
+        const SizedBox(width: 8),
+        if (hand != null) ...[
+          _NetChip(label: '本手', value: hand),
+          const SizedBox(width: 4),
         ],
-      ),
+        _NetChip(label: '本局', value: table.heroSessionNet),
+      ],
     );
   }
 }
@@ -1002,16 +983,17 @@ class _NetChip extends StatelessWidget {
             : const Color(0xFF8A9299);
     final sign = value > 0 ? '+' : '';
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      // 字号和内边距都压过：两个数字要和桌名挤在同一行，窄屏才放得下。
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.16),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(9),
         border: Border.all(color: color.withValues(alpha: 0.45)),
       ),
       child: Text(
         '$label $sign${compactChips(value)}',
         style: TextStyle(
-          fontSize: 12,
+          fontSize: 11,
           fontWeight: FontWeight.w600,
           color: color,
         ),
