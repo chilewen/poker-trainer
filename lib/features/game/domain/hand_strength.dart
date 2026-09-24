@@ -299,18 +299,27 @@ class HandReading {
     required List<int> holePairsBoard,
   }) {
     final boardMax = sortedBoard.isEmpty ? 0 : sortedBoard.first;
+    // 牌面已经摆出三张以上同花：成花已经成立。顺子、三条、两对这类
+    // 「不是同花的大牌」随时被任何两张同花盖过，真人这时以跟注为主、
+    // 不会无脑打光，所以从怪兽牌降一档（同花/葫芦/四条不受影响）。
+    final flushOnBoard = texture.maxSuitCount >= 3;
     switch (category) {
       case HandCategory.straightFlush:
       case HandCategory.quads:
       case HandCategory.fullHouse:
       case HandCategory.flush:
-      case HandCategory.straight:
         return HandTier.monster;
+      case HandCategory.straight:
+        return flushOnBoard ? HandTier.strong : HandTier.monster;
       case HandCategory.trips:
         // 口袋对中三条 = set，比「底牌配公共对」的三条强得多。
-        return pocketPair ? HandTier.monster : HandTier.strong;
+        if (!pocketPair) return HandTier.strong;
+        return flushOnBoard ? HandTier.strong : HandTier.monster;
       case HandCategory.twoPair:
-        if (holePairsBoard.length >= 2) return HandTier.monster; // 两张底牌都中
+        // 两张底牌都中：一般是很硬的成牌；但同花面上一降档就只是抓牌。
+        if (holePairsBoard.length >= 2) {
+          return flushOnBoard ? HandTier.strong : HandTier.monster;
+        }
         if (pocketPair && texture.paired) {
           return pairRank > boardMax ? HandTier.strong : HandTier.medium;
         }

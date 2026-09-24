@@ -224,14 +224,16 @@ class _VillainRead {
 /// 3. 用「受限对手范围」的蒙特卡洛胜率代替「对随机牌」的胜率
 ///    （对手范围同样按他翻前的位置与动作来收紧），
 ///    再和底池赔率、隐含赔率、位置、下注尺度结合；
-/// 4. 听牌主动半诈唬（有弃牌率也保有成牌概率），没成牌就按计划
+/// 4. 干面 + 翻前加注者 = 真人的「范围小注」：不看自己有没有后路，
+///    都用 1/3 池把手里的牌整个铺出去（湿面才回到挑牌打）；
+/// 5. 听牌主动半诈唬（有弃牌率也保有成牌概率），没成牌就按计划
 ///    在转牌/河牌决定继续开火还是放弃，而不是无脑跟注到底；
-/// 5. 全程「读人」，而且两边都用：把每个对手翻后面对下注的弃牌/跟注/加注、
+/// 6. 全程「读人」，而且两边都用：把每个对手翻后面对下注的弃牌/跟注/加注、
 ///    以及他自己主动开火的频率记进档案（[_VillainRead]）——
 ///    我们要下注时看他的弃牌倾向（对一压就跑的多诈唬、对跟注站少诈唬多收
 ///    价值），他下注我们要不要跟时看他的进攻性（爱开火的抓得宽，闷声的
 ///    突然开火就弃）——这才是真人最像人的那部分；
-/// 6. 诈唬也会「选牌」：只挑挡掉对手强牌的那几张去开火
+/// 7. 诈唬也会「选牌」：只挑挡掉对手强牌的那几张去开火
 ///    （[HandReading.blockerScore]：坚果花阻断 / 补顺的牌 / A 阻断），
 ///    拿什么都没挡到的牌就老实过牌——真人和按钮精灵最大的区别就在这。
 class AiPlayer {
@@ -774,6 +776,12 @@ class AiPlayer {
     }
     // 1) 怪兽牌：偶尔慢打（干面 + 单挑 + 不是河牌），其余大注收价值。
     if (read.tier == HandTier.monster) {
+      // 领先下注（donk）这条线例外：没位置、又不是翻前加注者，翻牌圈主动
+      // 开火等于把主动权送出去——对手范围更强还有位置，一被加注就难受。
+      // 真人拿三条/顺子在这儿多数先过牌，把筹码留到过牌-加注里。
+      if (!multiway && _isDonkSpot(game, spot) && _roll(0.62)) {
+        return const AiDecision(ActionType.check);
+      }
       if (!river && texture.isDry && !multiway && _roll(0.22)) {
         return const AiDecision(ActionType.check);
       }
@@ -807,10 +815,24 @@ class AiPlayer {
         game.street == Street.flop &&
         !spot.inPosition &&
         !multiway &&
-        _roll(texture.isDry ? 0.3 : 0.18)) {
+        _roll(_isDonkSpot(game, spot)
+            ? (texture.isDry ? 0.55 : 0.45)
+            : (texture.isDry ? 0.3 : 0.18))) {
       return const AiDecision(ActionType.check);
     }
     if (read.tier == HandTier.strong) {
+      // 转牌发出的牌帮到跟注方时（高张 / 第三张同花 / 公对面，也就是
+      // [_isBlankCard] 判不出空白牌的那些），真人会有一部分在这儿收手
+      // 控池：顶对/超对再开一枪，被加注就得弃；过牌看河牌还能抓到对手
+      // 的诈唬，自己的过牌范围也不至于清一色是没牌。以前这条线完全不看
+      // 转牌发的是什么，永远 100% 开枪——对手等一张高张过牌-加注，
+      // 就能把我们的超对打走。
+      if (game.street == Street.turn &&
+          !multiway &&
+          !_isBlankCard(game) &&
+          _roll(spot.inPosition ? 0.35 : 0.22)) {
+        return const AiDecision(ActionType.check);
+      }
       // 河牌把「强牌」也混一点进超池里：以前超池清一色是怪兽牌，对手看到
       // 超池就弃、看到 0.6 池就敢跟——尺度等于把我们的牌报了出来。干面上
       // 顶对/超对本来就是这条线上最好的牌，超池去收才有人付钱。
@@ -826,10 +848,35 @@ class AiPlayer {
           valueFactor;
       return _bet(game, me, frac.clamp(0.3, 1.1));
     }
-    // 3) 听牌：半诈唬（听牌转诈唬的第一步）。
+    // 3) 干面 + 我是翻前加注者：真人的「范围小注」。
+    //
+    //    K-8-3 这种没人中的牌面上，对手同样很难有牌——真人这时候不看自己
+    //    手里是什么，都拿同一个 1/3 池的小注把整个范围铺出去（尺度见
+    //    [_stabFrac] 的 rangeBet 档）。这是最像人、也最容易漏掉的一枪：
+    //    以前干面上的下注率完全跟着牌力走，什么都没沾的牌只开火两成多，
+    //    等于把对手最容易弃牌的牌面白让出去；而且下注范围一眼就能被读出
+    //    牌力（小注=顶对、不中=过牌）。
+    //
+    //    和牌力无关，所以放在这里统一处理：牌力只决定剩下的那部分
+    //    （过牌回去的范围里，有后路/有摊牌价值的牌占多数）。
+    if (game.street == Street.flop &&
+        spot.isPreflopAggressor &&
+        texture.isDry &&
+        spot.opponents <= 2 &&
+        read.tier <= HandTier.medium &&
+        _roll(spot.opponents == 1 ? 0.55 : 0.45)) {
+      _registerFire(
+          game.street, read.hasDraw ? _PlanKind.semiBluff : _PlanKind.pureBluff);
+      // 尺度就是「范围小注」本来的样子：频率高、但只用 1/3 池——范围
+      // 铺得越宽，尺度就越要小，不然一被加注整条线就塌了。
+      return _bet(
+          game, me, _stabFrac(spot, read, 0.5, rangeBet: true).clamp(0.25, 0.4));
+    }
+    // 4) 听牌：半诈唬（听牌转诈唬的第一步）。
     //    有弃牌率，被跟注也还有 outs，比纯空气诈唬合理得多。
     if (read.hasDraw && read.tier <= HandTier.medium) {
-      if (_roll(_semiBluffChance(read, spot, barrel))) {
+      if (_roll(_semiBluffChance(read, spot, barrel) *
+          _donkScale(game, spot))) {
         _registerFire(game.street, _PlanKind.semiBluff);
         return _bet(game, me,
             _stabFrac(spot, read, 0.6, rangeBet: game.street == Street.flop));
@@ -837,7 +884,7 @@ class AiPlayer {
       _plan = null; // 听牌也选择过牌：放弃这条线的诈唬
       return const AiDecision(ActionType.check);
     }
-    // 4) 有摊牌价值的成牌：中等牌（顶对好踢 / 第二对好踢 / 中间对子）
+    // 5) 有摊牌价值的成牌：中等牌（顶对好踢 / 第二对好踢 / 中间对子）
     //    和弱成牌（顶对弱踢 / 底对 / 被盖过的口袋对）一起处理。
     //
     //    没人下注时以小注薄价值 / 保护为主，而不是当空气去诈唬——拿一对
@@ -846,7 +893,8 @@ class AiPlayer {
     //    50%，结果既把顶对打得太少（顶对就是翻牌的主力价值牌，老过牌
     //    等于明牌告诉对手我没有东西），又让底对比第二对还敢打。
     if (read.tier == HandTier.medium || read.tier == HandTier.weak) {
-      if (_roll(_thinValueChance(game, me, spot, read))) {
+      if (_roll(_thinValueChance(game, me, spot, read) *
+          _donkScale(game, spot))) {
         // 薄价值的尺度也贴在「普通尺度」附近：比成牌主力小一点是应该的
         // （毕竟只是薄价值），但不能小到变成一个独立档位——那样对手一眼
         // 就能把「小注 = 顶对」对上号。
@@ -859,8 +907,8 @@ class AiPlayer {
       }
       return const AiDecision(ActionType.check);
     }
-    // 5) 没牌力：按计划延续诈唬，或找机会开火。
-    if (_roll(_bluffChance(game, me, spot, read))) {
+    // 6) 没牌力：按计划延续诈唬，或找机会开火。
+    if (_roll(_bluffChance(game, me, spot, read) * _donkScale(game, spot))) {
       _registerFire(game.street, _PlanKind.pureBluff);
       // 河牌拿着阻断牌时用超池诈唬：对手的强牌被我们挡掉，超池逼他弃牌
       // 最划算。坚果花阻断，或者 A 阻断 + 牌面三张同花，是真人最爱的两张
@@ -888,9 +936,45 @@ class AiPlayer {
     return const AiDecision(ActionType.check);
   }
 
+  /// 是不是「领先下注」（donk）的场合：翻牌圈、我没位置、而且我是翻前
+  /// 跟注方——有人加注过、我却先说话，翻前的加注者还压在我后面。
+  /// （[hasRaiser] 这个条件是必要的：溜入底池里没人示过强，先打一枪就是
+  /// 普通的「试探下注」，不算 donk，不该按这条降频。）
+  bool _isDonkSpot(GameEngine game, _Spot spot) =>
+      game.street == Street.flop &&
+      !spot.inPosition &&
+      !spot.isPreflopAggressor &&
+      spot.raiserSeat != null;
+
+  /// 领先下注的频率折扣。真人在大盲跟注后的翻牌圈很少主动开火：翻前加注
+  /// 者的范围更强、还有位置，donk 一被加注就得做难受的决定。所以这条线上
+  /// 价值牌以过牌-加注为主、听牌以过牌-跟为主，只有一部分继续领先打一枪。
+  double _donkScale(GameEngine game, _Spot spot) =>
+      _isDonkSpot(game, spot) ? 0.4 : 1.0;
+
+  /// 新发的这张牌是不是「空白牌」：比前面牌面第二高的牌还小、没配成
+  /// 公对、也没凑成第三张同花。这种牌几乎帮不到跟注方，是最适合继续
+  /// 开火的一类牌。
+  ///
+  /// 判据用的是「第二高」而不是「最高」：K-8-3 面上发 Q，Q 虽然比 K 小，
+  /// 可那是跟注方范围里（KQ / QJ / QT）实打实的一张牌，真人不会被这张
+  /// 牌白送一个「空白牌」的继续开火理由。
+  bool _isBlankCard(GameEngine game) {
+    final board = game.board;
+    if (board.length < 4) return false;
+    final prev = board.sublist(0, board.length - 1);
+    final card = board.last;
+    if (prev.any((c) => c.rank == card.rank)) return false; // 公对面
+    if (prev.where((c) => c.suit == card.suit).length >= 2) return false;
+    final ranks = prev.map((c) => c.rank.value).toSet().toList()
+      ..sort((a, b) => b - a);
+    final second = ranks.length > 1 ? ranks[1] : ranks.first;
+    return card.rank.value < second;
+  }
+
   /// 第二枪 / 第三枪的选牌：新发出来的这张牌对谁更有利？
   ///
-  /// - 空白牌（比前面任何牌都小）几乎没帮到跟注方 → 继续开火收益高；
+  /// - 空白牌（比前面第二高的牌都小）几乎没帮到跟注方 → 继续开火收益高；
   /// - 高张（尤其 A/K）更容易打中跟注方的范围 → 收手；
   /// - 公对面、第三张同花、顺子面 → 对手成牌的可能性变大，别硬开；
   /// - 自己这条街变强了（多了听牌或成了牌）→ 有底气接着打。
@@ -904,7 +988,7 @@ class AiPlayer {
 
     var f = 1.0;
     final pairsPrev = prev.any((c) => c.rank == card.rank);
-    if (card.rank.value < prevMax && !pairsPrev) f *= 1.25; // 空白牌
+    if (_isBlankCard(game)) f *= 1.25; // 空白牌
     // 比牌面都大的高张（尤其 A）：跟注方的范围里全是这种牌，
     // 转牌一发到就把「第二枪」收掉——真人这时候弃得比谁都干脆。
     if (card.rank.value > prevMax) f *= 0.6;
@@ -1009,7 +1093,8 @@ class AiPlayer {
       base *= 0.65;
     }
     // 翻前加注者的持续下注：翻牌圈频率更高（这也是真人的 c-bet），
-    // 干燥牌面更容易打走对手，频率再往上提。
+    // 干燥牌面更容易打走对手，频率再往上提。（干面上真正的主力是
+    // [_checkedTo] 里那条「范围小注」分支，这里管的是剩下的部分。）
     if (game.street == Street.flop && spot.isPreflopAggressor) {
       base *= read.texture.isDry ? 2.0 : 1.4;
     }
@@ -1221,10 +1306,16 @@ class AiPlayer {
     final streets = game.street == Street.flop ? 2 : 1;
     final deep = me.stack > spot.pot * 1.5;
     // 隐含赔率：坚果花听/组合听牌成牌后还能再赢一笔。
-    final implied = (read.nutFlushDraw || read.isComboDraw) ? 0.07 : 0.035;
+    final implied = (read.nutFlushDraw || read.isComboDraw) ? 0.08 : 0.06;
     final drawEq = read.drawEquity(streets) + (deep ? implied : 0);
-    var need = potOdds * (spot.villainStrength > 0.75 ? 1.25 : 1.05);
-    if (spot.betSizeRel >= 0.7) need *= 1.1;
+    // 听牌的门槛只比裸赔率高一点点。以前在这上面再乘 1.25 × 1.1 的
+    // 「安全余量」，等于要求 9 outs 的花听对着 1 倍池要有 46% 胜率才跟，
+    // 结果 8~9 outs 的顺听/花听对着正常尺度一律弃掉——真人拿到这些牌
+    // 几乎都会跟一张看两张牌（赔率够，成牌之后还有隐含赔率）。
+    // 真正要防的是被更强的成牌清空，所以余量只留在「对手线很强」和
+    // 「超池」这两项上。
+    var need = potOdds * (spot.villainStrength > 0.75 ? 1.08 : 1.0);
+    if (spot.betSizeRel >= 1.2) need *= 1.1;
     need *= _callVsReadFactor(game, me); // 疯子付得出隐含赔率，岩石付不出
     if (drawEq >= need) return const AiDecision(ActionType.call);
     // 便宜的小注：弱听牌也可以跟一张看转牌。
