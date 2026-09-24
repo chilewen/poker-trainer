@@ -18,6 +18,21 @@ import 'package:poker_trainer/trainer/odds.dart';
 
 List<Card> _cs(String s) => s.split(' ').map(Card.parse).toList();
 
+/// 迭代加速档：AI 类用例每个都要重放几百手完整牌局，样本少了估计值就不稳。
+/// 设 TEST_SEEDS_SCALE 按比例缩小每个用例的牌局数（默认 1.0，行为不变）。
+///
+///   TEST_SEEDS_SCALE=0.5 flutter test
+///
+/// 注意：缩样本会让「比例类断言」出现**假失败**（比如「加注率 > 0.4」抽到 0.3），
+/// 实测 0.5 倍约有 4~6 条，是噪声不是回归。它的用途只是「改完快速看一眼有没有
+/// 跑不起来 / 结构性错」，真要下结论请跑不带这个变量的全量（现在已经全量 8 秒，
+/// 因为 bestOf 从枚举法换成了计数法，AI 的胜率模拟快了十几倍）。
+double get _seedScale =>
+    double.tryParse(Platform.environment['TEST_SEEDS_SCALE'] ?? '') ?? 1.0;
+
+int _trialSeeds(int seeds) =>
+    _seedScale >= 1 ? seeds : max(20, (seeds * _seedScale).round());
+
 void main() {
   test('引擎冒烟：发牌后盲注入池且轮到枪口', () {
     final g = GameEngine(
@@ -39,6 +54,61 @@ void main() {
     expect(AiPlayer.preflopScore(_cs('9h 9d')), 9);
     expect(AiPlayer.preflopScore(_cs('2h 2d')), 5);
     expect(AiPlayer.preflopScore(_cs('7d 2c')), lessThan(2));
+  });
+
+  test('牌型评估：计数法与枚举法逐位一致', () {
+    // bestOf 已经改成计数法实现（比枚举 C(7,5) 个组合快十几倍，AI 的
+    // 「思考时间」基本就是它）。这里拿随机牌跟「枚举所有五张组合取最大」
+    // 的老写法对拍，防止手写分支漏掉边界。
+    //
+    // 比的是 toString 而不是大小：一对的踢脚多带一张时，两手牌 value 相同
+    // 却分出了胜负——这种错只能靠逐位对拍才抓得到。
+    HandScore slowBestOf(List<Card> cards) {
+      var best = HandEvaluator.evaluate5(cards.sublist(0, 5));
+      for (var a = 0; a < cards.length; a++) {
+        for (var b = a + 1; b < cards.length; b++) {
+          for (var c = b + 1; c < cards.length; c++) {
+            for (var d = c + 1; d < cards.length; d++) {
+              for (var e = d + 1; e < cards.length; e++) {
+                final s = HandEvaluator.evaluate5(
+                    [cards[a], cards[b], cards[c], cards[d], cards[e]]);
+                if (s > best) best = s;
+              }
+            }
+          }
+        }
+      }
+      return best;
+    }
+
+    final rng = Random(20240925);
+    final deck = [
+      for (final suit in Suit.values)
+        for (final rank in Rank.values) Card(rank, suit),
+    ];
+    for (final n in [5, 6, 7]) {
+      for (var i = 0; i < 2000; i++) {
+        deck.shuffle(rng);
+        final hand = deck.sublist(0, n);
+        expect(HandEvaluator.bestOf(hand).toString(), slowBestOf(hand).toString(),
+            reason: hand.map((c) => c.notation).join(' '));
+      }
+    }
+
+    // 几个手写边界：轮子顺子、两个三条当葫芦、同花顺、四条、两对。
+    const cases = [
+      'Ah 2d 3c 4s 5h 9d 10c',
+      'Ah Ad Ac Kh Kd Kc 2s',
+      'Ah Kh Qh Jh 10h 9h 8h',
+      '2h 2d 2c 2s 3h 4d 5c',
+      'Ah Ad Kh Kd Qh 3c 2s',
+      'Ah Ad 9c 8s 7h 6d 2c',
+    ];
+    for (final c in cases) {
+      final hand = _cs(c);
+      expect(HandEvaluator.bestOf(hand).toString(), slowBestOf(hand).toString(),
+          reason: c);
+    }
   });
 
   test('读牌：听牌 outs 与成牌层级', () {
@@ -429,7 +499,7 @@ void main() {
     final vsNit = callVsRead(maniac: false);
     expect(vsManiac.aggroRate, greaterThan(vsNit.aggroRate + 0.2),
         reason: '进攻性读数要能区分这两种对手');
-    expect(vsManiac.total, greaterThan(30));
+    expect(vsManiac.total, greaterThan(_trialSeeds(30)));
     expect(vsManiac.callRate, greaterThan(vsNit.callRate + 0.15),
         reason: '对爱开火的对手抓得更多，对岩石弃得更多 '
             '(${(100 * vsManiac.callRate).toStringAsFixed(0)}% vs '
@@ -501,8 +571,8 @@ void main() {
 
     final vsBarrel = riverCallVsLine(barrel: true);
     final vsCheckThenBet = riverCallVsLine(barrel: false);
-    expect(vsBarrel.total, greaterThan(40));
-    expect(vsCheckThenBet.total, greaterThan(40));
+    expect(vsBarrel.total, greaterThan(_trialSeeds(40)));
+    expect(vsCheckThenBet.total, greaterThan(_trialSeeds(40)));
     expect(vsCheckThenBet.callRate, greaterThan(vsBarrel.callRate + 0.15),
         reason: '对手一路过牌后突然超池，比连开三枪更值得抓 '
             '(${(100 * vsBarrel.callRate).toStringAsFixed(0)}% vs '
@@ -515,7 +585,7 @@ void main() {
       String hole, String board, double frac,
       {bool barrel = false, int seeds = 200}) {
     var fold = 0, call = 0, raise = 0, total = 0;
-    for (var seed = 0; seed < seeds; seed++) {
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
       final g = GameEngine(
         config: const GameConfig(
@@ -585,7 +655,7 @@ void main() {
       String hole, String board, double frac,
       {AiStyle style = AiStyle.tightAggressive, int seeds = 200}) {
     var fold = 0, call = 0, raise = 0, n = 0;
-    for (var seed = 0; seed < seeds; seed++) {
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
       final g = GameEngine(
         config: const GameConfig(
@@ -656,7 +726,7 @@ void main() {
       String hole, String board, double frac,
       {AiStyle style = AiStyle.tightAggressive, int seeds = 200}) {
     var fold = 0, call = 0, raise = 0, n = 0;
-    for (var seed = 0; seed < seeds; seed++) {
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
       final g = GameEngine(
         config: const GameConfig(
@@ -769,7 +839,7 @@ void main() {
     final barrel = aiVsRiverBet('Kc 8h', board, 0.75, barrel: true);
     String pct(double v) => '${(100 * v).round()}%';
 
-    expect(stab.total, greaterThan(50));
+    expect(stab.total, greaterThan(_trialSeeds(50)));
     expect(stab.call, greaterThan(0.25),
         reason: '过牌-过牌-重注这条线上第二对要敢抓（跟 ${pct(stab.call)}）');
     expect(barrel.fold, greaterThan(0.85),
@@ -843,7 +913,7 @@ void main() {
     final dry = flopBetFrac(board: 'Qh 7d 2c');
     final wet = flopBetFrac(board: 'Qh 9h 8c');
     final multi = flopBetFrac(board: 'Qh 7d 2c', others: 2);
-    expect(dry.n, greaterThan(40));
+    expect(dry.n, greaterThan(_trialSeeds(40)));
     expect(wet.frac, greaterThan(dry.frac + 0.1),
         reason: '干面用范围小注、湿面加大保护 '
             '(${dry.frac.toStringAsFixed(2)} vs '
@@ -1161,7 +1231,7 @@ void main() {
       {int seeds = 200, AiStyle style = AiStyle.tightAggressive,
       int stack = 10000}) {
     var raise = 0, call = 0, fold = 0;
-    for (var seed = 0; seed < seeds; seed++) {
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
       final g = GameEngine(
         config: GameConfig(
@@ -1256,7 +1326,7 @@ void main() {
       int open = 300,
       int threeBet = 900}) {
     var raise = 0, call = 0, fold = 0, n = 0;
-    for (var seed = 0; seed < seeds; seed++) {
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
       final g = GameEngine(
         config: GameConfig(
@@ -1452,7 +1522,7 @@ void main() {
   double aiBetRateWhenCheckedTo(String hole, String board, Street street,
       {int seeds = 200}) {
     var fire = 0, total = 0;
-    for (var seed = 0; seed < seeds; seed++) {
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
       final g = GameEngine(
         config: const GameConfig(
@@ -1586,7 +1656,7 @@ void main() {
           double minSpr = 4.0}) {
     var fold = 0, call = 0, raise = 0, total = 0;
     var spr = 0.0;
-    for (var seed = 0; seed < seeds; seed++) {
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
       final g = GameEngine(
         config: const GameConfig(
@@ -1683,7 +1753,7 @@ void main() {
     // 蒙特卡洛胜率兜底（真实胜率三成上下，跟这个价格是够的）。
     String pct(double v) => '${(100 * v).round()}%';
     final normal = aiVsTurnBet('Ad Kd', 'Qd 7d 2c 5h', 0.66);
-    expect(normal.n, greaterThan(40), reason: '样本要够（${normal.n}）');
+    expect(normal.n, greaterThan(_trialSeeds(40)), reason: '样本要够（${normal.n}）');
     expect(normal.call, greaterThan(0.4),
         reason: '坚果花听面对 2/3 池的下注要跟（跟 ${pct(normal.call)}）');
     expect(normal.fold, lessThan(0.3),
@@ -1712,7 +1782,7 @@ void main() {
     final secondPair = aiFacingTurnRaise('Qc Jc', board);
     String pct(double v) => '${(100 * v).round()}%';
 
-    expect(flush.total, greaterThan(40),
+    expect(flush.total, greaterThan(_trialSeeds(40)),
         reason: '成花这条线的样本要够（${flush.total}）');
     expect(flush.spr, greaterThan(3.5), reason: '这是深筹码点位（SPR ${flush.spr}）');
     expect(flush.raise, greaterThan(0.7),
@@ -1726,7 +1796,7 @@ void main() {
       ('set', set),
       ('两对', twoPair),
     ]) {
-      expect(r.total, greaterThan(40), reason: '$name 样本要够（${r.total}）');
+      expect(r.total, greaterThan(_trialSeeds(40)), reason: '$name 样本要够（${r.total}）');
       expect(r.raise, lessThan(0.35),
           reason: '$name 在三条同花面上不该再加注（加 ${pct(r.raise)}）');
       expect(r.call, greaterThan(0.55),
@@ -1750,7 +1820,7 @@ void main() {
           {AiStyle style = AiStyle.tightAggressive, int seeds = 200}) {
     var n = 0, fire = 0;
     var faced = 0, raised = 0, called = 0, folded = 0;
-    for (var seed = 0; seed < seeds; seed++) {
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
       final g = GameEngine(
         config: const GameConfig(
@@ -1879,7 +1949,7 @@ void main() {
       aiVsBetMultiway(String hole, String board,
           {int callers = 0, double frac = 0.5, int seeds = 200}) {
     var fold = 0, call = 0, raise = 0, jam = 0, n = 0;
-    for (var seed = 0; seed < seeds; seed++) {
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
       final g = GameEngine(
         config: const GameConfig(
@@ -1965,7 +2035,7 @@ void main() {
       String hole, String board, double frac,
       {Street street = Street.flop, int seeds = 150, bool oop = true}) {
     var fold = 0, call = 0, raise = 0, total = 0;
-    for (var seed = 0; seed < seeds; seed++) {
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
       final g = GameEngine(
         config: const GameConfig(
@@ -2088,7 +2158,7 @@ void main() {
       String hole, String board, double raiseTo,
       {int seeds = 150}) {
     var fold = 0, call = 0, raise = 0, total = 0;
-    for (var seed = 0; seed < seeds; seed++) {
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
       final g = GameEngine(
         config: const GameConfig(
@@ -2168,7 +2238,7 @@ void main() {
     final set = aiVsCheckRaise('8h 8s', flop, 3.0, seeds: 200);
     String pct(double v) => '${(100 * v).round()}%';
 
-    expect(secondPair.total, greaterThan(50));
+    expect(secondPair.total, greaterThan(_trialSeeds(50)));
     expect(secondPair.fold, greaterThan(0.45),
         reason: '第二对去跟一个三倍的过牌-加注基本是送 '
             '（弃 ${pct(secondPair.fold)}）');
@@ -2200,8 +2270,8 @@ void main() {
     // 强牌（顶对顶踢）：两边都该有一半上下的加注，差距要收在 10 个点内。
     final tpIp = aiVsCheckBet('Ah Kd', flop, 0.5, seeds: 200, oop: false);
     final tpOop = aiVsCheckBet('Ah Kd', flop, 0.5, seeds: 200);
-    expect(tpIp.total, greaterThan(100), reason: '有位置样本要够');
-    expect(tpOop.total, greaterThan(50), reason: '没位置样本要够（n=${tpOop.total}）');
+    expect(tpIp.total, greaterThan(_trialSeeds(100)), reason: '有位置样本要够');
+    expect(tpOop.total, greaterThan(_trialSeeds(50)), reason: '没位置样本要够（n=${tpOop.total}）');
     expect(tpIp.raise, greaterThan(0.3),
         reason: '顶对顶踢该有一部分反击（有位置加 ${pct(tpIp.raise)}）');
     // 改前是 78% vs 56%（没位置反而高出 22 个点）；现在两边都在六成上下、
@@ -2214,7 +2284,7 @@ void main() {
     // 更差的牌、留下的都是更好的牌，等于把有摊牌价值的牌变成纯诈唬。
     final weakIp = aiVsCheckBet('8h 7s', flop, 0.5, seeds: 200, oop: false);
     final weakOop = aiVsCheckBet('8h 7s', flop, 0.5, seeds: 200);
-    expect(weakOop.total, greaterThan(50), reason: '没位置样本要够');
+    expect(weakOop.total, greaterThan(_trialSeeds(50)), reason: '没位置样本要够');
     expect(weakIp.raise, lessThan(0.08),
         reason: '有位置的第二对也只是混一点反击（加 ${pct(weakIp.raise)}）');
     expect(weakOop.raise, lessThan(0.08),
@@ -2234,8 +2304,8 @@ void main() {
     final three = aiVsBetMultiway('Ah 8d', '8h 5s 4s', callers: 1, seeds: 200);
     final five = aiVsBetMultiway('Ah 8d', '8h 5s 4s', callers: 3, seeds: 200);
 
-    expect(heads.n, greaterThan(100), reason: '单挑样本要够');
-    expect(five.n, greaterThan(100), reason: '多人池样本要够');
+    expect(heads.n, greaterThan(_trialSeeds(100)), reason: '单挑样本要够');
+    expect(five.n, greaterThan(_trialSeeds(100)), reason: '多人池样本要够');
     expect(heads.raise, greaterThan(0.4),
         reason: '单挑里顶对顶踢该有一部分反击（加 ${pct(heads.raise)}）');
     expect(three.raise, lessThan(heads.raise - 0.1),
@@ -2257,7 +2327,7 @@ void main() {
     final heads = aiVsBetMultiway('Ah 8d', '8h 5s 4s', seeds: 200);
     final five = aiVsBetMultiway('Ah 8d', '8h 5s 4s', callers: 3, seeds: 200);
 
-    expect(five.n, greaterThan(100), reason: '多人池样本要够');
+    expect(five.n, greaterThan(_trialSeeds(100)), reason: '多人池样本要够');
     // 深筹码时两边都不该无脑全下；真正要盯的是五人池里那一堆
     // 「底池已经涨起来」的牌局——以前那里 85% 是把筹码推光的。
     expect(five.jam, lessThan(0.15),
@@ -2274,7 +2344,7 @@ void main() {
           {bool oop = false, int seeds = 200}) {
     var bet = 0, check = 0, over = 0, n = 0;
     final fracs = <double>[];
-    for (var seed = 0; seed < seeds; seed++) {
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
       final g = GameEngine(
         config: const GameConfig(
@@ -2340,7 +2410,7 @@ void main() {
     final secondPair = aiRiverCheckedTo('8h 7s', board);
     String pct(double v) => '${(100 * v).round()}%';
 
-    expect(set.n, greaterThan(100));
+    expect(set.n, greaterThan(_trialSeeds(100)));
     expect(set.overbet, greaterThan(0.3),
         reason: '怪兽牌还是拿超池收价值（超池 ${pct(set.overbet)}）');
     // 以前超池清一色是怪兽牌，对手看到超池就弃、看到 0.6 池就敢跟。
@@ -2371,8 +2441,8 @@ void main() {
     final ip = aiVsCheckBet(hole, board, 0.33, seeds: 200, oop: false);
     final oop = aiVsCheckBet(hole, board, 0.33, seeds: 200);
 
-    expect(ip.total, greaterThan(100), reason: '有位置样本要够（n=${ip.total}）');
-    expect(oop.total, greaterThan(100), reason: '没位置样本要够（n=${oop.total}）');
+    expect(ip.total, greaterThan(_trialSeeds(100)), reason: '有位置样本要够（n=${ip.total}）');
+    expect(oop.total, greaterThan(_trialSeeds(100)), reason: '没位置样本要够（n=${oop.total}）');
     expect(ip.call, greaterThan(0.2),
         reason: '有位置的 A 高 + 后门花该浮牌（跟 ${pct(ip.call)}）');
     expect(oop.call, lessThan(ip.call - 0.15),
@@ -2452,7 +2522,7 @@ void main() {
   ({double frac, int n}) aiFlopBetFrac(String hole, String board,
       {int others = 0, int seeds = 250}) {
     final all = <double>[];
-    for (var seed = 0; seed < seeds; seed++) {
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
       final g = GameEngine(
         config: const GameConfig(

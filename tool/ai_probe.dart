@@ -194,6 +194,18 @@ void main() {
   show('底对 面对方 pot bet',
       _sample(hole: 'Ah 2h', heroHole: '3c 4h', board: 'Qh 7d 2c', target: Street.flop,
           heroFirst: {Street.flop: (type: ActionType.bet, frac: 1.0)}));
+  show('顶对顶踢 AK 面对方 1/2 池',
+      _sample(hole: 'Ah Kd', heroHole: '3c 2h', board: 'As 7c 2d', target: Street.flop,
+          heroFirst: {Street.flop: (type: ActionType.bet, frac: 0.5)}));
+  show('顶对顶踢 AK 面对方 1/4 池',
+      _sample(hole: 'Ah Kd', heroHole: '3c 2h', board: 'As 7c 2d', target: Street.flop,
+          heroFirst: {Street.flop: (type: ActionType.bet, frac: 0.25)}));
+  show('顶对弱踢 A8 面对方 1/2 池',
+      _sample(hole: 'Ah 8d', heroHole: '3c 2h', board: 'As 7c 2d', target: Street.flop,
+          heroFirst: {Street.flop: (type: ActionType.bet, frac: 0.5)}));
+  show('超对 99 面对方 1/2 池',
+      _sample(hole: '9h 9d', heroHole: '3c 2h', board: '7s 4c 2d', target: Street.flop,
+          heroFirst: {Street.flop: (type: ActionType.bet, frac: 0.5)}));
 
   print('');
   print('== 转牌圈（听牌未成，对手一直过牌）== ');
