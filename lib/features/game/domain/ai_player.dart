@@ -45,6 +45,8 @@ class _Profile {
     required this.semiBluffRaiseScale,
     required this.bluffRaiseScale,
     required this.fourBetScale,
+    this.callSlack = 0.0,
+    this.slowPlay = 0.12,
     this.lightThreeBetAnyPosition = false,
     this.limpsAnyPrice = false,
     this.wideLimp = false,
@@ -98,6 +100,21 @@ class _Profile {
   /// 诈唬加注（含河牌最后一枪）的频率倍率。
   final double bluffRaiseScale;
 
+  /// 抓诈唬的宽松度：跟注门槛按 (1 - callSlack) 打折。
+  ///
+  /// 跟注站就是这么输钱的：赔率差一点它照样跟，一对小牌也能跟你三条街。
+  /// 以前这个门槛只由底池赔率和「读人」决定，三种风格面对下注的弃牌率
+  /// 几乎一样（松被动 20% vs 紧凶 19%）——牌桌上最黏的那类人反而比谁都
+  /// 果断，一眼假。
+  final double callSlack;
+
+  /// 拿了怪兽牌先跟一手的频率（慢打 / 设陷阱）。
+  ///
+  /// 被动玩家最明显的招牌：中了也不加注，等着对手自己往里塞钱。以前
+  /// 三条/两对面对下注是三种风格一律 100% 加注，既不像真人，也让「加注」
+  /// 这个动作在牌桌上完全没有风格差异。
+  final double slowPlay;
+
   /// 跟注站特性：溜入时不看价格。
   final bool limpsAnyPrice;
 
@@ -119,6 +136,8 @@ const _tightProfile = _Profile(
   semiBluffRaiseScale: 1.0,
   bluffRaiseScale: 1.0,
   fourBetScale: 1.0,
+  callSlack: 0.0,
+  slowPlay: 0.12,
 );
 
 const _passiveProfile = _Profile(
@@ -137,6 +156,8 @@ const _passiveProfile = _Profile(
   fourBetScale: 0.3,
   limpsAnyPrice: true,
   wideLimp: true,
+  callSlack: 0.28,
+  slowPlay: 0.45,
 );
 
 const _looseAggressiveProfile = _Profile(
@@ -154,6 +175,8 @@ const _looseAggressiveProfile = _Profile(
   semiBluffRaiseScale: 1.3,
   bluffRaiseScale: 1.6,
   fourBetScale: 1.25,
+  callSlack: 0.10,
+  slowPlay: 0.18,
 );
 
 /// AI 的一次决策结果。
@@ -1174,6 +1197,12 @@ class AiPlayer {
       if (!canRaise || spot.raisesThisStreet >= 3) {
         return const AiDecision(ActionType.call);
       }
+      // 慢打：只是面对一次下注（不是加注战）时，先跟一手把对手留在底池里。
+      // 被动风格最常这么干——「中了也不加」正是跟注站的招牌；加注战里
+      // 就不慢打了，那边每一手都在往底池里塞钱。
+      if (!facingRaise && _roll(_p.slowPlay)) {
+        return const AiDecision(ActionType.call);
+      }
       return _raise(game, me, 0.85);
     }
     // 2) 强牌 + 低 SPR：筹码已经套进去了，没有弃牌的道理。
@@ -1232,6 +1261,10 @@ class AiPlayer {
     if (read.tier == HandTier.medium) {
       if (spot.spr <= 1.2) return const AiDecision(ActionType.call);
       var need = potOdds * (spot.villainStrength > 0.7 ? 1.3 : 1.1);
+      // 跟注站的「黏」是对着下注的（一手小对陪你三条街），不是对着加注的：
+      // 对面已经加注出来，中间牌力再跟就是在给价值下注付钱——风格再松也
+      // 不该松这一档，不然三条同花面上拿第二对去接加注就变成「标准打法」。
+      if (!facingRaise) need *= 1 - _p.callSlack;
       // 超池是两极的：真东西和空气都在里面，抓的时候要留个余量
       // （模型给的胜率是对着「宽范围」算的，被价值牌清空的风险没算进去）。
       if (bigBet) need *= spot.polarizedBet ? 1.12 : 1.2;
@@ -1277,6 +1310,8 @@ class AiPlayer {
       // 0.75 池的「过牌-过牌-重注」会 97% 弃牌，对手随便抡一枪我们就交牌。
       final stab = spot.polarizedBet || (spot.checkedThrough && bigBet);
       var need = potOdds * (spot.villainStrength > 0.7 ? 1.7 : 1.35);
+      // 一对牌是抓诈唬的主力，跟注站抓得更宽（但面对加注照样收手）。
+      if (!facingRaise) need *= 1 - _p.callSlack;
       if (bigBet) need *= stab ? 0.85 : 1.35;
       if (facingRaise) need *= 1.85; // 第二对去跟一个加注基本是送
       if (!spot.inPosition) need *= 1.1;
@@ -1353,6 +1388,9 @@ class AiPlayer {
     var need = potOdds * (spot.villainStrength > 0.75 ? 1.08 : 1.0);
     if (spot.betSizeRel >= 1.2) need *= 1.1;
     need *= _callVsReadFactor(game, me); // 疯子付得出隐含赔率，岩石付不出
+    if (!spot.villainRaisedThisStreet) {
+      need *= 1 - 0.6 * _p.callSlack; // 跟注站连听牌都买得更便宜
+    }
     if (drawEq >= need) return const AiDecision(ActionType.call);
     // 便宜的小注：弱听牌也可以跟一张看转牌。
     if (spot.betSizeRel <= 0.3 &&

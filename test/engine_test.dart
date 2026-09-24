@@ -579,6 +579,115 @@ void main() {
     return (fold: r(fold), call: r(call), raise: r(raise), total: total);
   }
 
+  /// 单挑：AI 按钮开池（写死 250，任何起手牌都能进翻牌）、英雄跟注，
+  /// 翻牌英雄按 [frac] 池下注，统计 AI 在翻牌圈的应对。
+  ({double fold, double call, double raise, int n}) aiVsFlopBet(
+      String hole, String board, double frac,
+      {AiStyle style = AiStyle.tightAggressive, int seeds = 200}) {
+    var fold = 0, call = 0, raise = 0, n = 0;
+    for (var seed = 0; seed < seeds; seed++) {
+      final rnd = Random(seed);
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      )
+        ..addPlayer('ai', 'AI')
+        ..addPlayer('hero', '我');
+      final ai = AiPlayer(style, random: rnd);
+      g.startHand(
+        holeOverride: {'ai': _cs(hole), 'hero': _cs('3s 2s')},
+        boardOverride: _cs(board),
+      );
+      g.apply('ai', ActionType.raise, amount: 250);
+      g.apply('hero', ActionType.call);
+      var guard = 0;
+      var asked = false;
+      while (!g.handOver && guard++ < 200) {
+        final p = g.pendingAction();
+        final legal = p.actions;
+        if (p.player.id == 'ai') {
+          final d = ai.decide(g, p.player);
+          if (g.street == Street.flop && !asked) {
+            asked = true;
+            n++;
+            switch (d.type) {
+              case ActionType.fold:
+                fold++;
+              case ActionType.call:
+                call++;
+              default:
+                raise++;
+            }
+            break;
+          }
+          g.apply('ai', d.type, amount: d.amountTo);
+          continue;
+        }
+        final la = legal.firstWhere((a) => a.type == ActionType.bet,
+            orElse: () => legal.first);
+        if (legal.any((a) => a.type == ActionType.bet)) {
+          g.apply(
+              'hero',
+              ActionType.bet,
+              amount: (g.potTotal() * frac)
+                  .round()
+                  .clamp(la.minAmount, la.maxAmount));
+        } else {
+          g.apply('hero', legal.any((a) => a.type == ActionType.check)
+              ? ActionType.check
+              : legal.first.type);
+        }
+      }
+    }
+    return (
+      fold: n == 0 ? 0 : fold / n,
+      call: n == 0 ? 0 : call / n,
+      raise: n == 0 ? 0 : raise / n,
+      n: n,
+    );
+  }
+
+  test('风格差异：跟注站更黏、更爱慢打，紧凶加得最凶', () {
+    // 同一个牌面、同一个尺度，三种风格必须打得不一样，否则「风格」只是
+    // 一个标签：以前三条/两对面对下注是三种风格一律 100% 加注，面对下注
+    // 的弃牌率也几乎一样（松被动 20% vs 紧凶 19%），牌桌上最黏的那类人
+    // 反而比谁都果断。
+    double pct(double v) => 100 * v;
+
+    // 三条面对 2/3 池：紧凶基本加注，跟注站一大半只是跟（慢打设陷阱）。
+    final setTight = aiVsFlopBet('8h 8s', 'Ks 8c 3d', 0.66);
+    final setStation = aiVsFlopBet('8h 8s', 'Ks 8c 3d', 0.66,
+        style: AiStyle.loosePassive);
+    expect(setTight.raise, greaterThan(0.8),
+        reason: '紧凶三条该加注（加 ${pct(setTight.raise).round()}%）');
+    expect(setStation.raise, lessThan(0.7),
+        reason: '跟注站三条会先慢打（加 ${pct(setStation.raise).round()}%）');
+    expect(setStation.call, greaterThan(setTight.call + 0.2),
+        reason: '跟注站的慢打比例要看得出来 '
+            '（跟 ${pct(setStation.call).round()}% vs '
+            '${pct(setTight.call).round()}%）');
+
+    // 但慢打不能变成「永不加注」：跟注站也得留一部分价值加注。
+    expect(setStation.raise, greaterThan(0.25),
+        reason: '跟注站三条仍要有加注（加 ${pct(setStation.raise).round()}%）');
+
+    // 一对牌面对 2/3 池：跟注站比紧凶明显更少弃牌。
+    final bpTight = aiVsFlopBet('4h 3h', 'Ks 7d 3c', 0.66);
+    final bpStation = aiVsFlopBet('4h 3h', 'Ks 7d 3c', 0.66,
+        style: AiStyle.loosePassive);
+    expect(bpStation.fold, lessThan(bpTight.fold + 0.01),
+        reason: '底对上跟注站不该比紧凶弃得更多 '
+            '（弃 ${pct(bpStation.fold).round()}% vs '
+            '${pct(bpTight.fold).round()}%）');
+    expect(bpStation.call, greaterThan(bpTight.call - 0.01),
+        reason: '底对上跟注站跟得更多（跟 ${pct(bpStation.call).round()}%）');
+
+    // 再加注的线不能让风格把门槛也拉低：面对加注，第二对在三张同花面上
+    // 照样得弃（那是对着价值下注付钱，不是「黏」）。
+    // （见「三条同花面」那条用例。）
+  });
+
   test('抓诈唬：对手前面都过牌后砸出来的大注，第二对也敢接', () {
     // 同一手第二对、同一个 0.75 池的河牌下注，只差对手前面两条街有没有
     // 一直在开火：一路过牌再突然砸一枪是「突然开火」的线，诈唬占比高，

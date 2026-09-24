@@ -29,6 +29,14 @@ class _Stats {
   final Map<AiStyle, int> riverBustGiveUp = {}; // 其中弃牌
   final Map<AiStyle, int> cbetChances = {};
   final Map<AiStyle, int> cbets = {};
+  // 面对下注（翻后）时的动作，按「有没有位置」拆开：真人没位置时明显
+  // 更少漂浮、更少薄跟，这一格就是用来盯这个差别的。
+  final Map<AiStyle, int> faceIp = {};
+  final Map<AiStyle, int> faceOop = {};
+  final Map<AiStyle, int> faceIpCall = {};
+  final Map<AiStyle, int> faceOopCall = {};
+  final Map<AiStyle, int> faceIpFold = {};
+  final Map<AiStyle, int> faceOopFold = {};
 
   void bump(Map<AiStyle, int> m, AiStyle s) => m[s] = (m[s] ?? 0) + 1;
 
@@ -53,6 +61,20 @@ class _Stats {
     }
     return buf.toString();
   }
+}
+
+/// 和 ai_player 里同一套判断：后面还有没有活人（没活人 = 有位置）。
+bool _inPosition(GameEngine game, PlayerState me) {
+  final n = game.players.length;
+  final rel = (game.players.indexOf(me) - game.buttonIndex + n) % n;
+  final myOrder = rel == 0 ? n : rel;
+  for (var i = 0; i < n; i++) {
+    final other = game.players[i];
+    if (other.id == me.id || other.folded) continue;
+    final otherRel = (i - game.buttonIndex + n) % n;
+    if ((otherRel == 0 ? n : otherRel) > myOrder) return false;
+  }
+  return true;
 }
 
 List<Card> _boardAt(List<Card> board, Street s) => switch (s) {
@@ -107,7 +129,19 @@ void main(List<String> args) {
     var guard = 0;
     while (!g.handOver && guard++ < 600) {
       final p = g.pendingAction();
+      final facingBet =
+          g.street != Street.preflop && g.currentBet > p.player.streetBet;
+      final styleNow = styles[p.player.id]!;
+      final ip = facingBet ? _inPosition(g, p.player) : false;
       final d = ais[p.player.id]!.decide(g, p.player);
+      if (facingBet) {
+        st.bump(ip ? st.faceIp : st.faceOop, styleNow);
+        if (d.type == ActionType.call) {
+          st.bump(ip ? st.faceIpCall : st.faceOopCall, styleNow);
+        } else if (d.type == ActionType.fold) {
+          st.bump(ip ? st.faceIpFold : st.faceOopFold, styleNow);
+        }
+      }
       g.apply(p.player.id, d.type, amount: d.amountTo);
     }
     final hand = g.lastHand!;
@@ -251,6 +285,12 @@ void main(List<String> args) {
   print(st.pctLine('翻后 跟注率', st.postCall, st.postDecisions));
   print(st.countLine('翻后 下注次数', st.postBet));
   print(st.countLine('翻后 加注次数', st.postRaise));
+  print(st.countLine('面对注(有位置)', st.faceIp));
+  print(st.pctLine('  其中 跟注', st.faceIpCall, st.faceIp));
+  print(st.pctLine('  其中 弃牌', st.faceIpFold, st.faceIp));
+  print(st.countLine('面对注(没位置)', st.faceOop));
+  print(st.pctLine('  其中 跟注', st.faceOopCall, st.faceOop));
+  print(st.pctLine('  其中 弃牌', st.faceOopFold, st.faceOop));
   print(st.pctLine('翻牌 c-bet 率', st.cbets, st.cbetChances));
   print(st.countLine('翻牌听牌次数', st.flopDraws));
   print(st.pctLine('翻牌 听牌开火率', st.flopDrawAggro, st.flopDraws));
