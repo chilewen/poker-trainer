@@ -1,0 +1,446 @@
+import 'dart:math';
+
+import '../../../engine/card.dart';
+import '../../../engine/game.dart';
+
+/// 翻前位置桶：把 2~9 人的座位归成 6 类。
+enum Seat {
+  ep('前位'),
+  mp('中位'),
+  co('劫位'),
+  btn('按钮'),
+  sb('小盲'),
+  bb('大盲');
+
+  const Seat(this.label);
+  final String label;
+}
+
+/// 一手起手牌的分类信息（点数用 2~14，14 = A）。
+class PreflopHand {
+  const PreflopHand._(this.high, this.low, this.suited);
+
+  factory PreflopHand.of(List<Card> hole) {
+    final a = hole[0].rank.value;
+    final b = hole[1].rank.value;
+    return PreflopHand._(
+      max(a, b),
+      min(a, b),
+      hole[0].suit == hole[1].suit,
+    );
+  }
+
+  /// 较大的点数 / 较小的点数 / 是否同花。
+  final int high;
+  final int low;
+  final bool suited;
+
+  bool get isPair => high == low;
+  int get gap => high - low;
+  bool get isAce => high == Rank.ace.value;
+
+  /// 两张都是 T 以上的「大牌」。
+  bool get isBroadway => low >= Rank.ten.value;
+  bool get isConnector => gap == 1;
+  bool get isOneGapper => gap == 2;
+
+  String get label =>
+      '${_rankText(high)}${_rankText(low)}${isPair ? '' : (suited ? 's' : 'o')}';
+
+  static String _rankText(int v) => switch (v) {
+        14 => 'A',
+        13 => 'K',
+        12 => 'Q',
+        11 => 'J',
+        10 => 'T',
+        _ => '$v',
+      };
+
+  @override
+  String toString() => label;
+}
+
+/// 一个翻前范围：按牌型类别给出最低要求，0 表示该类不包含。
+///
+/// 用「牌型类别 + 门槛」而不是单一分数，是因为真人的范围本来就是
+/// 按牌型长的：前位是「对子 + 高张同花 + A 高张」，按钮位才会加入
+/// 同花连张、隔张和一堆非同花杂牌。
+class PreflopRange {
+  const PreflopRange({
+    this.pair = 0,
+    this.suitedAce = 0,
+    this.offsuitAce = 0,
+    this.suitedBroadway = 0,
+    this.offsuitBroadway = 0,
+    this.suitedConnector = 0,
+    this.suitedGapper = 0,
+    this.suitedAny = 0,
+    this.offsuitConnector = 0,
+    this.offsuitAny = 0,
+  });
+
+  /// 对子下限（5 = 55+）。
+  final int pair;
+
+  /// A 带 x 同花 / 非同花的 x 下限。
+  final int suitedAce;
+  final int offsuitAce;
+
+  /// 两张都是大牌时的低牌下限（10 = 全部大牌）。
+  final int suitedBroadway;
+  final int offsuitBroadway;
+
+  /// 同花连张 / 同花隔一张的低牌下限。
+  final int suitedConnector;
+  final int suitedGapper;
+
+  /// 其它同花牌（非同花连张、非同花杂牌）的低牌下限。
+  final int suitedAny;
+  final int offsuitConnector;
+  final int offsuitAny;
+
+  static bool _ok(int value, int threshold) =>
+      threshold > 0 && value >= threshold;
+
+  bool contains(PreflopHand h) {
+    if (h.isPair) return _ok(h.high, pair);
+    if (h.isAce) {
+      return h.suited ? _ok(h.low, suitedAce) : _ok(h.low, offsuitAce);
+    }
+    if (h.isBroadway) {
+      return h.suited ? _ok(h.low, suitedBroadway) : _ok(h.low, offsuitBroadway);
+    }
+    if (h.suited) {
+      if (h.gap <= 1) {
+        return _ok(h.low, suitedConnector) || _ok(h.low, suitedAny);
+      }
+      if (h.gap == 2) {
+        return _ok(h.low, suitedGapper) || _ok(h.low, suitedAny);
+      }
+      return _ok(h.low, suitedAny);
+    }
+    if (h.gap <= 1) {
+      return _ok(h.low, offsuitConnector) || _ok(h.low, offsuitAny);
+    }
+    return _ok(h.low, offsuitAny);
+  }
+
+  /// 整体收紧（delta > 0）或放宽（delta < 0）。
+  PreflopRange shifted(int delta) => PreflopRange(
+        pair: _shift(pair, delta),
+        suitedAce: _shift(suitedAce, delta),
+        offsuitAce: _shift(offsuitAce, delta),
+        suitedBroadway: _shift(suitedBroadway, delta),
+        offsuitBroadway: _shift(offsuitBroadway, delta),
+        suitedConnector: _shift(suitedConnector, delta),
+        suitedGapper: _shift(suitedGapper, delta),
+        suitedAny: _shift(suitedAny, delta),
+        offsuitConnector: _shift(offsuitConnector, delta),
+        offsuitAny: _shift(offsuitAny, delta),
+      );
+
+  /// 只调整非同花部分（对手越多，被压制的非同花牌越不值钱）。
+  PreflopRange shiftedOffsuit(int delta) => PreflopRange(
+        pair: pair,
+        suitedAce: suitedAce,
+        offsuitAce: _shift(offsuitAce, delta),
+        suitedBroadway: suitedBroadway,
+        offsuitBroadway: _shift(offsuitBroadway, delta),
+        suitedConnector: suitedConnector,
+        suitedGapper: suitedGapper,
+        suitedAny: suitedAny,
+        offsuitConnector: _shift(offsuitConnector, delta),
+        offsuitAny: _shift(offsuitAny, delta),
+      );
+
+  /// 只调整投机牌（对子、同花连张）：筹码越深越值钱，短筹码可以不要。
+  PreflopRange shiftedSpeculative(int delta) => PreflopRange(
+        pair: _shift(pair, delta),
+        suitedAce: suitedAce,
+        offsuitAce: offsuitAce,
+        suitedBroadway: suitedBroadway,
+        offsuitBroadway: offsuitBroadway,
+        suitedConnector: _shift(suitedConnector, delta),
+        suitedGapper: _shift(suitedGapper, delta),
+        suitedAny: _shift(suitedAny, delta),
+        offsuitConnector: offsuitConnector,
+        offsuitAny: offsuitAny,
+      );
+
+  /// 去掉买三条/买同花这类需要隐含赔率的牌。
+  PreflopRange withoutSpeculative() => PreflopRange(
+        suitedAce: suitedAce,
+        offsuitAce: offsuitAce,
+        suitedBroadway: suitedBroadway,
+        offsuitBroadway: offsuitBroadway,
+        offsuitConnector: offsuitConnector,
+        offsuitAny: offsuitAny,
+      );
+
+  static int _shift(int value, int delta) =>
+      value == 0 ? 0 : (value + delta).clamp(2, 14);
+}
+
+/// 面对开池加注时的三档结论。
+typedef OpenDefense = ({bool valueThreeBet, bool lightThreeBet, bool call});
+
+/// 翻前范围表：位置感知的「开池 / 溜入 / 防守 / 再加注」范围。
+class PreflopRanges {
+  PreflopRanges._();
+
+  /// 某玩家处于哪个位置桶（兼容 2~9 人桌）。
+  static Seat seatOf(GameEngine game, PlayerState me) {
+    final n = game.players.length;
+    final rel = (game.players.indexOf(me) - game.buttonIndex + n) % n;
+    if (n == 2) return rel == 0 ? Seat.btn : Seat.bb; // 单挑：按钮 = 小盲
+    switch (rel) {
+      case 0:
+        return Seat.btn;
+      case 1:
+        return Seat.sb;
+      case 2:
+        return Seat.bb;
+    }
+    // rel 3 是第一个开口的位置（前位），rel n-1 是劫位。
+    final spots = n - 3; // 非盲注、非按钮的座位数
+    if (spots <= 1) return Seat.co;
+    final t = (rel - 3) / (spots - 1);
+    if (t < 0.34) return Seat.ep;
+    if (t < 0.67) return Seat.mp;
+    return Seat.co;
+  }
+
+  // ---------- 开池（无人加注时主动加注）----------
+
+  /// 开池范围，括号里是 9 人桌的大致入池率。
+  static PreflopRange open(Seat seat) => switch (seat) {
+        // 55+ / A9s+ / KTs+ / JTs / T9s / 98s / AJo+ / KQo
+        Seat.ep => const PreflopRange(
+            pair: 5,
+            suitedAce: 9,
+            offsuitAce: 11,
+            suitedBroadway: 10,
+            offsuitBroadway: 12,
+            suitedConnector: 9,
+          ), // ~12%
+        // 44+ / A8s+ / KTs+ / T9s / 87s / ATo+ / KJo+ / QJo
+        Seat.mp => const PreflopRange(
+            pair: 4,
+            suitedAce: 8,
+            offsuitAce: 10,
+            suitedBroadway: 10,
+            offsuitBroadway: 11,
+            suitedConnector: 8,
+          ), // ~17%
+        // 任意对子 / 任意同花 A / ATo+ / 全部大牌 / 54s+ / 75s+ / ATo+
+        Seat.co => const PreflopRange(
+            pair: 2,
+            suitedAce: 2,
+            offsuitAce: 10,
+            suitedBroadway: 10,
+            offsuitBroadway: 10,
+            suitedConnector: 5,
+            suitedGapper: 5,
+            suitedAny: 7,
+            offsuitConnector: 9,
+            offsuitAny: 9,
+          ), // ~24%
+        // 按钮位：任意对子 / 任意同花 A / A4o+ / 43s+ / 64s+ / K4s+ / 65o+
+        Seat.btn => const PreflopRange(
+            pair: 2,
+            suitedAce: 2,
+            offsuitAce: 4,
+            suitedBroadway: 10,
+            offsuitBroadway: 10,
+            suitedConnector: 4,
+            suitedGapper: 4,
+            suitedAny: 4,
+            offsuitConnector: 6,
+            offsuitAny: 7,
+          ), // ~42%
+        // 小盲偷盲：比按钮略紧（翻后没位置），基本是「加注或弃牌」
+        Seat.sb => const PreflopRange(
+            pair: 2,
+            suitedAce: 2,
+            offsuitAce: 7,
+            suitedBroadway: 10,
+            offsuitBroadway: 10,
+            suitedConnector: 5,
+            suitedGapper: 6,
+            suitedAny: 5,
+            offsuitConnector: 7,
+            offsuitAny: 8,
+          ), // ~36%
+        Seat.bb => const PreflopRange(), // 大盲不主动开池
+      };
+
+  /// 溜入/补齐范围（无人加注、但要多花钱进去时）。
+  static PreflopRange limp(Seat seat) => switch (seat) {
+        // 后位溜入：便宜看翻牌，玩同花牌和小对子。
+        Seat.ep || Seat.mp || Seat.co || Seat.btn => const PreflopRange(
+            pair: 2,
+            suitedAce: 3,
+            suitedBroadway: 10,
+            suitedConnector: 5,
+            suitedGapper: 6,
+            suitedAny: 8,
+            offsuitAce: 10,
+          ),
+        // 小盲补齐：便宜，范围可以宽一些。
+        Seat.sb => const PreflopRange(
+            pair: 2,
+            suitedAce: 2,
+            suitedBroadway: 10,
+            suitedConnector: 5,
+            suitedGapper: 5,
+            suitedAny: 5,
+            offsuitAce: 10,
+            offsuitBroadway: 12,
+          ),
+        Seat.bb => const PreflopRange(),
+      };
+
+  // ---------- 面对加注 ----------
+
+  /// 再加注（3bet）的价值范围，随加注者位置放宽。
+  static PreflopRange valueThreeBet(Seat raiser) => switch (raiser) {
+        Seat.ep => const PreflopRange(
+            pair: 12, suitedAce: 13, offsuitAce: 13), // QQ+ / AKs / AKo
+        Seat.mp => const PreflopRange(
+            pair: 11, suitedAce: 12, offsuitAce: 13), // JJ+ / AQs+ / AKo
+        _ => const PreflopRange(
+            pair: 10,
+            suitedAce: 11,
+            offsuitAce: 13,
+            offsuitBroadway: 12), // TT+ / AJs+ / AKo / KQo
+      };
+
+  /// 4bet 及以上只打顶端。
+  static const PreflopRange valueFourBet = PreflopRange(
+    pair: 12,
+    suitedAce: 13,
+    offsuitAce: 13,
+  );
+
+  /// 跟 3bet 的范围（位置好、筹码深才有）。
+  static const PreflopRange callThreeBet = PreflopRange(
+    pair: 9,
+    suitedAce: 11,
+    suitedConnector: 6,
+  );
+
+  // 有位置防守：对子买三条 + 同花牌 + 高张，非同花杂牌不跟。
+  static const _ipDefend = PreflopRange(
+    pair: 2,
+    suitedAce: 2,
+    offsuitAce: 12,
+    suitedBroadway: 10,
+    offsuitBroadway: 12,
+    suitedConnector: 5,
+    suitedGapper: 6,
+    suitedAny: 8,
+  );
+
+  // 没位置防守：更依赖牌力，少玩同花杂牌。
+  static const _oopDefend = PreflopRange(
+    pair: 2,
+    suitedAce: 3,
+    offsuitAce: 13,
+    suitedBroadway: 10,
+    offsuitBroadway: 13,
+    suitedConnector: 6,
+    suitedGapper: 8,
+    suitedAny: 9,
+  );
+
+  // 大盲防守：价格最好，范围最宽（含大量同花牌和便宜的高张）。
+  static const _bbDefend = PreflopRange(
+    pair: 2,
+    suitedAce: 2,
+    offsuitAce: 6,
+    suitedBroadway: 10,
+    offsuitBroadway: 10,
+    suitedConnector: 3,
+    suitedGapper: 5,
+    suitedAny: 2,
+    offsuitConnector: 6,
+    offsuitAny: 9,
+  );
+
+  // 小盲平跟：不关门又没位置，只用来买三条/买同花（还要有人跟注）。
+  static const _sbDefend = PreflopRange(
+    pair: 2,
+    suitedAce: 4,
+    suitedConnector: 5,
+    suitedGapper: 6,
+  );
+
+  /// 「轻 3bet」（诈唬性再加注）的候选牌：有阻断牌或成牌潜力。
+  static bool isLightThreeBetHand(PreflopHand h) {
+    if (h.suited && h.isAce && h.low <= 5) return true; // A5s~A2s
+    if (h.suited && !h.isAce && h.gap <= 1 && h.low >= 5 && h.low <= 9) {
+      return true; // 54s~T9s
+    }
+    return !h.suited && h.high == 13 && h.low == 12; // KQo
+  }
+
+  /// 面对单个开池加注的应对。
+  ///
+  /// - [seat]/[raiser]：我在哪、加注者在哪；
+  /// - [inPosition]：我翻后是否在加注者之后行动；
+  /// - [callers]：我行动之前已经跟注进来的人数；
+  /// - [raiseBb]/[stackBb]：加注大小与我的有效筹码（大盲数）。
+  static OpenDefense versusOpen({
+    required Seat seat,
+    required PreflopHand hand,
+    required Seat raiser,
+    required bool inPosition,
+    required int callers,
+    required double raiseBb,
+    required double stackBb,
+    int threeBetWidth = 0,
+    int callWidth = 0,
+  }) {
+    final value = valueThreeBet(raiser).shifted(threeBetWidth);
+    if (value.contains(hand)) {
+      return (valueThreeBet: true, lightThreeBet: false, call: false);
+    }
+
+    // 轻 3bet 只针对后位开池（真正的偷盲），且位置不能太差。
+    final light = (raiser == Seat.co || raiser == Seat.btn || raiser == Seat.sb) &&
+        (inPosition || seat == Seat.sb || seat == Seat.bb) &&
+        isLightThreeBetHand(hand);
+
+    var range = switch (seat) {
+      Seat.bb => callers == 0 ? _bbDefend : _bbDefend,
+      Seat.sb => callers >= 2 ? _sbDefend : const PreflopRange(),
+      _ => inPosition ? _ipDefend : _oopDefend,
+    };
+
+    // 加注越大越贵：小注可以便宜看翻牌，大注要收紧。
+    if (raiseBb <= 2.5) {
+      range = range.shifted(-1);
+    } else if (raiseBb >= 4.5) {
+      range = range.shifted(raiseBb >= 8 ? 2 : 1);
+    }
+    // 前面已经有人跟注：非同花牌容易被压制，谨慎一点。
+    if (callers > 0) {
+      range = range.shiftedOffsuit(1);
+    }
+    // 筹码深度：短筹码没有买三条的隐含赔率，深筹码投机牌更值钱。
+    if (stackBb < 30) {
+      range = range.withoutSpeculative();
+    } else if (stackBb > 120) {
+      range = range.shiftedSpeculative(-1);
+    }
+    if (callWidth != 0) {
+      range = range.shifted(callWidth);
+    }
+
+    return (
+      valueThreeBet: false,
+      lightThreeBet: light,
+      call: range.contains(hand),
+    );
+  }
+}

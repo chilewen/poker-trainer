@@ -34,7 +34,7 @@ class LobbyScreen extends ConsumerWidget {
             Expanded(
               child: _LobbyCard(
                 title: '场景 · 练',
-                subtitle: '单挑 · 松浪 · 紧凶',
+                subtitle: '单挑 · 松浪 · 紧凶 · 松凶',
                 icon: Icons.gps_fixed,
                 colors: [const Color(0xFF0B5394), const Color(0xFF14B8D4)],
                 onTap: () => _pickScenario(context, ref),
@@ -93,6 +93,7 @@ class LobbyScreen extends ConsumerWidget {
     const scenarios = [
       ('单挑 · 紧凶', [AiStyle.tightAggressive]),
       ('单挑 · 松跟', [AiStyle.loosePassive]),
+      ('单挑 · 松凶', [AiStyle.looseAggressive]),
       ('松浪混战 · 6人桌', [
         AiStyle.loosePassive,
         AiStyle.loosePassive,
@@ -106,6 +107,23 @@ class LobbyScreen extends ConsumerWidget {
         AiStyle.tightAggressive,
         AiStyle.tightAggressive,
         AiStyle.tightAggressive,
+      ]),
+      ('松凶乱斗 · 6人桌', [
+        AiStyle.looseAggressive,
+        AiStyle.looseAggressive,
+        AiStyle.looseAggressive,
+        AiStyle.looseAggressive,
+        AiStyle.looseAggressive,
+      ]),
+      ('混合对手 · 9人桌', [
+        AiStyle.tightAggressive,
+        AiStyle.loosePassive,
+        AiStyle.looseAggressive,
+        AiStyle.tightAggressive,
+        AiStyle.loosePassive,
+        AiStyle.looseAggressive,
+        AiStyle.tightAggressive,
+        AiStyle.loosePassive,
       ]),
     ];
     showModalBottomSheet<void>(

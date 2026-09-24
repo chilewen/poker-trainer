@@ -38,15 +38,21 @@ class _Stats {
     return '${(100 * (a[s] ?? 0) / d).toStringAsFixed(0)}%';
   }
 
+  static String header() => '  ${''.padRight(18)}${_cells((s) => s.label)}';
+
   String pctLine(String label, Map<AiStyle, int> m, Map<AiStyle, int> denom) =>
-      '  ${label.padRight(18)}'
-      '${_ratio(m, denom, AiStyle.tightAggressive).padLeft(7)}'
-      '${_ratio(m, denom, AiStyle.loosePassive).padLeft(9)}';
+      '  ${label.padRight(18)}${_cells((s) => _ratio(m, denom, s))}';
 
   String countLine(String label, Map<AiStyle, int> m) =>
-      '  ${label.padRight(18)}'
-      '${'${m[AiStyle.tightAggressive] ?? 0}'.padLeft(7)}'
-      '${'${m[AiStyle.loosePassive] ?? 0}'.padLeft(9)}';
+      '  ${label.padRight(18)}${_cells((s) => '${m[s] ?? 0}')}';
+
+  static String _cells(String Function(AiStyle) render) {
+    final buf = StringBuffer();
+    for (final s in AiStyle.values) {
+      buf.write(render(s).padLeft(9));
+    }
+    return buf.toString();
+  }
 }
 
 List<Card> _boardAt(List<Card> board, Street s) => switch (s) {
@@ -62,7 +68,12 @@ void main() {
   final ais = <String, AiPlayer>{};
   final styles = <String, AiStyle>{};
   for (var i = 0; i < 9; i++) {
-    final style = i.isEven ? AiStyle.tightAggressive : AiStyle.loosePassive;
+    const rotation = [
+      AiStyle.tightAggressive,
+      AiStyle.loosePassive,
+      AiStyle.looseAggressive,
+    ];
+    final style = rotation[i % rotation.length];
     final id = 'ai$i';
     g.addPlayer(id, '${style.label}$i');
     ais[id] = AiPlayer(style, random: rnd);
@@ -226,7 +237,7 @@ void main() {
   print('翻后单街 >=3 次加注: $raiseWars');
   print('结束街: ${endStreet.entries.map((e) => '${e.key.name}=${e.value}').join(' ')}');
   print('');
-  print('=== 按风格 ===            紧凶    松被动');
+  print('=== 按风格 ===${_Stats.header()}');
   print(st.pctLine('翻前 弃牌率', st.preFold, st.preDecisions));
   print(st.pctLine('翻前 跟注/溜入率', st.preLimp, st.preDecisions));
   print(st.pctLine('翻前 加注率', st.preRaise, st.preDecisions));
@@ -235,6 +246,7 @@ void main() {
   print(st.countLine('翻后 下注次数', st.postBet));
   print(st.countLine('翻后 加注次数', st.postRaise));
   print(st.pctLine('翻牌 c-bet 率', st.cbets, st.cbetChances));
+  print(st.countLine('翻牌听牌次数', st.flopDraws));
   print(st.pctLine('翻牌 听牌开火率', st.flopDrawAggro, st.flopDraws));
   print(st.countLine('翻前 决策数', st.preDecisions));
   print(st.countLine('翻后 决策数', st.postDecisions));

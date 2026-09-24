@@ -7,14 +7,144 @@ import '../../../engine/types.dart';
 import '../../../trainer/odds.dart';
 import 'hand_strength.dart';
 
-/// AI 风格：紧凶（打得少打得凶）与松被动（跟注站，很少加注）。
+/// AI 风格：
+/// - 紧凶：打得少打得凶，会用听牌和空气持续施压；
+/// - 松被动：跟注站，什么牌都便宜跟，很少主动加注；
+/// - 松凶：入池宽但攻击性强，半诈唬与诈唬压得最凶。
 enum AiStyle {
   tightAggressive('紧凶'),
-  loosePassive('松被动');
+  loosePassive('松被动'),
+  looseAggressive('松凶');
 
   const AiStyle(this.label);
   final String label;
+
+  /// 风格参数表：三种风格共用同一套决策逻辑，区别只在这组数字。
+  _Profile get _profile => switch (this) {
+        AiStyle.tightAggressive => _tightProfile,
+        AiStyle.loosePassive => _passiveProfile,
+        AiStyle.looseAggressive => _looseAggressiveProfile,
+      };
 }
+
+/// 一种风格的参数表。抽出来是为了让风格差异可解释、可微调，
+/// 而不是散落在决策代码里的 `_tag ? a : b`。
+class _Profile {
+  const _Profile({
+    required this.openBase,
+    required this.openByPosition,
+    required this.limpLine,
+    required this.threeBetLine,
+    required this.lightThreeBet,
+    required this.callBase,
+    required this.callByPosition,
+    required this.openSizeBb,
+    required this.positionSensitivity,
+    required this.bluffScale,
+    required this.semiBluffScale,
+    required this.aggressionScale,
+    required this.semiBluffRaiseScale,
+    required this.bluffRaiseScale,
+    this.lightThreeBetAnyPosition = false,
+    this.limpsAnyPrice = false,
+  });
+
+  /// 开池加注的 Chen 阈值 = [openBase] - [openByPosition] × 位置系数。
+  final double openBase;
+  final double openByPosition;
+
+  /// 无人加注时的溜入阈值。
+  final double limpLine;
+
+  /// 价值 3bet（再加注）的 Chen 阈值。
+  final double threeBetLine;
+
+  /// 轻 3bet 的频率（0 = 不做）。
+  final double lightThreeBet;
+  final bool lightThreeBetAnyPosition;
+
+  /// 面对加注的冷跟阈值 = [callBase] - [callByPosition] × 位置系数。
+  final double callBase;
+  final double callByPosition;
+
+  /// 开池加注的基准大小（bb）。
+  final double openSizeBb;
+
+  /// 位置对开火频率的影响程度：1 = 很在意位置（紧凶），
+  /// 0 = 完全不在意（松凶在哪个位置都敢压）。
+  final double positionSensitivity;
+
+  /// 纯诈唬频率倍率。
+  final double bluffScale;
+
+  /// 听牌半诈唬频率倍率。
+  final double semiBluffScale;
+
+  /// 强牌加注 / 中等牌薄价值下注的频率倍率。
+  final double aggressionScale;
+
+  /// 听牌半诈唬「加注」的频率倍率。
+  final double semiBluffRaiseScale;
+
+  /// 诈唬加注（含河牌最后一枪）的频率倍率。
+  final double bluffRaiseScale;
+
+  /// 跟注站特性：溜入时不看价格。
+  final bool limpsAnyPrice;
+}
+
+const _tightProfile = _Profile(
+  openBase: 8.6,
+  openByPosition: 3.2,
+  limpLine: 4.5,
+  threeBetLine: 11.5,
+  lightThreeBet: 0.12,
+  callBase: 9.6,
+  callByPosition: 1.6,
+  openSizeBb: 3,
+  positionSensitivity: 1.0,
+  bluffScale: 1.0,
+  semiBluffScale: 1.0,
+  aggressionScale: 1.0,
+  semiBluffRaiseScale: 1.0,
+  bluffRaiseScale: 1.0,
+);
+
+const _passiveProfile = _Profile(
+  openBase: 11.5,
+  openByPosition: 2.0,
+  limpLine: 1.5,
+  threeBetLine: 13.5,
+  lightThreeBet: 0.0,
+  callBase: 6.0,
+  callByPosition: 1.0,
+  openSizeBb: 2,
+  positionSensitivity: 1.0,
+  bluffScale: 0.45,
+  semiBluffScale: 0.55,
+  aggressionScale: 0.7,
+  semiBluffRaiseScale: 0.5,
+  bluffRaiseScale: 0.6,
+  limpsAnyPrice: true,
+);
+
+const _looseAggressiveProfile = _Profile(
+  openBase: 8.2,
+  openByPosition: 3.0,
+  limpLine: 3.0,
+  threeBetLine: 10.5,
+  lightThreeBet: 0.22,
+  lightThreeBetAnyPosition: true,
+  callBase: 7.6,
+  callByPosition: 1.4,
+  openSizeBb: 3,
+  positionSensitivity: 0.4,
+  bluffScale: 1.6,
+  semiBluffScale: 1.25,
+  aggressionScale: 1.2,
+  semiBluffRaiseScale: 1.3,
+  bluffRaiseScale: 1.6,
+);
 
 /// AI 的一次决策结果。
 class AiDecision {
@@ -44,6 +174,7 @@ class _Plan {
 }
 
 /// 规则型 AI：翻牌前用 Chen 公式给起手牌打分，翻牌后「读牌 + 读人」。
+/// 风格差异全部通过 [_Profile] 参数体现。
 ///
 /// 决策流程：
 /// 1. 先读出自己手里是什么（[HandTier] 成牌层级 + 听牌 outs）；
@@ -67,7 +198,7 @@ class AiPlayer {
   late final double _bluffiness;
   late final double _looseness;
 
-  bool get _tag => style == AiStyle.tightAggressive;
+  _Profile get _p => style._profile;
 
   String? _planHandId;
   _Plan? _plan;
@@ -139,17 +270,16 @@ class AiPlayer {
 
     // ---- 无人加注：开池拉升，或便宜溜入看翻牌 ----
     if (raises == 0) {
-      final openLine = _tag ? 8.6 - 3.2 * pos : 11.5 - 2.0 * pos;
+      final openLine = _p.openBase - _p.openByPosition * pos;
       final openThreshold = openLine * (2 - _looseness);
       if (score >= openThreshold && me.stack > 0) {
         return AiDecision(ActionType.raise,
             amountTo: _openSize(game, bb, spot.limpers));
       }
       if (toCall == 0) return const AiDecision(ActionType.check); // 大盲免费
-      // 溜入：位置越好越愿意；松被动几乎什么牌都便宜跟。
-      final limpLine = _tag ? 4.5 * _looseness : 1.5;
+      // 溜入：位置越好越愿意；跟注站几乎什么牌都便宜跟。
       final cheap = toCall <= bb;
-      if (score >= limpLine && (cheap || !_tag)) {
+      if (score >= _p.limpLine * _looseness && (cheap || _p.limpsAnyPrice)) {
         return const AiDecision(ActionType.call);
       }
       return const AiDecision(ActionType.fold);
@@ -167,24 +297,23 @@ class AiPlayer {
     }
 
     // ---- 面对单个开池加注 ----
-    final threeBetLine = _tag ? 11.5 : 13.5;
     final jam = toCall >= me.stack || (shortStack && score >= 11.0);
-    if (score >= threeBetLine || (jam && score >= 10.5)) {
+    if (score >= _p.threeBetLine || (jam && score >= 10.5)) {
       if (jam) return const AiDecision(ActionType.raise);
       final size = spot.inPosition ? 3 : 4;
       return AiDecision(ActionType.raise, amountTo: game.currentBet * size);
     }
     // 轻 3bet（位置 + 阻断牌）：真人也会用 A5s、KQo 这类牌保护范围。
-    if (_tag &&
-        spot.inPosition &&
+    if (_p.lightThreeBet > 0 &&
+        (_p.lightThreeBetAnyPosition || spot.inPosition) &&
         raises == 1 &&
         score >= 8.0 &&
-        _roll(0.12 * _bluffiness)) {
+        _roll(_p.lightThreeBet * _bluffiness)) {
       return AiDecision(ActionType.raise, amountTo: game.currentBet * 3);
     }
 
     // 冷跟：位置越好、越便宜越愿意跟；小对子深筹码可以买三条。
-    final callLine = _tag ? 9.6 - 1.6 * pos : 6.0 - 1.0 * pos;
+    final callLine = _p.callBase - _p.callByPosition * pos;
     final setMine = pocketPair &&
         toCall <= me.stack / 12 &&
         me.stack > bb * 25 &&
@@ -200,11 +329,9 @@ class AiPlayer {
     return const AiDecision(ActionType.fold);
   }
 
-  /// 开池加注到 ~3bb（每多一个溜入者多加 1bb）。
-  int _openSize(GameEngine game, int bb, int limpers) {
-    final base = _tag ? 3 : 2;
-    return bb * (base + limpers);
-  }
+  /// 开池加注到 ~3bb（跟注站 2bb；每多一个溜入者多加 1bb）。
+  int _openSize(GameEngine game, int bb, int limpers) =>
+      (bb * (_p.openSizeBb + limpers)).round();
 
   // ---------- 翻牌后：读牌 → 读人 → 下注/跟注/加注 ----------
 
@@ -294,6 +421,7 @@ class AiPlayer {
     if (read.tier == HandTier.medium) {
       final thin = (multiway ? 0.2 : 0.45) *
           _aggression *
+          _p.aggressionScale *
           (texture.wetness > 0.6 ? 0.6 : 1.0);
       if (_roll(thin)) return _bet(game, me, 0.45);
       return const AiDecision(ActionType.check);
@@ -307,6 +435,12 @@ class AiPlayer {
     return const AiDecision(ActionType.check);
   }
 
+  /// 位置调整：紧凶很在意位置，松凶在哪个位置都敢压。
+  double _positionFactor(_Spot spot, double inPos, double outPos) {
+    final base = spot.inPosition ? inPos : outPos;
+    return 1 + (base - 1) * _p.positionSensitivity;
+  }
+
   /// 半诈唬频率：听牌越强、位置越好、人越少越敢打。
   double _semiBluffChance(HandReading read, _Spot spot) {
     var base = switch (read.drawOuts) {
@@ -316,9 +450,9 @@ class AiPlayer {
       _ => 0.0,
     };
     if (read.nutFlushDraw) base += 0.06;
-    base *= _tag ? 1.0 : 0.55; // 松被动很少主动开火
+    base *= _p.semiBluffScale;
     base *= _bluffiness;
-    base *= spot.inPosition ? 1.15 : 0.85;
+    base *= _positionFactor(spot, 1.15, 0.85);
     if (spot.opponents >= 3) {
       base *= 0.3; // 多人底池弃牌率低
     } else if (spot.opponents == 2) {
@@ -330,12 +464,12 @@ class AiPlayer {
   /// 纯诈唬频率：位置、人数、牌面、对手牌线、是否延续计划。
   double _bluffChance(GameEngine game, _Spot spot, HandReading read) {
     final river = game.street == Street.river;
-    var base = _tag ? (river ? 0.22 : 0.36) : (river ? 0.08 : 0.16);
+    var base = (river ? 0.22 : 0.36) * _p.bluffScale;
     base *= _bluffiness;
     // 有摊牌价值（弱成牌）别乱开火；中等牌更不该演空气。
     if (read.tier == HandTier.weak) base *= 0.35;
     if (read.tier >= HandTier.medium) base *= 0.1;
-    base *= spot.inPosition ? 1.2 : 0.85;
+    base *= _positionFactor(spot, 1.2, 0.85);
     if (spot.opponents >= 3) {
       base *= 0.35;
     } else if (spot.opponents == 2) {
@@ -391,7 +525,10 @@ class AiPlayer {
       };
       if (canRaise &&
           spot.raisesThisStreet <= 1 &&
-          _roll(base * _aggression * (read.texture.wetness > 0.6 ? 0.8 : 1.0))) {
+          _roll(base *
+              _aggression *
+              _p.aggressionScale *
+              (read.texture.wetness > 0.6 ? 0.8 : 1.0))) {
         return _raise(game, me, 0.8);
       }
       return const AiDecision(ActionType.call);
@@ -412,7 +549,10 @@ class AiPlayer {
           spot.villainStrength > 0.8 &&
           read.texture.wetness > 0.6;
       if (equity() >= need && !scary) return const AiDecision(ActionType.call);
-      if (canRaise && smallBet && spot.opponents == 1 && _roll(0.15 * _aggression)) {
+      if (canRaise &&
+          smallBet &&
+          spot.opponents == 1 &&
+          _roll(0.15 * _aggression * _p.aggressionScale)) {
         return _raise(game, me, 0.7); // 对手像是在打阻挡注
       }
       return const AiDecision(ActionType.fold);
@@ -460,7 +600,7 @@ class AiPlayer {
     var base = read.isComboDraw
         ? 0.35
         : (read.drawOuts >= 8 ? 0.22 : 0.08);
-    base *= _tag ? 1.0 : 0.5;
+    base *= _p.semiBluffRaiseScale;
     base *= _bluffiness * _aggression;
     if (spot.opponents >= 2) base *= 0.4;
     if (spot.betSizeRel >= 0.8) base *= 0.4; // 大注不硬凑
@@ -470,7 +610,8 @@ class AiPlayer {
   /// 诈唬加注（含河牌未成牌的最后一枪）的频率。
   double _bluffRaiseChance(GameEngine game, _Spot spot, HandReading read) {
     if (spot.opponents > 1) return 0.0;
-    var base = game.street == Street.river ? 0.06 : 0.05;
+    var base = (game.street == Street.river ? 0.06 : 0.05) *
+        _p.bluffRaiseScale;
     base *= _bluffiness;
     if (spot.betSizeRel <= 0.35) base *= 2.0; // 对手小注 = 牌力偏弱
     if (spot.betSizeRel >= 0.75) base *= 0.35; // 大注通常是真牌，别硬顶

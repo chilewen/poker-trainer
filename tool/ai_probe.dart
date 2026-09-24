@@ -175,6 +175,26 @@ void main() {
           heroFirst: {Street.river: (type: ActionType.bet, frac: 0.5)}));
 
   print('');
+  print('== 松凶风格对照 == ');
+  show('听花（无人下注）LAG',
+      _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c', target: Street.flop,
+          style: AiStyle.looseAggressive));
+  show('空气（无人下注）LAG',
+      _sample(hole: '9h 8h', heroHole: '3c 2h', board: 'As Kd Qc', target: Street.flop,
+          style: AiStyle.looseAggressive));
+  show('miss 花（无人下注）LAG',
+      _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c 5h 9s', target: Street.river,
+          style: AiStyle.looseAggressive));
+  show('miss 花（面对 1 池 bet）LAG',
+      _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c 5h 9s', target: Street.river,
+          style: AiStyle.looseAggressive,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 1.0)}));
+  show('河牌顶对（面对 1/2 池 bet）LAG',
+      _sample(hole: 'Ah Qd', heroHole: '3c 2h', board: 'Qh 7d 2c 5h 9s', target: Street.river,
+          style: AiStyle.looseAggressive,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 0.5)}));
+
+  print('');
   print('== 松被动风格对照 == ');
   show('听花（无人下注）LP',
       _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c', target: Street.flop,

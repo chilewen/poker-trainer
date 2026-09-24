@@ -19,11 +19,11 @@ class TableController extends ChangeNotifier {
     List<AiStyle> opponentStyles = const [
       AiStyle.tightAggressive,
       AiStyle.loosePassive,
+      AiStyle.looseAggressive,
       AiStyle.tightAggressive,
       AiStyle.loosePassive,
-      AiStyle.tightAggressive,
     ],
-    this.aiThinkTime = const Duration(milliseconds: 450),
+    this.aiThinkTime = const Duration(milliseconds: 300),
     this.store,
     Random? random,
   })  : engine = GameEngine(config: config, random: random),
@@ -69,7 +69,7 @@ class TableController extends ChangeNotifier {
   }
 
   /// 实战开桌：按盲注级别与人数重建一桌（筹码重置），并立即发牌。
-  /// AI 风格按紧凶/松被动交替分配。
+  /// AI 风格按紧凶 / 松被动 / 松凶循环分配，桌上三种打法都有。
   void startRealTable({
     required String label,
     required GameConfig config,
@@ -77,9 +77,13 @@ class TableController extends ChangeNotifier {
   }) {
     assert(playerCount >= 2);
     _config = config;
+    const rotation = [
+      AiStyle.tightAggressive,
+      AiStyle.loosePassive,
+      AiStyle.looseAggressive,
+    ];
     startScenario(label, [
-      for (var i = 0; i < playerCount - 1; i++)
-        i.isEven ? AiStyle.tightAggressive : AiStyle.loosePassive,
+      for (var i = 0; i < playerCount - 1; i++) rotation[i % rotation.length],
     ]);
   }
 
