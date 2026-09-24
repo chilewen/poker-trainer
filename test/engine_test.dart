@@ -2024,6 +2024,74 @@ void main() {
     );
   }
 
+  /// 单挑：AI 按钮开池 250、英雄跟注；翻后的街英雄一律过牌/跟注，到了
+  /// [street] 英雄先下注 [frac] 池，统计 AI 面对这一注的应对。
+  ///
+  /// 和 aiVsCheckBet 的区别是「底池是加注过的、前面的街 AI 可以自由开火」，
+  /// 更接近真实牌局里 AI 面对河牌下注的那个局面（底池大小会直接影响赔率）。
+  ({double fold, double call, double raise, int total}) aiVsHeroBet(
+      String hole, String board, double frac,
+      {Street street = Street.flop, int seeds = 200}) {
+    var fold = 0, call = 0, raise = 0, total = 0;
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
+      final rnd = Random(seed);
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      )
+        ..addPlayer('ai', 'AI')
+        ..addPlayer('hero', '我');
+      final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+      g.startHand(
+        holeOverride: {'ai': _cs(hole), 'hero': _cs('3c 2h')},
+        boardOverride: _cs(board),
+      );
+      g.apply('ai', ActionType.raise, amount: 250);
+      g.apply('hero', ActionType.call);
+
+      var guard = 0;
+      while (!g.handOver && guard++ < 300) {
+        final pa = g.pendingAction();
+        final legal = pa.actions;
+        final facing = legal.any((a) => a.type == ActionType.call);
+        if (pa.player.id == 'ai') {
+          final d = ai.decide(g, pa.player);
+          if (g.street == street && facing) {
+            total++;
+            switch (d.type) {
+              case ActionType.fold:
+                fold++;
+              case ActionType.call:
+                call++;
+              default:
+                raise++;
+            }
+            break;
+          }
+          g.apply('ai', d.type, amount: d.amountTo);
+          continue;
+        }
+        if (g.street == street && !facing && legal.any((a) => a.type == ActionType.bet)) {
+          final la = legal.firstWhere((a) => a.type == ActionType.bet);
+          g.apply(
+              'hero',
+              ActionType.bet,
+              amount: (g.potTotal() * frac)
+                  .round()
+                  .clamp(la.minAmount, la.maxAmount));
+          continue;
+        }
+        final want = facing ? ActionType.call : ActionType.check;
+        g.apply(
+            'hero', legal.any((a) => a.type == want) ? want : ActionType.check);
+      }
+    }
+    final n = total;
+    double r(int v) => n == 0 ? 0 : v / n;
+    return (fold: r(fold), call: r(call), raise: r(raise), total: n);
+  }
+
   /// 单挑：英雄开池（溜入）、AI 补到 100，翻后 AI 先过牌、英雄按
   /// [frac] 池下注，统计 AI 在 [street] 面对下注的应对。
   ///
@@ -2111,6 +2179,77 @@ void main() {
         }
         final want = canCheck ? ActionType.check : ActionType.call;
         g.apply('hero', legal.any((a) => a.type == want) ? want : legal.first.type);
+      }
+    }
+    final n = total;
+    double r(int v) => n == 0 ? 0 : v / n;
+    return (fold: r(fold), call: r(call), raise: r(raise), total: n);
+  }
+
+  /// 单挑：AI 按钮开池 250、英雄跟注；翻牌英雄过牌，AI 一开火英雄就加注
+  /// 到 AI 下注的 [mult] 倍（2.2 ≈ 最小加注，3.5 ≈ 正常加注），统计 AI
+  /// 面对这个加注的应对。
+  ///
+  /// AI 自己过牌的那些手不算样本——量的是「我下注、被他加注」这个局面。
+  ({double fold, double call, double raise, int total}) aiVsBetThenRaise(
+      String hole, String board, double mult,
+      {Street street = Street.flop, int seeds = 200}) {
+    var fold = 0, call = 0, raise = 0, total = 0;
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
+      final rnd = Random(seed);
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      )
+        ..addPlayer('ai', 'AI')
+        ..addPlayer('hero', '我');
+      final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+      g.startHand(
+        holeOverride: {'ai': _cs(hole), 'hero': _cs('4c 5d')},
+        boardOverride: _cs(board),
+      );
+      g.apply('ai', ActionType.raise, amount: 250);
+      g.apply('hero', ActionType.call);
+
+      var guard = 0;
+      var raised = false;
+      while (!g.handOver && guard++ < 300) {
+        final pa = g.pendingAction();
+        final legal = pa.actions;
+        final facing = legal.any((a) => a.type == ActionType.call);
+        if (pa.player.id == 'ai') {
+          final d = ai.decide(g, pa.player);
+          if (g.street == street && facing && raised) {
+            total++;
+            switch (d.type) {
+              case ActionType.fold:
+                fold++;
+              case ActionType.call:
+                call++;
+              default:
+                raise++;
+            }
+            break;
+          }
+          g.apply('ai', d.type, amount: d.amountTo);
+          continue;
+        }
+        final canRaise = legal.any((a) => a.type == ActionType.raise);
+        if (g.street == street && facing && !raised && canRaise) {
+          raised = true;
+          final la = legal.firstWhere((a) => a.type == ActionType.raise);
+          g.apply(
+              'hero',
+              ActionType.raise,
+              amount: (g.currentBet * mult)
+                  .round()
+                  .clamp(la.minAmount, la.maxAmount));
+          continue;
+        }
+        final want = facing ? ActionType.call : ActionType.check;
+        g.apply(
+            'hero', legal.any((a) => a.type == want) ? want : ActionType.check);
       }
     }
     final n = total;
@@ -2257,6 +2396,63 @@ void main() {
     expect(minRaise.fold, lessThan(secondPair.fold - 0.15),
         reason: '小加注不该弃得跟三倍加注一样多 '
             '（弃 ${pct(minRaise.fold)} vs ${pct(secondPair.fold)}）');
+  });
+
+  test('面对加注：最小加注不该交牌，重加注照样收手', () {
+    // 加注的代价要看「加得多大」：最小加注只多花约 0.4 倍池（赔率反而更好），
+    // 底对/第二对按赔率本来就够跟；重加注（≈1 倍池起）才是「一抬就送」。
+    // 以前不分大小一律乘 1.85，探针里底对面对最小加注弃 77%、第二对转牌
+    // 弃 55%——对手随便拿两张牌最小加注一下就能白拿底池。
+    String pct(double v) => '${(100 * v).round()}%';
+    const flop = 'Ks 7d 3c';
+    final small = aiVsBetThenRaise('4h 3h', flop, 2.2, seeds: 200);
+    final big = aiVsBetThenRaise('4h 3h', flop, 3.5, seeds: 200);
+    expect(small.total, greaterThan(_trialSeeds(50)), reason: '样本要够');
+    expect(small.fold, lessThan(0.6),
+        reason: '底对面对最小加注不该交牌（弃 ${pct(small.fold)}）');
+    expect(big.fold, greaterThan(small.fold + 0.2),
+        reason: '重加注要明显更少跟（弃 ${pct(big.fold)} vs ${pct(small.fold)}）');
+
+    final secondPair = aiVsBetThenRaise('8h 7s', 'Kh 8d 3c 2s', 2.2,
+        street: Street.turn, seeds: 200);
+    expect(secondPair.total, greaterThan(_trialSeeds(40)), reason: '样本要够');
+    expect(secondPair.fold, lessThan(0.5),
+        reason: '转牌第二对面对最小加注要跟一部分（弃 ${pct(secondPair.fold)}）');
+  });
+
+  test('河牌高牌：小注要抓，大注照样弃', () {
+    // A 高、K 高没成牌但有摊牌价值：对着 1/4、1/3 池的小注跟一张是常规
+    // 操作（小注大半是没把握的薄价值/阻挡注）。以前这里一律弃牌（探针：
+    // 面对 1/4 池弃 83%），对手拿任意两张牌小注一下就能白拿底池。
+    String pct(double v) => '${(100 * v).round()}%';
+    const river = 'Qd 7d 2c 5h 9s';
+    final small = aiVsHeroBet('Ad Kd', river, 0.25,
+        street: Street.river, seeds: 200);
+    final big = aiVsHeroBet('Ad Kd', river, 1.0,
+        street: Street.river, seeds: 200);
+    expect(small.total, greaterThan(_trialSeeds(50)), reason: '样本要够');
+    expect(small.call, greaterThan(0.25),
+        reason: 'A 高面对 1/4 池小注要抓一部分（跟 ${pct(small.call)}）');
+    expect(big.fold, greaterThan(0.9),
+        reason: 'A 高面对一个底池的大注照样弃（弃 ${pct(big.fold)}）');
+  });
+
+  test('河牌底对：小注要按赔率跟，大注照弃', () {
+    // 河牌的小注（1/4、1/3 池）是宽范围，范围模型只按牌型给权重、不看这一
+    // 注下得多小，算出来的胜率偏悲观：底对面对 1/4 池只算到 16.6%（赔率
+    // 20%），以前 100% 弃牌——对手拿任意两张牌小注一下就能白拿底池。
+    String pct(double v) => '${(100 * v).round()}%';
+    const river = 'Qd 7d 2c 5h 9s';
+    final small = aiVsHeroBet('Ah 2d', river, 0.25,
+        street: Street.river, seeds: 200);
+    final big = aiVsHeroBet('Ah 2d', river, 1.0,
+        street: Street.river, seeds: 200);
+    expect(small.total, greaterThan(_trialSeeds(50)), reason: '样本要够');
+    expect(small.call, greaterThan(0.4),
+        reason: '底对面对 1/4 池要按赔率跟（跟 ${pct(small.call)} '
+            '弃 ${pct(small.fold)}）');
+    expect(big.fold, greaterThan(0.9),
+        reason: '底对面对一个底池的大注照样弃（弃 ${pct(big.fold)}）');
   });
 
   test('位置反转：没位置不该比有位置更爱加注', () {

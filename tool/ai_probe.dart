@@ -191,6 +191,14 @@ void main() {
   show('空气 面对方 pot bet',
       _sample(hole: '8h 7h', heroHole: '9c 8d', board: 'As Kd Qc', target: Street.flop,
           heroFirst: {Street.flop: (type: ActionType.bet, frac: 1.0)}));
+  // 底牌要挑 AI 翻前肯玩的（A2o 会直接弃牌、样本空掉 n=0），牌面还不能
+  // 凑出花听——所以是 A2s 配一张黑桃 2 的牌面，量的才是「纯一对」。
+  show('底对 面对方 1/3 池',
+      _sample(hole: 'Ah 2h', heroHole: '3c 4h', board: 'Qc 7d 2s', target: Street.flop,
+          heroFirst: {Street.flop: (type: ActionType.bet, frac: 0.33)}));
+  show('第二对 面对方 1/3 池',
+      _sample(hole: '8h 7s', heroHole: '3c 4h', board: 'Kh 8d 3c', target: Street.flop,
+          heroFirst: {Street.flop: (type: ActionType.bet, frac: 0.33)}));
   show('底对 面对方 pot bet',
       _sample(hole: 'Ah 2h', heroHole: '3c 4h', board: 'Qh 7d 2c', target: Street.flop,
           heroFirst: {Street.flop: (type: ActionType.bet, frac: 1.0)}));
@@ -207,6 +215,13 @@ void main() {
       _sample(hole: '9h 9d', heroHole: '3c 2h', board: '7s 4c 2d', target: Street.flop,
           heroFirst: {Street.flop: (type: ActionType.bet, frac: 0.5)}));
 
+  show('第二对（转牌 面对 1/3 池）',
+      _sample(hole: '8h 7s', heroHole: '3c 4h', board: 'Kh 8d 3c 5s', target: Street.turn,
+          heroFirst: {Street.turn: (type: ActionType.bet, frac: 0.33)}));
+  show('底对（转牌 面对 1/3 池）',
+      _sample(hole: 'Ah 2h', heroHole: '3c 4h', board: 'Qc 7d 2s 5h', target: Street.turn,
+          heroFirst: {Street.turn: (type: ActionType.bet, frac: 0.33)}));
+
   print('');
   print('== 转牌圈（听牌未成，对手一直过牌）== ');
   show('听花转牌（无人下注）',
@@ -219,6 +234,34 @@ void main() {
           heroFirst: {Street.turn: (type: ActionType.bet, frac: 1.2)}));
 
   print('');
+  print('== 翻牌 vs 转牌：同一个牌力的防守范围该不该收窄 == ');
+  for (final frac in [0.5, 0.66]) {
+    print('-- 第二对 87，对手下 ${(100 * frac).round()}% 池 --');
+    show('  翻牌',
+        _sample(hole: '8h 7s', heroHole: '3c 4h', board: 'Kh 8d 3c', target: Street.flop,
+            heroFirst: {Street.flop: (type: ActionType.bet, frac: frac)}));
+    show('  转牌',
+        _sample(hole: '8h 7s', heroHole: '3c 4h', board: 'Kh 8d 3c 5s', target: Street.turn,
+            heroFirst: {
+              Street.flop: (type: ActionType.bet, frac: frac),
+              Street.turn: (type: ActionType.bet, frac: frac),
+            }));
+  }
+
+  print('');
+  print('== 无人下注时的薄价值/控池 == ');
+  show('翻牌第二对（无人下注）',
+      _sample(hole: '8h 7s', heroHole: '3c 2h', board: 'Kh 8d 3c', target: Street.flop));
+  show('转牌第二对（无人下注）',
+      _sample(hole: '8h 7s', heroHole: '3c 2h', board: 'Kh 8d 3c 5h', target: Street.turn));
+  show('河牌第二对（无人下注）',
+      _sample(hole: '8h 7s', heroHole: '3c 2h', board: 'Kh 8d 3c 5h 9s', target: Street.river));
+  show('河牌顶对（无人下注）',
+      _sample(hole: 'Ah Qd', heroHole: '3c 2h', board: 'Qh 7d 2c 5h 9s', target: Street.river));
+  show('河牌底对（无人下注）',
+      _sample(hole: 'Ah 4h', heroHole: '3c 2h', board: 'Qc 7d 4s 5h 9d', target: Street.river));
+
+  print('');
   print('== 河牌圈（听牌已经错过）== ');
   show('miss 花（无人下注）',
       _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c 5h 9s', target: Street.river));
@@ -228,6 +271,24 @@ void main() {
   show('miss 花（面对 1 池 bet）',
       _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c 5h 9s', target: Street.river,
           heroFirst: {Street.river: (type: ActionType.bet, frac: 1.0)}));
+  show('miss 花（面对 1/2 池 bet）',
+      _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c 5h 9s', target: Street.river,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 0.5)}));
+  show('miss 花（面对 1/3 池 bet）',
+      _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c 5h 9s', target: Street.river,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 0.33)}));
+  show('河牌第二对（面对 1/4 池 bet）',
+      _sample(hole: '8h 7s', heroHole: '3c 2h', board: 'Kh 8d 3c 5h 9s', target: Street.river,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 0.25)}));
+  show('河牌底对（面对 1/4 池 bet）',
+      _sample(hole: '4h 3h', heroHole: '3c 2h', board: 'Ks 7d 3c 5h 9s', target: Street.river,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 0.25)}));
+  show('河牌底对（面对 1 池 bet）',
+      _sample(hole: '4h 3h', heroHole: '3c 2h', board: 'Ks 7d 3c 5h 9s', target: Street.river,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 1.0)}));
+  show('高牌 Q 高（面对 1/4 池 bet）',
+      _sample(hole: 'Qh Jd', heroHole: '3c 2h', board: '9d 7d 2c 5h 9s', target: Street.river,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 0.25)}));
   show('成花（面对 1/2 池 bet）',
       _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c 5h 3d', target: Street.river,
           heroFirst: {Street.river: (type: ActionType.bet, frac: 0.5)}));
@@ -253,7 +314,8 @@ void main() {
       frac: 0.66, street: Street.turn);
   // 下面两行才是「没有听牌的一对牌」：挑牌时注意别让底牌和公共牌凑出
   // 同花听/顺子听（前两行的「底对」其实都带着花听，量出来的是听牌那一档）。
-  pos('底对（转牌 2/3 池）', hole: 'Ad 2h', board: 'Qh 7d 2c 5s',
+  // 同样避开 A2o（会翻前弃牌）：A2s 配黑桃 2 的牌面，没有花听/顺听。
+  pos('底对（转牌 2/3 池）', hole: 'Ah 2h', board: 'Qc 7d 2s 5h',
       frac: 0.66, street: Street.turn);
   pos('第二对（转牌 2/3 池）', hole: '8h 7s', board: 'Kh 8d 3c 5s',
       frac: 0.66, street: Street.turn);
