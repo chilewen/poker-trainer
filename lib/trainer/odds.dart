@@ -164,66 +164,78 @@ class Odds {
       }
     }
 
+    // 每个样本带一个重要性权重：均匀抽一手，用它落在对手范围里的概率
+    // 去加权。这样估计的是「对手范围给定」下的条件分布，而不是
+    // 「在随机抽到的那一小撮牌里挑一个」。
+    var wSum = 0.0;
+    var wWins = 0.0;
+    var wTies = 0.0;
+    // 范围谓词万一处处为 0（正常不会），用无权重的计数兜底，别算出 NaN。
     var wins = 0;
     var ties = 0;
+
     for (var t = 0; t < trials; t++) {
       final pool = List<Card>.of(unknown)..shuffle(rng);
       final runout = [...board, ...pool.take(needBoard)];
       final heroScore = HandEvaluator.bestOf([...heroHole, ...runout]);
       final rest = pool.sublist(needBoard);
 
-      var heroWins = true;
-      var heroTies = false;
+      var weight = 1.0;
+      var heroLost = false;
+      var heroTied = false;
       for (var o = 0; o < opponents; o++) {
-        // 按权重抽对手的底牌：范围里权重低的牌就按比例少出现。
-        // （以前是「试几次不中就随便拿一手」，那等于把对手的范围
-        // 掺成随机牌，会系统性高估我方胜率、导致跟注过宽。）
         List<Card> chosen;
-        HandScore chosenScore;
-        final fixed = needBoard == 0 && o == 0 ? riverPairs : null;
-        if (fixed != null && riverTotal > 0) {
-          chosen = _pickWeighted(fixed, riverWeights!, riverTotal, rng);
-          chosenScore = HandEvaluator.bestOf([...chosen, ...runout]);
+        if (needBoard == 0 && o == 0 && riverTotal > 0) {
+          // 河牌圈：权重表已经预计算好了，直接按权重抽就是精确的条件
+          // 分布，不用再乘权重（等价于权重 1）。
+          chosen = _pickWeighted(riverPairs!, riverWeights!, riverTotal, rng);
         } else {
-          final pairs = <List<Card>>[];
-          final weights = <double>[];
-          var total = 0.0;
-          for (var i = 0; i + 1 < rest.length; i += 2) {
-            final cand = [rest[i], rest[i + 1]];
-            final w = inRange(cand, HandEvaluator.bestOf([...cand, ...runout]));
-            if (w <= 0) continue;
-            pairs.add(cand);
-            weights.add(w);
-            total += w;
-          }
-          if (total <= 0) {
-            // 范围里一手都没有（正常的范围谓词不会这样）：退化成随机牌。
-            chosen = [rest[0], rest[1]];
-          } else {
-            chosen = _pickWeighted(pairs, weights, total, rng);
-          }
-          chosenScore = HandEvaluator.bestOf([...chosen, ...runout]);
+          // 均匀地从剩下的牌里抽**任意**两张组合，再看它的范围权重。
+          //
+          // 以前这里是「洗牌后相邻两张配成一对」：看似随机，其实只在
+          // ~21 个候选组合里按权重挑一个。范围一收紧（比如只有两对以上
+          // 才有分量），这 21 个候选里常常一手都没落进范围，于是退化成
+          // 随机牌；就算落进范围也只有两三手可选，胜率估计又偏又飘
+          // （同一个局面换个随机种子能差 0.09），跟注/弃牌自然就不像真人。
+          final i = rng.nextInt(rest.length - 1);
+          final j = i + 1 + rng.nextInt(rest.length - i - 1);
+          chosen = [rest[i], rest[j]];
+        }
+        final chosenScore = HandEvaluator.bestOf([...chosen, ...runout]);
+        if (needBoard != 0 || o != 0 || riverTotal <= 0) {
+          weight *= inRange(chosen, chosenScore);
         }
         rest.remove(chosen[0]);
         rest.remove(chosen[1]);
 
         if (chosenScore > heroScore) {
-          heroWins = false;
-          heroTies = false;
-          break;
+          heroLost = true;
         } else if (chosenScore == heroScore) {
-          heroTies = true;
+          heroTied = true;
         }
+        // 注意：这里**不能**提前 break。权重是「所有对手的乘积」，
+        // 少乘一个人这一份样本的分母就偏小，多对手胜率会整体被低估。
+        // 每个对手都要评估一次，代价就是多几次评估。
       }
-      if (heroWins && !heroTies) {
+      wSum += weight;
+      if (!heroLost && !heroTied) {
         wins++;
-      } else if (heroTies) {
+        wWins += weight;
+      } else if (!heroLost) {
         ties++;
+        wTies += weight;
       }
     }
+    if (wSum <= 0) {
+      return EquityResult(
+        win: wins / trials,
+        tie: ties / trials,
+        trials: trials,
+      );
+    }
     return EquityResult(
-      win: wins / trials,
-      tie: ties / trials,
+      win: wWins / wSum,
+      tie: wTies / wSum,
       trials: trials,
     );
   }

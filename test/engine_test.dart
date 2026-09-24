@@ -117,6 +117,63 @@ void main() {
     expect(vsRange2, closeTo(vsRange, 0.05)); // 换随机种子结果稳定
   });
 
+  test('范围胜率：翻牌圈按全组合采样，窄范围不能系统性低估', () {
+    final hole = _cs('Ks 9h'); // 顶对弱踢
+    final flop = _cs('Kd Jc 8h');
+    // 只有「两对以上」才有分量——对手这条线基本是真东西。
+    double onlyTwoPairPlus(List<Card> h, HandScore s) =>
+        s.category.rank >= 2 ? 1.0 : 0.02;
+    double wide(List<Card> h, HandScore s) => s.category.rank >= 2 ? 1.0 : 0.5;
+
+    double sample(int seed, double Function(List<Card>, HandScore) range) =>
+        Odds.equityVsRange(
+          heroHole: hole,
+          board: flop,
+          inRange: range,
+          trials: 900,
+          random: Random(seed),
+        ).win;
+
+    final narrow =
+        [for (var seed = 0; seed < 4; seed++) sample(seed, onlyTwoPairPlus)];
+    final avg = narrow.reduce((a, b) => a + b) / narrow.length;
+    final vsWide = sample(0, wide);
+
+    // 精确枚举「对手底牌 × 后续公共牌」得到的基准是 0.536。
+    // 旧实现（洗牌后相邻两张配成一手）只在 ~21 个随机候选里挑，
+    // 窄范围下几乎抽不到范围里的牌，会系统性低估到 0.38。
+    expect(avg, greaterThan(0.46), reason: '窄范围下不能系统性低估我方胜率');
+    expect(avg, lessThan(0.60));
+    expect(vsWide, greaterThan(avg), reason: '对手范围越宽，我方胜率越高');
+  });
+
+  test('范围胜率：多人底池的权重乘积不能提前断掉', () {
+    final hole = _cs('Ks 9h'); // 顶对弱踢
+    final board = _cs('Kd Jc 8h 2s 3d');
+    double range(List<Card> h, HandScore s) => s.category.rank >= 2
+        ? 1.0
+        : (s.category.rank == 1 ? 0.5 : 0.15);
+
+    final runs = [
+      for (var seed = 0; seed < 3; seed++)
+        Odds.equityVsRange(
+          heroHole: hole,
+          board: board,
+          opponents: 2,
+          inRange: range,
+          trials: 640,
+          random: Random(seed),
+        ).win
+    ];
+    final avg = runs.reduce((a, b) => a + b) / runs.length;
+
+    // 精确枚举所有对手组合（990×990 合法配对）得到的基准是 0.531。
+    // 曾经的写法是「输给某个对手就提前跳出」：那样这一份样本的权重
+    // 乘积会少乘后面几个对手，分母偏小，两家的胜率被压到 0.38。
+    expect(avg, greaterThan(0.47), reason: '两家对手时权重乘积必须完整');
+    expect(avg, lessThan(0.62));
+  });
+
   test('翻前范围：位置越靠后开池越宽，大盲防守最宽', () {
     final ep = PreflopRanges.open(Seat.ep);
     final btn = PreflopRanges.open(Seat.btn);
@@ -802,6 +859,651 @@ void main() {
     final avg = sum / sizes.length;
     expect((avg - 246).abs(), lessThan(14),
         reason: '换档只打散尺寸，平均尺度基本不动（实测 $avg，基准 246）');
+  });
+
+  /// 6 人桌：p3 弃 → p4 开 300 → p5 3bet 900 → 轮到按钮位 p0（AI）。
+  ({int raise, int call, int fold}) aiFacingThreeBet(String hole,
+      {int seeds = 200, AiStyle style = AiStyle.tightAggressive}) {
+    var raise = 0, call = 0, fold = 0;
+    for (var seed = 0; seed < seeds; seed++) {
+      final rnd = Random(seed);
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      );
+      for (var i = 0; i < 6; i++) {
+        g.addPlayer('p$i', 'P$i');
+      }
+      g.startHand(holeOverride: {'p0': _cs(hole)});
+      g.apply('p3', ActionType.fold);
+      g.apply('p4', ActionType.raise, amount: 300);
+      g.apply('p5', ActionType.raise, amount: 900);
+      final p = g.pendingAction().player;
+      if (p.id != 'p0') fail('轮到的是 ${p.id}，不是 p0');
+      final d = AiPlayer(style, random: rnd).decide(g, p);
+      switch (d.type) {
+        case ActionType.raise:
+          raise++;
+        case ActionType.call:
+          call++;
+        default:
+          fold++;
+      }
+    }
+    return (raise: raise, call: call, fold: fold);
+  }
+
+  test('翻前 4bet：QQ+/AK 面对方 3bet 会再加注回去，不是一路慢打', () {
+    for (final hole in ['Ah Ad', 'Kh Kd', 'Qh Qd', 'As Ks', 'Ah Kc']) {
+      final r = aiFacingThreeBet(hole);
+      expect(r.raise / 200, greaterThan(0.4),
+          reason: '$hole 面对方 3bet 该经常 4bet（4bet ${(100 * r.raise / 200).round()}%）');
+      // 也要留一部分跟注：全 4bet 就变成「一被 3bet 就加」的机器。
+      expect(r.call / 200, greaterThan(0.05),
+          reason: '$hole 也要有跟注的分量（跟注 ${(100 * r.call / 200).round()}%）');
+      expect(r.fold, 0, reason: '$hole 这种牌不能弃给 3bet');
+    }
+    // 垃圾牌不能跟着 4bet。
+    final trash = aiFacingThreeBet('7h 2c');
+    expect(trash.raise, 0, reason: '72o 不许 4bet');
+    expect(trash.fold / 200, greaterThan(0.9));
+  });
+
+  test('翻前 4bet：松被动拿 AA 更多是慢打（风格要分得开）', () {
+    final tag = aiFacingThreeBet('Ah Ad');
+    final lag = aiFacingThreeBet('Ah Ad', style: AiStyle.looseAggressive);
+    final lp = aiFacingThreeBet('Ah Ad', style: AiStyle.loosePassive);
+    expect(lag.raise, greaterThan(tag.raise),
+        reason: '松凶 4bet 比紧凶多（${lag.raise} vs ${tag.raise}）');
+    expect(lp.raise, lessThan(tag.raise - 40),
+        reason: '松被动拿 AA 大半只是跟注（4bet ${lp.raise}/200）');
+    // 但松被动也不会拿 AA 去弃牌。
+    expect(lp.fold, 0);
+  });
+
+  test('翻前 4bet：对手 4bet/5bet 回来，只有 AA/KK 还继续', () {
+    // 我们 4bet 后对手直接推全下，再轮回我们。
+    ({int cont, int fold}) facingJam(String hole) {
+      var cont = 0, fold = 0;
+      for (var seed = 0; seed < 200; seed++) {
+        final rnd = Random(seed);
+        final g = GameEngine(
+          config: const GameConfig(
+              startingStack: 10000, smallBlind: 50, bigBlind: 100),
+          random: rnd,
+        );
+        for (var i = 0; i < 6; i++) {
+          g.addPlayer('p$i', 'P$i');
+        }
+        g.startHand(holeOverride: {'p0': _cs(hole)});
+        g.apply('p3', ActionType.fold);
+        g.apply('p4', ActionType.raise, amount: 300);
+        g.apply('p5', ActionType.raise, amount: 900);
+        final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+        final p0 = g.pendingAction().player;
+        final d0 = ai.decide(g, p0);
+        g.apply('p0', d0.type, amount: d0.amountTo);
+        g.apply('p1', ActionType.fold);
+        g.apply('p2', ActionType.fold);
+        g.apply('p4', ActionType.raise, amount: 10000);
+        g.apply('p5', ActionType.fold);
+        if (g.handOver) continue;
+        final p = g.pendingAction().player;
+        if (p.id != 'p0') continue;
+        final d = ai.decide(g, p);
+        d.type == ActionType.fold ? fold++ : cont++;
+      }
+      return (cont: cont, fold: fold);
+    }
+
+    for (final hole in ['Ah Ad', 'Kh Kd']) {
+      final r = facingJam(hole);
+      expect(r.cont / 200, greaterThan(0.8),
+          reason: '$hole 面对全下要跟（继续 ${(100 * r.cont / 200).round()}%）');
+    }
+    for (final hole in ['Qh Qd', 'As Ks', 'Ah Kc']) {
+      final r = facingJam(hole);
+      expect(r.fold / 200, greaterThan(0.8),
+          reason: '$hole 不该跟人家推出来的全下（弃 ${(100 * r.fold / 200).round()}%）');
+    }
+  });
+
+  /// 单挑（AI 在按钮位、有位置）、英雄全程跟注或过牌，
+  /// 统计 AI 在某条街「没人下注」时的下注率。
+  double aiBetRateWhenCheckedTo(String hole, String board, Street street,
+      {int seeds = 200}) {
+    var fire = 0, total = 0;
+    for (var seed = 0; seed < seeds; seed++) {
+      final rnd = Random(seed);
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      )
+        ..addPlayer('ai', 'AI')
+        ..addPlayer('hero', '我');
+      final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+      g.startHand(
+        holeOverride: {'ai': _cs(hole), 'hero': _cs('6c 5c')},
+        boardOverride: _cs(board),
+      );
+      var guard = 0;
+      var recorded = false;
+      while (!g.handOver && guard++ < 300) {
+        final pa = g.pendingAction();
+        final p = pa.player;
+        final legal = pa.actions;
+        final facing = legal.any((a) => a.type == ActionType.call);
+        if (p.id == 'ai') {
+          final d = ai.decide(g, p);
+          if (!recorded && !facing && g.street == street) {
+            recorded = true;
+            total++;
+            if (d.type == ActionType.bet) fire++;
+          }
+          g.apply('ai', d.type, amount: d.amountTo);
+          if (recorded) break; // 要量的就是这一下，后面的街不用打完
+          continue;
+        }
+        // 英雄：能过牌就过牌，否则跟注（一路不弃，保证后面几条街的样本量）。
+        var want = legal.any((a) => a.type == ActionType.check)
+            ? ActionType.check
+            : (legal.any((a) => a.type == ActionType.call)
+                ? ActionType.call
+                : legal.first.type);
+        g.apply('hero',
+            legal.any((a) => a.type == want) ? want : legal.first.type);
+      }
+    }
+    return total == 0 ? 0 : fire / total;
+  }
+
+  test('薄价值下注：顶对（哪怕踢脚不大）比第二对/底对打得更多', () {
+    // 干燥牌面 K-8-3 的翻牌圈，单挑、有位置、英雄过牌。
+    const flop = 'Kd 8c 3h';
+    final topPairGood = aiBetRateWhenCheckedTo('Kh Qh', flop, Street.flop);
+    final topPairWeak = aiBetRateWhenCheckedTo('Kh 5h', flop, Street.flop);
+    final secondPair = aiBetRateWhenCheckedTo('8h 7h', flop, Street.flop);
+    final bottomPair = aiBetRateWhenCheckedTo('Ac 3c', flop, Street.flop);
+
+    // 顶对是翻牌的主力价值牌：过牌太多就是明牌告诉对手「我没东西」。
+    // 以前中等牌 45%、弱牌 50% 一刀切，顶对只打 43%，反而比第二对
+    // （47%）还少。
+    expect(topPairGood, greaterThan(0.65),
+        reason: '顶对好踢该经常下注（${(100 * topPairGood).round()}%）');
+    expect(topPairGood, greaterThan(secondPair + 0.15),
+        reason: '顶对该比第二对打得多 '
+            '(${(100 * topPairGood).round()}% vs ${(100 * secondPair).round()}%)');
+    expect(topPairWeak, greaterThan(secondPair + 0.1),
+        reason: '顶对弱踢也比第二对打得多 '
+            '(${(100 * topPairWeak).round()}% vs ${(100 * secondPair).round()}%)');
+    // 第二对/底对是薄价值，频率收在中间档，不该跟顶对一样高。
+    expect(secondPair, lessThan(0.55));
+    expect(bottomPair, lessThan(0.55));
+
+    // 河牌：顶对收成摊牌牌，打得比翻牌少，但还是要打薄价值。
+    final river =
+        aiBetRateWhenCheckedTo('Kh Qh', 'Kd 8c 3h 2s 5d', Street.river);
+    expect(river, lessThan(topPairGood), reason: '河牌比翻牌收敛一点');
+    expect(river, greaterThan(0.4),
+        reason: '河牌顶对还是要打薄价值（${(100 * river).round()}%）');
+  });
+
+  /// 单挑：英雄（按钮位）开池、AI（大盲）跟注；翻后 AI 先过牌、
+  /// 英雄每条街都按 [frac] 池下注，统计 AI 在 [street] 面对下注的应对。
+  ///
+  /// 这就是「过牌-加注」的那个位置：AI 本街已经过了牌，再加注算过牌-加注。
+  ({double fold, double call, double raise, int total}) aiVsCheckBet(
+      String hole, String board, double frac,
+      {Street street = Street.flop, int seeds = 150}) {
+    var fold = 0, call = 0, raise = 0, total = 0;
+    for (var seed = 0; seed < seeds; seed++) {
+      final rnd = Random(seed);
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      )
+        ..addPlayer('hero', '我')
+        ..addPlayer('ai', 'AI');
+      final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+      g.startHand(
+        holeOverride: {'ai': _cs(hole), 'hero': _cs('6c 5c')},
+        boardOverride: _cs(board),
+      );
+      var guard = 0;
+      var recorded = false;
+      while (!g.handOver && guard++ < 300) {
+        final pa = g.pendingAction();
+        final p = pa.player;
+        final legal = pa.actions;
+        final facing = legal.any((a) => a.type == ActionType.call);
+        final canCheck = legal.any((a) => a.type == ActionType.check);
+        if (p.id == 'ai') {
+          if (g.street == Street.preflop) {
+            g.apply('ai', ActionType.call);
+            continue;
+          }
+          // 固定成「AI 先过牌」这条线，专门量面对下注时的选择。
+          if (canCheck && !facing) {
+            g.apply('ai', ActionType.check);
+            continue;
+          }
+          final d = ai.decide(g, p);
+          if (!recorded && facing && g.street == street) {
+            recorded = true;
+            total++;
+            switch (d.type) {
+              case ActionType.fold:
+                fold++;
+              case ActionType.call:
+                call++;
+              default:
+                raise++;
+            }
+          }
+          g.apply('ai', d.type, amount: d.amountTo);
+          // 要量的是这一下的选择，后面的街不用打完（省 2/3 的对局时间）。
+          if (recorded) break;
+          continue;
+        }
+        if (g.street == Street.preflop) {
+          if (!facing) {
+            g.apply('hero', ActionType.raise, amount: 300);
+            continue;
+          }
+          g.apply('hero', ActionType.call);
+          continue;
+        }
+        // 翻后英雄先行动（大盲先说话），能下注就按 frac 池下注。
+        if (!facing && legal.any((a) => a.type == ActionType.bet)) {
+          final pot = g.potTotal();
+          final la = legal.firstWhere((a) => a.type == ActionType.bet);
+          g.apply('hero', ActionType.bet,
+              amount: (p.streetBet + (pot * frac).round())
+                  .clamp(la.minAmount, la.maxAmount));
+          continue;
+        }
+        final want = canCheck ? ActionType.check : ActionType.call;
+        g.apply('hero', legal.any((a) => a.type == want) ? want : legal.first.type);
+      }
+    }
+    final n = total;
+    double r(int v) => n == 0 ? 0 : v / n;
+    return (fold: r(fold), call: r(call), raise: r(raise), total: n);
+  }
+
+  test('面对下注：中等牌/弱成牌也会过牌-加注，不再只会跟或弃', () {
+    const flop = 'Kd 8c 3h';
+    final topPair = aiVsCheckBet('Kh Qh', flop, 0.5, seeds: 120);
+    final secondPair = aiVsCheckBet('8h 7h', flop, 0.5, seeds: 120);
+    String pct(double v) => '${(100 * v).round()}%';
+
+    // 以前中等牌/弱成牌面对下注只有「跟或弃」，加注范围里清一色是
+    // 怪兽牌和听牌——对手看到我们加注就知道自己撞上大牌了。
+    expect(topPair.raise, greaterThan(0.12),
+        reason: '顶对过牌后面对半池也该有过牌-加注（加 ${pct(topPair.raise)}）');
+    expect(topPair.raise, lessThan(topPair.call),
+        reason: '主体还是跟注，加注只是混入的频率');
+    // 实测第二对约 8%（以前是 0%），阈值取 3% 留出余量。
+    expect(secondPair.raise, greaterThan(0.03),
+        reason: '第二对也要有反击频率（加 ${pct(secondPair.raise)}）');
+    expect(topPair.raise, greaterThan(secondPair.raise),
+        reason: '牌越强加得越多（${pct(topPair.raise)} vs ${pct(secondPair.raise)}）');
+    // 有摊牌价值的一对不能弃给半池注。
+    expect(topPair.fold, lessThan(0.05), reason: '顶对不会弃给半池注');
+    expect(secondPair.fold, lessThan(0.1), reason: '第二对也不会');
+
+    // 河牌没有牌可发，加注只剩价值：价值不够就老实跟注，
+    // 把跟注范围也拿去加注反而更亏。
+    final river = aiVsCheckBet('Kh Qh', 'Kd 8c 3h 2s 5d', 0.5,
+        street: Street.river, seeds: 80);
+    expect(river.raise, lessThan(0.1),
+        reason: '河牌顶对以跟注为主（加 ${pct(river.raise)}）');
+    expect(river.call, greaterThan(0.8),
+        reason: '河牌顶对要留住跟注（跟 ${pct(river.call)}）');
+    expect(river.fold, lessThan(0.05), reason: '河牌顶对不弃牌');
+  });
+
+  /// 单挑：AI（按钮位）开池、英雄（大盲）跟注；翻牌英雄先过牌、AI
+  /// 下注（c-bet），英雄再加注到 [raiseTo] 倍，统计 AI 面对这次
+  /// 「过牌-加注」的应对——下注和加注是两条线，量的是被加注这一侧。
+  ({double fold, double call, double raise, int total}) aiVsCheckRaise(
+      String hole, String board, double raiseTo,
+      {int seeds = 150}) {
+    var fold = 0, call = 0, raise = 0, total = 0;
+    for (var seed = 0; seed < seeds; seed++) {
+      final rnd = Random(seed);
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      )
+        ..addPlayer('ai', 'AI')
+        ..addPlayer('hero', '我');
+      final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+      g.startHand(
+        holeOverride: {'ai': _cs(hole), 'hero': _cs('6c 5d')},
+        boardOverride: _cs(board),
+      );
+      var guard = 0;
+      var cbet = false;
+      var done = false;
+      while (!g.handOver && guard++ < 300) {
+        final pa = g.pendingAction();
+        final p = pa.player;
+        final legal = pa.actions;
+        final facing = legal.any((a) => a.type == ActionType.call);
+        if (p.id == 'ai') {
+          final d = ai.decide(g, p);
+          if (g.street == Street.preflop && d.type != ActionType.raise) {
+            break; // 没开池就不看了
+          }
+          if (g.street == Street.flop) {
+            if (!cbet) {
+              if (d.type != ActionType.bet) break; // 没 c-bet 就不看了
+              cbet = true;
+            } else if (facing && !done) {
+              done = true;
+              total++;
+              switch (d.type) {
+                case ActionType.fold:
+                  fold++;
+                case ActionType.call:
+                  call++;
+                default:
+                  raise++;
+              }
+              break;
+            }
+          }
+          g.apply('ai', d.type, amount: d.amountTo);
+          continue;
+        }
+        if (g.street == Street.preflop) {
+          g.apply('hero', facing ? ActionType.call : ActionType.check);
+          continue;
+        }
+        if (g.street != Street.flop) break;
+        if (!facing) {
+          g.apply('hero', ActionType.check);
+          continue;
+        }
+        // 面对 AI 的 c-bet：加注到 c-bet 的 raiseTo 倍。
+        final la = legal.where((a) => a.type == ActionType.raise).firstOrNull;
+        if (la == null) break;
+        final to =
+            (p.streetBet + (g.currentBet - p.streetBet) * raiseTo).round();
+        g.apply('hero', ActionType.raise,
+            amount: to.clamp(la.minAmount, la.maxAmount));
+      }
+    }
+    double r(int v) => total == 0 ? 0 : v / total;
+    return (fold: r(fold), call: r(call), raise: r(raise), total: total);
+  }
+
+  test('面对过牌-加注：第二对不再一路跟，超对会有一部分 3bet', () {
+    // 以前 AI 面对「加注」也按对手的整条跟注范围算胜率，第二对 100%
+    // 跟注；现在加注线会把对手范围收窄、跟注门槛也跟着抬。
+    const flop = 'Kd 8c 3h';
+    final topPair = aiVsCheckRaise('Kh Qh', flop, 3.0, seeds: 200);
+    final overPair = aiVsCheckRaise('Ah Ad', flop, 3.0, seeds: 200);
+    final secondPair = aiVsCheckRaise('8h 7s', flop, 3.0, seeds: 200);
+    final set = aiVsCheckRaise('8h 8s', flop, 3.0, seeds: 200);
+    String pct(double v) => '${(100 * v).round()}%';
+
+    expect(secondPair.total, greaterThan(50));
+    expect(secondPair.fold, greaterThan(0.45),
+        reason: '第二对去跟一个三倍的过牌-加注基本是送 '
+            '（弃 ${pct(secondPair.fold)}）');
+    expect(topPair.fold, lessThan(0.1),
+        reason: '顶对不会弃给一次加注（弃 ${pct(topPair.fold)}）');
+    expect(topPair.call, greaterThan(0.6),
+        reason: '顶对以跟注为主（跟 ${pct(topPair.call)}）');
+    expect(overPair.raise, greaterThan(0.1),
+        reason: '超对要有一部分 3bet，不然对手随便抬一手就能把强牌打走 '
+            '（加 ${pct(overPair.raise)}）');
+    expect(set.raise, greaterThan(0.8),
+        reason: '三条直接再加回去（加 ${pct(set.raise)}）');
+
+    // 尺度别一刀切：最小加注（约 2 倍）给的赔率好得多，第二对该多跟一些。
+    final minRaise = aiVsCheckRaise('8h 7s', flop, 1.5, seeds: 200);
+    expect(minRaise.fold, lessThan(secondPair.fold - 0.15),
+        reason: '小加注不该弃得跟三倍加注一样多 '
+            '（弃 ${pct(minRaise.fold)} vs ${pct(secondPair.fold)}）');
+  });
+
+  /// 单挑：翻牌/转牌都过牌，河牌没人下注时量 AI 的选择——
+  /// 过牌率 / 下注率 / 平均尺度（下注额 ÷ 下注前底池）/ 超池率。
+  /// [oop] 为真时 AI 在大盲位（河牌先说话）。
+  ({double bet, double check, double avgFrac, double overbet, int n})
+      aiRiverCheckedTo(String hole, String board,
+          {bool oop = false, int seeds = 200}) {
+    var bet = 0, check = 0, over = 0, n = 0;
+    final fracs = <double>[];
+    for (var seed = 0; seed < seeds; seed++) {
+      final rnd = Random(seed);
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      );
+      if (oop) {
+        g
+          ..addPlayer('hero', '我')
+          ..addPlayer('ai', 'AI');
+      } else {
+        g
+          ..addPlayer('ai', 'AI')
+          ..addPlayer('hero', '我');
+      }
+      final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+      g.startHand(
+        holeOverride: {'ai': _cs(hole), 'hero': _cs('6c 5d')},
+        boardOverride: _cs(board),
+      );
+      var guard = 0;
+      while (!g.handOver && guard++ < 300) {
+        final pa = g.pendingAction();
+        final p = pa.player;
+        final legal = pa.actions;
+        final facing = legal.any((a) => a.type == ActionType.call);
+        final canCheck = legal.any((a) => a.type == ActionType.check);
+        if (p.id == 'ai') {
+          if (g.street != Street.river) {
+            g.apply('ai', canCheck ? ActionType.check : ActionType.call);
+            continue;
+          }
+          final d = ai.decide(g, p);
+          n++;
+          if (d.type == ActionType.bet) {
+            bet++;
+            final f = (d.amountTo ?? 0) / max(1, g.potTotal());
+            fracs.add(f);
+            if (f >= 1.0) over++;
+          } else {
+            check++;
+          }
+          break;
+        }
+        if (g.street == Street.preflop) {
+          g.apply('hero', oop ? (facing ? ActionType.call : ActionType.raise) : (facing ? ActionType.call : ActionType.check),
+              amount: 300);
+          continue;
+        }
+        g.apply('hero', canCheck ? ActionType.check : ActionType.call);
+      }
+    }
+    double r(int v) => n == 0 ? 0 : v / n;
+    final avg =
+        fracs.isEmpty ? 0.0 : fracs.reduce((a, b) => a + b) / fracs.length;
+    return (bet: r(bet), check: r(check), avgFrac: avg, overbet: r(over), n: n);
+  }
+
+  test('河牌尺度：超池不再是「只有坚果」的独家信号', () {
+    const board = 'Kd 8c 3h 2s 5d';
+    final set = aiRiverCheckedTo('8h 8s', board);
+    final over = aiRiverCheckedTo('Ah Ad', board);
+    final secondPair = aiRiverCheckedTo('8h 7s', board);
+    String pct(double v) => '${(100 * v).round()}%';
+
+    expect(set.n, greaterThan(100));
+    expect(set.overbet, greaterThan(0.3),
+        reason: '怪兽牌还是拿超池收价值（超池 ${pct(set.overbet)}）');
+    // 以前超池清一色是怪兽牌，对手看到超池就弃、看到 0.6 池就敢跟。
+    expect(over.overbet, greaterThan(0.08),
+        reason: '超对也得混一点超池进去（超池 ${pct(over.overbet)}）');
+    expect(over.avgFrac, greaterThan(0.7),
+        reason: '平均尺度要跟着上去（均 ${over.avgFrac.toStringAsFixed(2)} 池）');
+    // 但一对牌别抡超池：被跟注的都是更好的牌，属于白送。
+    expect(secondPair.overbet, lessThan(0.05),
+        reason: '第二对不拿超池送钱（超池 ${pct(secondPair.overbet)}）');
+
+    // 没位置时怪兽牌要有一部分过牌：河牌的过牌范围不能清一色「我没东西」。
+    final oopSet = aiRiverCheckedTo('8h 8s', board, oop: true);
+    expect(oopSet.check, greaterThan(0.15),
+        reason: '没位置的三条偶尔过牌钓一次（过牌 ${pct(oopSet.check)}）');
+    expect(set.check, lessThan(0.05),
+        reason: '有位置该收价值就收（过牌 ${pct(set.check)}）');
+  });
+
+  test('浮牌：后门花 + 两张高张不会见注就弃', () {
+    // 8-7-2 这种小牌面：A 高配后门花是真人最爱跟一张的浮牌。
+    const board = '8h 7d 2s';
+    final float = aiVsCheckBet('As Qs', board, 0.5, seeds: 150);
+    final dry = aiVsCheckBet('As Qd', board, 0.5, seeds: 150);
+    String pct(double v) => '${(100 * v).round()}%';
+
+    expect(float.call, greaterThan(dry.call + 0.08),
+        reason: '有后门花才值得跟一张看转牌 '
+            '(${pct(float.call)} vs ${pct(dry.call)})');
+    // 但浮牌是少数派：大注不浮、没位置的浮牌也不能变成「什么都跟」。
+    expect(float.fold, greaterThan(0.4),
+        reason: '浮牌只是混入的频率，主体还是弃牌（弃 ${pct(float.fold)}）');
+  });
+
+  test('开火选牌：有后路（高张/后门花）的牌才值得一直开火', () {
+    // 同一个牌面、同一档牌力（都是没成牌的空气），只差「后路」：
+    // 真人是按「我还能变成什么」挑开火牌的，什么都不沾的纯垃圾
+    // 抡起来就是白送——以前 AI 不看这一项，两张高张配后门花和
+    // 7 高什么都没配到的下注率一模一样。
+    final bdFlush =
+        aiBetRateWhenCheckedTo('Qs Js', '9s 5d 2c', Street.flop, seeds: 200);
+    final twoOver =
+        aiBetRateWhenCheckedTo('Qs Jd', '9s 5d 2c', Street.flop, seeds: 200);
+    expect(bdFlush, greaterThan(twoOver + 0.06),
+        reason: '同样两张高张，多一个后门花更敢开火 '
+            '(${(100 * bdFlush).round()}% vs ${(100 * twoOver).round()}%)');
+
+    final nothing =
+        aiBetRateWhenCheckedTo('9h 8h', 'Kd 2c 3s', Street.flop, seeds: 150);
+    final oneOver =
+        aiBetRateWhenCheckedTo('Ah 5h', 'Kd 2c 3s', Street.flop, seeds: 150);
+    final bdOnly =
+        aiBetRateWhenCheckedTo('Qd Jd', 'Kd 2c 3s', Street.flop, seeds: 150);
+    expect(twoOver, greaterThan(nothing + 0.1),
+        reason: '两张高张比纯垃圾打得更多 '
+            '(${(100 * twoOver).round()}% vs ${(100 * nothing).round()}%)');
+    expect(oneOver, greaterThan(nothing + 0.05),
+        reason: '一张高张也算后路（${(100 * oneOver).round()}% vs '
+            '${(100 * nothing).round()}%）');
+    expect(bdOnly, greaterThan(nothing + 0.06),
+        reason: '后门花同理（${(100 * bdOnly).round()}% vs '
+            '${(100 * nothing).round()}%）');
+    // 但纯垃圾不是完全不开火：有弃牌率、有对手读数时还是要有这一手。
+    expect(nothing, greaterThan(0.05),
+        reason: '纯空气也要留一点开火频率（${(100 * nothing).round()}%）');
+  });
+
+  /// 单挑/多人：AI 在按钮位开池，其他人都过牌/跟注，量 AI 翻牌圈
+  /// 「下注额 ÷ 下注前底池」的平均值（只看它真的下注的那些手）。
+  ({double frac, int n}) aiFlopBetFrac(String hole, String board,
+      {int others = 0, int seeds = 250}) {
+    final all = <double>[];
+    for (var seed = 0; seed < seeds; seed++) {
+      final rnd = Random(seed);
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      )
+        ..addPlayer('ai', 'AI')
+        ..addPlayer('hero', '我');
+      for (var i = 0; i < others; i++) {
+        g.addPlayer('c$i', 'C$i');
+      }
+      final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+      g.startHand(holeOverride: {'ai': _cs(hole)});
+      var guard = 0;
+      var recorded = false;
+      while (!g.handOver && guard++ < 300) {
+        final pa = g.pendingAction();
+        final p = pa.player;
+        final legal = pa.actions;
+        final facing = legal.any((a) => a.type == ActionType.call);
+        final canCheck = legal.any((a) => a.type == ActionType.check);
+        if (p.id == 'ai') {
+          final d = ai.decide(g, p);
+          if (!recorded &&
+              !facing &&
+              g.street == Street.flop &&
+              d.type == ActionType.bet &&
+              d.amountTo != null) {
+            recorded = true;
+            all.add((d.amountTo! - p.streetBet) / g.potTotal());
+          }
+          g.apply('ai', d.type, amount: d.amountTo);
+          if (recorded) break;
+          continue;
+        }
+        if (g.street == Street.preflop && facing) {
+          g.apply(p.id, ActionType.call);
+          continue;
+        }
+        final want = canCheck ? ActionType.check : ActionType.call;
+        g.apply(p.id,
+            legal.any((a) => a.type == want) ? want : legal.first.type);
+      }
+    }
+    final n = all.length;
+    return (
+      frac: n == 0 ? 0.0 : all.reduce((a, b) => a + b) / n,
+      n: n,
+    );
+  }
+
+  test('下注尺度：诈唬和价值不能分成两档（不然小注就是明牌）', () {
+    // 同一个干燥牌面 K-8-3：成牌主力、薄价值（顶对）、有后路的空气。
+    // 以前多人底池里价值 ×1.24、诈唬 ×0.8（现在 ×1.08 / ×0.97），
+    // 结果「大注 = 价值、小注 = 空枪」成了一条明线，对手看到小注就抬。
+    const board = 'Kd 8c 3h';
+    ({double frac, int n}) v(int others) =>
+        aiFlopBetFrac('Ks Kc', board, others: others);
+    ({double frac, int n}) thin(int others) =>
+        aiFlopBetFrac('Kh Qh', board, others: others);
+    ({double frac, int n}) bluff(int others) =>
+        aiFlopBetFrac('Qs Js', board, others: others);
+
+    final hv = v(0), ht = thin(0), hb = bluff(0);
+    expect(hv.n > 50 && ht.n > 50 && hb.n > 50, isTrue,
+        reason: '样本要够（${hv.n}/${ht.n}/${hb.n}）');
+    expect((hv.frac - hb.frac).abs(), lessThan(0.12),
+        reason: '单挑：价值和诈唬的尺度要重叠 '
+            '(${hv.frac.toStringAsFixed(2)} vs ${hb.frac.toStringAsFixed(2)})');
+    expect((hv.frac - ht.frac).abs(), lessThan(0.15),
+        reason: '薄价值的尺度也得在同一档里 '
+            '(${ht.frac.toStringAsFixed(2)} vs ${hv.frac.toStringAsFixed(2)})');
+
+    final mv = v(2), mt = thin(2), mb = bluff(2);
+    expect(mv.n > 50 && mt.n > 50 && mb.n > 50, isTrue,
+        reason: '多人样本要够（${mv.n}/${mt.n}/${mb.n}）');
+    expect((mv.frac - mb.frac).abs(), lessThan(0.15),
+        reason: '多人底池同理（以前差 0.24 池）'
+            '(${mv.frac.toStringAsFixed(2)} vs ${mb.frac.toStringAsFixed(2)})');
+    expect((mv.frac - mt.frac).abs(), lessThan(0.15),
+        reason: '多人底池的薄价值同样不许另开一档 '
+            '(${mt.frac.toStringAsFixed(2)} vs ${mv.frac.toStringAsFixed(2)})');
   });
 
   test('存档：一局的桌面快照能原样存回来，坏存档不会崩', () async {
