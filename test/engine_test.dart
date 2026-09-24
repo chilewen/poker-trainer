@@ -1179,8 +1179,11 @@ void main() {
   /// 3 人桌：按钮 p0 开 300 → 小盲 p1 3bet 900 → 大盲 p2（AI）面对 3bet。
   /// 这是「没位置跟 3bet」的那条线。
   ({int raise, int call, int fold, int n}) aiFacingThreeBetOop(String hole,
-      {int seeds = 200, AiStyle style = AiStyle.tightAggressive,
-      int stack = 10000}) {
+      {int seeds = 200,
+      AiStyle style = AiStyle.tightAggressive,
+      int stack = 10000,
+      int open = 300,
+      int threeBet = 900}) {
     var raise = 0, call = 0, fold = 0, n = 0;
     for (var seed = 0; seed < seeds; seed++) {
       final rnd = Random(seed);
@@ -1197,8 +1200,8 @@ void main() {
         'p1': _cs('8c 7d'),
         'p2': _cs(hole),
       });
-      g.apply('p0', ActionType.raise, amount: 300);
-      g.apply('p1', ActionType.raise, amount: 900);
+      g.apply('p0', ActionType.raise, amount: open);
+      g.apply('p1', ActionType.raise, amount: threeBet);
       final p = g.pendingAction().player;
       if (p.id != 'p2') fail('轮到的是 ${p.id}，不是 p2');
       n++;
@@ -1240,6 +1243,37 @@ void main() {
     final sc = aiFacingThreeBetOop('7h 6h');
     expect(sc.fold / sc.n, greaterThan(0.85),
         reason: '76s 没位置别跟 3bet（弃 ${sc.fold}）');
+  });
+
+  test('翻前防守 3bet：最小加注跟得宽，3 倍加注才收着', () {
+    // 跟注范围得跟着 3bet 的大小放缩。英雄把 3bb 最小加注到 4.7bb 时，
+    // 跟 1.85bb 就能去抢一个 9bb 的底池（约 20% 赔率，后面还留着 95bb 的
+    // 隐含赔率），99 这种中等对子弃掉是纯亏。以前这里一个门槛打天下，
+    // 实测 99 有 82% 直接弃牌——对手拿任意两张牌最小加注都是白赚的。
+    final small = aiFacingThreeBetOop('9h 9d', open: 286, threeBet: 470);
+    expect(small.fold, 0, reason: '99 面对最小加注该跟（弃 ${small.fold}/${small.n}）');
+    final kqo = aiFacingThreeBetOop('Kh Qs', open: 286, threeBet: 470);
+    expect(kqo.call / kqo.n, greaterThan(0.7),
+        reason: 'KQo 面对最小加注也跟得起（跟 ${kqo.call}/${kqo.n}）');
+    final setMine = aiFacingThreeBetOop('5h 5d', open: 286, threeBet: 470);
+    expect(setMine.call / setMine.n, greaterThan(0.3),
+        reason: '小 3bet 后小对子买三条（跟 ${setMine.call}/${setMine.n}）');
+
+    // 大小看的是「相对开池的倍数」，不是绝对筹码：开 5bb 被加到 9bb
+    // （1.8 倍）价格一样便宜，不能因为数字到了 9bb 就当大 3bet 处理。
+    final ratio = aiFacingThreeBetOop('9h 9d', open: 500, threeBet: 900);
+    expect(ratio.fold, 0, reason: '开池大、倍数小，价格一样好');
+
+    // 真的加到 3 倍（9bb）还是收着打：不能变成「什么 3bet 都跟」。
+    final normal = aiFacingThreeBetOop('9h 9d');
+    expect(normal.fold / normal.n, greaterThan(0.5),
+        reason: '99 面对 3 倍加注还是大部分弃（弃 ${normal.fold}/${normal.n}）');
+    // 价格再好也不能变成「什么都跟」：真正的垃圾牌照样弃，
+    // 投机的同花连张混着打（有跟有弃），不能次次都跟。
+    final trash = aiFacingThreeBetOop('8h 3d', open: 286, threeBet: 470);
+    expect(trash.fold, trash.n, reason: '83o 面对 3bet 还是得弃');
+    final sc = aiFacingThreeBetOop('7h 6h', open: 286, threeBet: 470);
+    expect(sc.fold, greaterThan(0), reason: '76s 要混着打，不能次次都跟');
   });
 
   test('翻前防守 3bet：跟注站不看位置也不看深度，不是全场最紧的人', () {

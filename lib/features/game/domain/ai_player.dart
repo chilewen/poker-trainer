@@ -589,14 +589,26 @@ class AiPlayer {
       // 4bet 诈唬，跟注是最差的选择。
       // 跟注站不看位置也不看深度：能玩的牌就进池（见 callThreeBetStation）。
       final station = _p.wideLimp || _p.limpsAnyPrice;
+      // 3bet 是「最小加注到 4.7bb」还是「加 3 倍到 9bb」，跟注范围差得很远：
+      // 前者跟 1.5bb 就能抢一个 6bb 的底池（约 20% 赔率 + 后面一大截隐含
+      // 赔率），后者是真金白银的要价。以前这里一个门槛打天下，英雄最小加注
+      // 到 4.7bb 时 99 都有 82% 直接弃牌——对手拿任意两张牌最小加注都是赚的。
+      final threeBetBb = game.currentBet / bb;
+      final smallThreeBet = threeBetBb <= 5.5 ||
+          (spot.preflopOpenTo > 0 &&
+              game.currentBet <= spot.preflopOpenTo * 2.2);
       // 其它风格：有位置才用整个跟注范围（含投机牌），没位置只跟有牌力的。
       final callRange = station
           ? PreflopRanges.callThreeBetStation
-          : (!spot.inPosition
-              ? PreflopRanges.callThreeBetOop
-              : (stackBb >= 200
-                  ? PreflopRanges.callThreeBet
-                  : PreflopRanges.callThreeBet.withoutSmallPairs()));
+          : (smallThreeBet
+              ? (spot.inPosition
+                  ? PreflopRanges.callThreeBetSmall
+                  : PreflopRanges.callThreeBetSmallOop)
+              : (!spot.inPosition
+                  ? PreflopRanges.callThreeBetOop
+                  : (stackBb >= 200
+                      ? PreflopRanges.callThreeBet
+                      : PreflopRanges.callThreeBet.withoutSmallPairs())));
       final shifted = callRange.shifted(w);
       // 投机的那一半（小对子 / 同花连张）混着跟：真人对这些边缘牌不是
       // 每次都跟，一部分直接弃，跟注范围才不会宽到对手一开火就收走。
@@ -1664,6 +1676,7 @@ class _Spot {
     required this.betSizeRel,
     required this.raisesThisStreet,
     required this.preflopRaises,
+    required this.preflopOpenTo,
     required this.limpers,
     required this.priorAgg,
     required this.polarizedBet,
@@ -1710,6 +1723,11 @@ class _Spot {
   final double betSizeRel;
   final int raisesThisStreet;
   final int preflopRaises;
+
+  /// 翻前开池那一次的注额（「加注到」多少），拿不到时为 0。
+  /// 判断第二个加注是「最小加注到 4bb」还是「真加注到 10bb」要用它：
+  /// 只看绝对筹码分不出小 3bet 和大 3bet，而这两者的跟注范围差很远。
+  final int preflopOpenTo;
   final int limpers;
 
   /// 对手在前面几条街已经在开火的累计强度（0~2）：
@@ -1733,11 +1751,14 @@ class _Spot {
     final actions = game.lastHand?.actions ?? const <ActionRecord>[];
 
     var preflopRaises = 0;
+    var preflopOpenTo = 0;
     var limpers = 0;
     String? lastPreflopRaiser;
     for (final a in actions) {
       if (a.street != Street.preflop) continue;
       if (a.type == ActionType.raise) {
+        // 第一次加注就是开池，记下它加到多少（AI 与英雄都会带上注额）。
+        if (preflopRaises == 0 && a.amount > 0) preflopOpenTo = a.amount;
         preflopRaises++;
         lastPreflopRaiser = a.actorId;
       } else if (a.type == ActionType.call) {
@@ -1861,6 +1882,7 @@ class _Spot {
       betSizeRel: betSizeRel,
       raisesThisStreet: raisesThisStreet,
       preflopRaises: preflopRaises,
+      preflopOpenTo: preflopOpenTo,
       limpers: limpers,
       priorAgg: priorAgg,
       polarizedBet: polarizedBet,

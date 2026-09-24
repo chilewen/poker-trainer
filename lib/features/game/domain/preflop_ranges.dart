@@ -541,6 +541,36 @@ class PreflopRanges {
     offsuitBroadway: 13, // AKo
   );
 
+  /// 面对「小 3bet」（最小加注到 4~5bb 那种）的跟注范围，有位置版本。
+  ///
+  /// 小 3bet 给的价格好到离谱：开 3bb 被最小加注到 4.5bb 时，跟 1.5bb 就能
+  /// 去抢一个 6bb 左右的底池（约 20% 的赔率），后面还留着 90 多个 bb 的
+  /// 隐含赔率。这时候真人的防守范围比面对大 3bet 宽得多——任何对子都值得
+  /// 买三条、同花 A 和同花连张都便宜得能看翻牌，AQo 这种也不用弃。
+  ///
+  /// 以前这里不分 3bet 大小：TT+ / AQs+ / KQs 一个门槛打天下，结果英雄
+  /// 最小加注到 4.7bb 时 99 有 82% 直接弃牌——对手拿任意两张牌最小加注
+  /// 都是赚的，这正是「电脑玩家不像真人」的典型破绽。
+  static const callThreeBetSmall = PreflopRange(
+    pair: 2, // 任何对子：185 去博一个 905 的底池，中三条就够本
+    suitedAce: 2,
+    suitedBroadway: 11,
+    offsuitBroadway: 12, // AQo / KQo 也便宜到值得跟
+    suitedConnector: 5,
+    suitedGapper: 7,
+  );
+
+  /// 小 3bet 的没位置版本：少玩要靠位置才能实现的同花杂牌，
+  /// 但中等对子（99/88 这类有摊牌价值又买得起三条的）照样跟。
+  static const callThreeBetSmallOop = PreflopRange(
+    pair: 2,
+    suitedAce: 3,
+    suitedBroadway: 11,
+    offsuitBroadway: 12,
+    suitedConnector: 6,
+    suitedGapper: 9,
+  );
+
   /// 跟注站面对 3bet 的跟注范围：不看位置，把「有 A 的同花、同花连张、
   /// 对子」全带上。跟注站的区别不是「拿垃圾牌也跟」，而是它们不会因为
   /// 没位置、或者筹码不够深就把一手能玩的牌扔掉——面对 3bet 只有两个
