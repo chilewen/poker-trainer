@@ -180,6 +180,8 @@ class _VillainRead {
   int called = 0;
   int raised = 0;
   int hands = 0; // 一起打完的手牌数
+  int aggroActs = 0; // 翻后主动下注 / 加注的次数
+  int passiveActs = 0; // 翻后过牌 / 跟注 / 弃牌的次数
 
   /// 翻后面对下注的弃牌率；样本太少时退回中性先验 0.45。
   double get foldToBet => seen < 4 ? 0.45 : folded / seen;
@@ -189,6 +191,16 @@ class _VillainRead {
 
   /// 是不是「一压就跑」：面对下注弃得特别多。
   bool get folder => seen >= 6 && foldToBet >= 0.6;
+
+  /// 自己主动开火的频率（翻后）：下注/加注 ÷ 全部动作。
+  /// 样本少时退回中性 1/3，免得刚打两手就把对手读死。
+  ///
+  /// 实测：我们自己的三种风格大概落在 紧凶 0.25 / 松被动 0.22 / 松凶 0.40，
+  /// 一个逮到机会就砸的疯子能到 0.5 以上，只会跟和弃的能低到 0.1 以下。
+  double get aggroRate {
+    final n = aggroActs + passiveActs;
+    return n < 6 ? 0.33 : aggroActs / n;
+  }
 }
 
 /// 规则型 AI：翻牌前查「位置感知的范围表」（[PreflopRanges]），
@@ -203,9 +215,11 @@ class _VillainRead {
 ///    再和底池赔率、隐含赔率、位置、下注尺度结合；
 /// 4. 听牌主动半诈唬（有弃牌率也保有成牌概率），没成牌就按计划
 ///    在转牌/河牌决定继续开火还是放弃，而不是无脑跟注到底；
-/// 5. 全程「读人」：把每个对手翻后面对下注的弃牌/跟注/加注记进档案
-///    （[_VillainRead]），遇到一压就跑的对手多诈唬，遇到跟注站就
-///    少诈唬、下大注收价值——这才是真人最像人的那部分；
+/// 5. 全程「读人」，而且两边都用：把每个对手翻后面对下注的弃牌/跟注/加注、
+///    以及他自己主动开火的频率记进档案（[_VillainRead]）——
+///    我们要下注时看他的弃牌倾向（对一压就跑的多诈唬、对跟注站少诈唬多收
+///    价值），他下注我们要不要跟时看他的进攻性（爱开火的抓得宽，闷声的
+///    突然开火就弃）——这才是真人最像人的那部分；
 /// 6. 诈唬也会「选牌」：只挑挡掉对手强牌的那几张去开火
 ///    （[HandReading.blockerScore]：坚果花阻断 / 补顺的牌 / A 阻断），
 ///    拿什么都没挡到的牌就老实过牌——真人和按钮精灵最大的区别就在这。
@@ -274,31 +288,41 @@ class AiPlayer {
       final r = _reads.putIfAbsent(a.actorId, _VillainRead.new);
       switch (a.type) {
         case ActionType.fold:
+          r.passiveActs++;
           if (facedBet) {
             r.seen++;
             r.folded++;
           }
         case ActionType.call:
+          r.passiveActs++;
           if (facedBet) {
             r.seen++;
             r.called++;
           }
         case ActionType.raise:
+          r.aggroActs++;
           r.raised++;
           if (facedBet) r.seen++;
         case ActionType.bet:
+          r.aggroActs++;
         case ActionType.check:
-          break;
+          r.passiveActs++;
       }
     }
   }
 
   /// 对某个对手的观察摘要：一起打过多少手、翻后面对下注弃了几次、
   /// 弃牌率是多少。供调试与「教练界面」显示用，不参与决策。
-  ({int hands, int seen, double foldToBet})? readOf(String playerId) {
+  ({int hands, int seen, double foldToBet, double aggroRate})? readOf(
+      String playerId) {
     final r = _reads[playerId];
     if (r == null) return null;
-    return (hands: r.hands, seen: r.seen, foldToBet: r.foldToBet);
+    return (
+      hands: r.hands,
+      seen: r.seen,
+      foldToBet: r.foldToBet,
+      aggroRate: r.aggroRate,
+    );
   }
 
   /// 当前底池里还在的对手（能弃牌的、能跟注的）。
@@ -318,6 +342,29 @@ class AiPlayer {
           : (r.folder ? 1.45 : 0.55 + 0.9 * r.foldToBet);
     }
     return (sum / reads.length).clamp(0.35, 1.6);
+  }
+
+  /// 对手的进攻性怎么影响我们的跟注门槛：
+  /// 爱开火的对手手里可能全是诈唬（跟宽一点，弃太多会被剥削）；
+  /// 闷不吭声的对手突然下注，多半是真牌（该弃就弃）。
+  ///
+  /// 做成连续因子而不是「疯子/岩石」两档：真人对付不同脾气的人是渐变的，
+  /// 而且这样不会因为一个人恰好在阈值边上就突然改变打法。
+  double _callVsReadFactor(GameEngine game, PlayerState me) {
+    final reads = _readsOf(game, me);
+    if (reads.isEmpty) return 1.0;
+    var sum = 0.0;
+    for (final r in reads) {
+      // 中性 1/3 → 1.0 倍；0.1 的岩石 → 1.28 倍；0.5 的疯子 → 0.80 倍。
+      sum += (1 + (0.33 - r.aggroRate) * 1.2).clamp(0.8, 1.3);
+    }
+    return sum / reads.length;
+  }
+
+  /// 对手是不是「逮到机会就往里砸」的那种：拿强牌时别被他一个超池吓跑。
+  bool _facingManiac(GameEngine game, PlayerState me) {
+    final reads = _readsOf(game, me);
+    return reads.length == 1 && reads.first.aggroRate >= 0.45;
   }
 
   /// 价值因子：对手爱跟注（跟注站）就打得更大、更粘。
@@ -622,8 +669,9 @@ class AiPlayer {
       if (river && !multiway && !_villainFoldsALot(game, me) && _roll(0.5)) {
         return _bet(game, me, (1.2 * valueFactor).clamp(0.8, 1.5));
       }
-      final frac =
-          _valueFrac(spot, texture.wetness > 0.55 ? 0.7 : 0.6) * valueFactor;
+      final frac = _valueFrac(spot, read, 0.62,
+              rangeBet: game.street == Street.flop) *
+          valueFactor;
       return _bet(game, me, frac.clamp(0.3, 1.1));
     }
     // 2) 强牌：价值下注，湿面加大尺度保护；3bet 底池用小注（范围都很强，
@@ -640,8 +688,9 @@ class AiPlayer {
       return const AiDecision(ActionType.check);
     }
     if (read.tier == HandTier.strong) {
-      final frac =
-          _valueFrac(spot, texture.wetness > 0.55 ? 0.7 : 0.6) * valueFactor;
+      final frac = _valueFrac(spot, read, 0.62,
+              rangeBet: game.street == Street.flop) *
+          valueFactor;
       return _bet(game, me, frac.clamp(0.3, 1.1));
     }
     // 3) 听牌：半诈唬（听牌转诈唬的第一步）。
@@ -649,7 +698,8 @@ class AiPlayer {
     if (read.hasDraw && read.tier <= HandTier.medium) {
       if (_roll(_semiBluffChance(read, spot, barrel))) {
         _registerFire(game.street, _PlanKind.semiBluff);
-        return _bet(game, me, 0.6);
+        return _bet(game, me,
+            _stabFrac(spot, read, 0.6, rangeBet: game.street == Street.flop));
       }
       _plan = null; // 听牌也选择过牌：放弃这条线的诈唬
       return const AiDecision(ActionType.check);
@@ -661,7 +711,13 @@ class AiPlayer {
           _p.aggressionScale *
           (texture.wetness > 0.6 ? 0.6 : 1.0) *
           valueFactor;
-      if (_roll(thin)) return _bet(game, me, 0.45 * valueFactor);
+      if (_roll(thin)) {
+        return _bet(
+            game,
+            me,
+            _valueFrac(spot, read, 0.45, rangeBet: game.street == Street.flop) *
+                valueFactor);
+      }
       return const AiDecision(ActionType.check);
     }
     // 5) 没牌力：按计划延续诈唬，或找机会开火。
@@ -680,7 +736,11 @@ class AiPlayer {
       if (river && read.blockerScore >= 0.5 && _roll(0.4)) {
         return _bet(game, me, 0.9);
       }
-      return _bet(game, me, river ? 0.7 : 0.55);
+      return _bet(
+          game,
+          me,
+          _stabFrac(spot, read, river ? 0.7 : 0.55,
+              rangeBet: game.street == Street.flop));
     }
     _plan = null; // 过牌 = 放弃这条诈唬线
     return const AiDecision(ActionType.check);
@@ -795,6 +855,9 @@ class AiPlayer {
     final checkRaise = spot.checkedThisStreet && canRaise;
     // 转牌/河牌发出来的牌适不适合继续开火。
     final barrel = _barrelFactor(game, read);
+    // 读人（面对下注这一侧）：对手是疯子就多跟，是岩石就少跟。
+    final callFactor = _callVsReadFactor(game, me);
+    final facingManiac = _facingManiac(game, me);
 
     // 1) 怪兽牌：价值加注；加注战里已经打太多就转为跟注。
     //    底池相对筹码已经很大时，加注就是全下。
@@ -815,7 +878,9 @@ class AiPlayer {
     //    自己先过牌再面对下注 = 过牌-加注，频率明显更高。
     if (read.tier == HandTier.strong) {
       if (bigBet || spot.villainStrength > 0.8) {
-        if (bigBet &&
+        // 疯子的大注不能当真的听：拿强牌被他吓跑是最亏的。
+        if (!facingManiac &&
+            bigBet &&
             spot.villainStrength > 0.85 &&
             read.texture.wetness > 0.6 &&
             _roll(0.25)) {
@@ -854,7 +919,9 @@ class AiPlayer {
       if (bigBet) need *= 1.2;
       // 没位置的中等牌很难兑现胜率（后面还有人、也控制不了底池大小）。
       if (!spot.inPosition) need *= 1.12;
-      final scary = bigBet &&
+      need *= callFactor; // 抓诈唬牌：对手越疯越要跟，越闷越要弃
+      final scary = !facingManiac &&
+          bigBet &&
           spot.villainStrength > 0.8 &&
           read.texture.wetness > 0.6;
       if (equity() >= need && !scary) return const AiDecision(ActionType.call);
@@ -893,6 +960,7 @@ class AiPlayer {
     final drawEq = read.drawEquity(streets) + (deep ? implied : 0);
     var need = potOdds * (spot.villainStrength > 0.75 ? 1.25 : 1.05);
     if (spot.betSizeRel >= 0.7) need *= 1.1;
+    need *= _callVsReadFactor(game, me); // 疯子付得出隐含赔率，岩石付不出
     if (drawEq >= need) return const AiDecision(ActionType.call);
     // 便宜的小注：弱听牌也可以跟一张看转牌。
     if (spot.betSizeRel <= 0.3 &&
@@ -940,17 +1008,53 @@ class AiPlayer {
   // ---------- 下注/加注额度 ----------
 
   /// 价值下注的尺度：3bet 底池用小注（小 SPR，分批把筹码放进去）。
-  double _valueFrac(_Spot spot, double frac) =>
-      spot.isThreeBetPot ? frac * 0.7 : frac;
+  /// 价值下注的尺度。真人打价值不是只有一个尺寸：
+  /// - 干面用小注（1/3 池那种），范围可以铺得很宽，也不怕被加；
+  /// - 湿面用大注保护自己的成牌、同时收更多价值；
+  /// - 多人底池往上抬（总有人会跟，价值要收满）；
+  /// - 3bet 底池往回收（大家范围都很强、筹码又浅，小注分批把筹码放进去）。
+  /// [rangeBet] 为真（翻牌圈）时干面才用「范围小注」；转牌河牌的干面
+  /// 已经不需要再保护什么，真人会回到正常尺度收价值。
+  double _valueFrac(_Spot spot, HandReading read, double frac,
+      {bool rangeBet = false}) {
+    var f = frac;
+    if (read.texture.isDry) f *= rangeBet ? 0.62 : 0.85;
+    f *= 1 + 0.12 * (spot.opponents - 1).clamp(0, 3);
+    if (spot.isThreeBetPot) f *= 0.7;
+    return f;
+  }
+
+  /// 诈唬 / 半诈唬的尺度：同样看牌面，但人多的时候要收敛
+  /// （真人不会在一个五路底池里拿空气下大注）。
+  double _stabFrac(_Spot spot, HandReading read, double frac,
+      {bool rangeBet = false}) {
+    var f = frac;
+    if (read.texture.isDry) f *= rangeBet ? 0.7 : 0.9;
+    f *= 1 - 0.1 * (spot.opponents - 1).clamp(0, 3);
+    if (spot.isThreeBetPot) f *= 0.6;
+    return f;
+  }
 
   /// 筹码全下（引擎会按合法动作自动变成下注或加注）。
   AiDecision _jam(PlayerState me) =>
       AiDecision(ActionType.bet, amountTo: me.streetBet + me.stack);
 
   /// 下注到本街总额：底池的 [frac]。
+  /// 尺度混合：真人打同一个牌面、同一手牌也不会永远用一个尺寸，
+  /// 而是在「小一点 / 正常 / 大一点」之间换档。这既是真人的习惯，
+  /// 也让对手没法靠下注尺度反推我们的牌力（固定尺度是最容易被抓的机器味）。
+  ///
+  /// 概率加权后平均是 ×1.015，所以整体尺度几乎不变，只是不再一条直线。
+  double _mixSize(double frac) {
+    final r = _random.nextDouble();
+    if (r < 0.20) return frac * 0.85;
+    if (r < 0.45) return frac * 1.18;
+    return frac;
+  }
+
   AiDecision _bet(GameEngine game, PlayerState me, double frac) {
     final pot = game.potTotal();
-    final add = max(game.config.bigBlind, (pot * frac).round());
+    final add = max(game.config.bigBlind, (pot * _mixSize(frac)).round());
     return AiDecision(ActionType.bet, amountTo: me.streetBet + add);
   }
 
@@ -958,7 +1062,7 @@ class AiPlayer {
   AiDecision _raise(GameEngine game, PlayerState me, double frac) {
     final pot = game.potTotal();
     final minRaise = game.minRaiseTo - game.currentBet;
-    final add = max(minRaise, (pot * frac).round());
+    final add = max(minRaise, (pot * _mixSize(frac)).round());
     return AiDecision(ActionType.raise, amountTo: game.currentBet + add);
   }
 

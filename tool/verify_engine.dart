@@ -652,6 +652,45 @@ void main() {
       '(${(100 * turnBlank.rate(ActionType.bet)).toStringAsFixed(0)}% vs '
       '${(100 * turnAce.rate(ActionType.bet)).toStringAsFixed(0)}%)');
 
+  // --- 读人（面对下注这一侧）：对手是疯子还是岩石，跟注门槛不一样 ---
+  // 面对一个 3 倍池的超池下注：疯子可能全是诈唬，岩石则是真牌。
+  final vsManiac = callVsRead(maniac: true, heroFrac: 3.0, rounds: 120);
+  final vsNit = callVsRead(maniac: false, heroFrac: 3.0, rounds: 120);
+  check(vsManiac.total > 30 && vsNit.total > 30,
+      '面对下注读人：样本够多 (${vsManiac.total} / ${vsNit.total})');
+  check(vsManiac.callRate > vsNit.callRate + 0.15,
+      '面对下注读人：对爱开火的疯子跟得更多，对岩石弃得更多 '
+      '(${(100 * vsManiac.callRate).toStringAsFixed(0)}% vs '
+      '${(100 * vsNit.callRate).toStringAsFixed(0)}%，'
+      '进攻性读数 ${vsManiac.aggroRate.toStringAsFixed(2)} / '
+      '${vsNit.aggroRate.toStringAsFixed(2)})');
+
+  // --- 下注尺度：干面小注、湿面大注、人多抬价 ---
+  final dryCbet = flopBetFrac(board: 'Qh 7d 2c'); // 顶对顶踢，干面
+  final wetCbet = flopBetFrac(board: 'Qh 9h 8c'); // 同一手牌，湿面
+  final multiCbet =
+      flopBetFrac(board: 'Qh 7d 2c', others: 2); // 三人底池，干面
+  check(dryCbet.n > 40 && wetCbet.n > 40 && multiCbet.n > 40,
+      '下注尺度：样本够多 (${dryCbet.n} / ${wetCbet.n} / ${multiCbet.n})');
+  check(wetCbet.frac > dryCbet.frac + 0.1,
+      '下注尺度：干面用小注（范围注），湿面加大保护 '
+      '(${dryCbet.frac.toStringAsFixed(2)} 池 vs '
+      '${wetCbet.frac.toStringAsFixed(2)} 池)');
+  check(multiCbet.frac > dryCbet.frac + 0.05,
+      '下注尺度：多人底池价值下注更大（总有人会跟） '
+      '(${multiCbet.frac.toStringAsFixed(2)} 池 vs '
+      '${dryCbet.frac.toStringAsFixed(2)} 池)');
+
+  // --- 尺度混合：同一个牌面同一手牌不会永远一个尺寸 ---
+  final sizes = dryCbet.all.toSet().toList()..sort();
+  check(sizes.length >= 3,
+      '尺度混合：同一个牌面同一手牌会换档（${sizes.length} 种尺寸：'
+      '${sizes.map((x) => '${(100 * x).toStringAsFixed(0)}%').join('/')}）');
+  // 干面底池的基准尺度 = 0.62（价值）× 0.62（范围小注）= 0.384。
+  check((dryCbet.frac - 0.384).abs() < 0.04,
+      '尺度混合：混合只打散尺寸，平均尺度基本不动 '
+      '(${dryCbet.frac.toStringAsFixed(3)} 池，基准 0.384)');
+
   // --- 诈唬选牌：挡住对手强牌的那张牌，决定这一枪敢不敢开 ---
   // 同一块「K 高、三张方片、没有顺面」的牌面，同一手垃圾牌，
   // 只差一张 A♦（挡掉对手坚果花）就是两种打法。
@@ -769,6 +808,159 @@ void main() {
   return (
     bluffRate: total == 0 ? 0.0 : fire / total,
     valueSize: sizeN == 0 ? 0.0 : sizeSum / sizeN,
+  );
+}
+
+/// 翻牌圈 c-bet 的尺度：AI 拿顶对顶踢（[hole]）面对一张没人下注的牌面，
+/// 量它第一次下注「下注额 ÷ 下注前底池」。其它人一律过牌跟注。
+({double frac, int n, List<double> all}) flopBetFrac({
+  required String board,
+  String hole = 'Ah Qd',
+  int others = 0,
+  int seeds = 120,
+}) {
+  final all = <double>[];
+  var sum = 0.0;
+  var n = 0;
+  for (var seed = 0; seed < seeds; seed++) {
+    final rnd = Random(seed);
+    final g = GameEngine(
+      config: const GameConfig(
+          startingStack: 10000, smallBlind: 50, bigBlind: 100),
+      random: rnd,
+    )
+      ..addPlayer('ai', 'AI')
+      ..addPlayer('hero', 'Hero');
+    for (var i = 0; i < others; i++) {
+      g.addPlayer('c$i', 'C$i');
+    }
+    final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+    const extra = ['4c 5c', '6c 7c', '8d 9d'];
+    final holes = <String, List<e.Card>>{'ai': cs(hole), 'hero': cs('3c 2h')};
+    for (var i = 0; i < others; i++) {
+      holes['c$i'] = cs(extra[i % extra.length]);
+    }
+    g.startHand(holeOverride: holes, boardOverride: cs(board));
+    var guard = 0;
+    var recorded = false;
+    while (!g.handOver && guard++ < 300) {
+      final p = g.pendingAction();
+      final legal = p.actions;
+      if (p.player.id == 'ai') {
+        final d = ai.decide(g, p.player);
+        final facing = legal.any((a) => a.type == ActionType.call);
+        if (!recorded && g.street == Street.flop && !facing) {
+          recorded = true;
+          if (d.type == ActionType.bet) {
+            final pot = g.potTotal();
+            final add = (d.amountTo ?? 0) - p.player.streetBet;
+            if (pot > 0) {
+              sum += add / pot;
+              all.add(add / pot);
+              n++;
+            }
+          }
+        }
+        g.apply('ai', d.type, amount: d.amountTo);
+        continue;
+      }
+      final facing = legal.any((a) => a.type == ActionType.call);
+      final wants = facing ? ActionType.call : ActionType.check;
+      g.apply(p.player.id,
+          legal.any((a) => a.type == wants) ? wants : legal.first.type);
+    }
+  }
+  return (frac: n == 0 ? 0.0 : sum / n, n: n, all: all);
+}
+
+/// 先跟一个「疯子」（翻后逮到机会就下注/加注）或「岩石」（只跟不主动）
+/// 打 [warmup] 手，攒出进攻性读数；再看 AI 拿第二对面对同一个半池下注时
+/// 敢不敢跟——同一手牌、同一个尺度，只差对手的风格。
+({double callRate, double aggroRate, int total}) callVsRead({
+  required bool maniac,
+  String hole = 'Ks Jd',
+  double heroFrac = 0.5,
+  int warmup = 150,
+  int rounds = 80,
+}) {
+  final ai = AiPlayer(AiStyle.tightAggressive, random: Random(7));
+
+  ({ActionType? act}) play(int seed, bool record) {
+    final g = GameEngine(
+      config: const GameConfig(
+          startingStack: 10000, smallBlind: 50, bigBlind: 100),
+      random: Random(seed),
+    )
+      ..addPlayer('hero', 'Hero')
+      ..addPlayer('ai', 'AI');
+    g.startHand(
+      holeOverride: {'ai': cs(hole), 'hero': cs('3c 2h')},
+      boardOverride: cs('Qc Jh 2s'),
+    );
+    ActionType? act;
+    var guard = 0;
+    while (!g.handOver && guard++ < 300) {
+      final p = g.pendingAction();
+      final legal = p.actions;
+      final facing = legal.any((a) => a.type == ActionType.call);
+      if (p.player.id == 'ai') {
+        final d = ai.decide(g, p.player);
+        // 只统计「翻牌圈面对下注」的那次决策。
+        if (record && g.street == Street.flop && facing && act == null) {
+          act = d.type;
+        }
+        g.apply('ai', d.type, amount: d.amountTo);
+        continue;
+      }
+      ActionType wants;
+      if (record) {
+        // 测量阶段：翻牌圈固定开半池（AI 一定面对下注），其它街跟注。
+        wants = g.street == Street.flop && !facing
+            ? ActionType.bet
+            : (facing ? ActionType.call : ActionType.check);
+      } else if (maniac) {
+        wants = legal.any((a) => a.type == ActionType.raise)
+            ? ActionType.raise
+            : (legal.any((a) => a.type == ActionType.bet)
+                ? ActionType.bet
+                : (facing ? ActionType.call : ActionType.check));
+      } else {
+        wants = facing ? ActionType.call : ActionType.check;
+      }
+      if (wants == ActionType.bet || wants == ActionType.raise) {
+        final pot = g.potTotal();
+        final la = legal.firstWhere((a) => a.type == wants,
+            orElse: () => legal.first);
+        final amount = wants == ActionType.bet
+            ? p.player.streetBet + (pot * heroFrac).round()
+            : g.currentBet + (pot * heroFrac).round();
+        g.apply(p.player.id, wants,
+            amount: amount.clamp(la.minAmount, la.maxAmount));
+        continue;
+      }
+      g.apply(p.player.id,
+          legal.any((a) => a.type == wants) ? wants : legal.first.type);
+    }
+    return (act: act);
+  }
+
+  for (var i = 0; i < warmup; i++) {
+    play(2000 + i, false);
+  }
+
+  var calls = 0;
+  var total = 0;
+  for (var i = 0; i < rounds; i++) {
+    final r = play(300 + i, true);
+    if (r.act == null) continue;
+    total++;
+    if (r.act == ActionType.call) calls++;
+  }
+  final read = ai.readOf('hero');
+  return (
+    callRate: total == 0 ? 0.0 : calls / total,
+    aggroRate: read?.aggroRate ?? -1,
+    total: total,
   );
 }
 

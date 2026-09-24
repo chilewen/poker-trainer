@@ -15,11 +15,17 @@ class _Result {
   final Map<String, int> counts = {};
   int total = 0;
 
-  void add(AiDecision d) {
+  /// [pot] = 决策时的底池，[ref] = 加注前的最高注（下注时为 0）。
+  /// 下注/加注不按绝对筹码分类，而是按「相对底池的档位」（5% 一档）——
+  /// 尺度混合之后同一个局面会有好几档尺寸，绝对数字看着就是一团乱麻。
+  void add(AiDecision d, {required int pot, required int ref}) {
     total++;
-    final key = d.type == ActionType.bet || d.type == ActionType.raise
-        ? '${d.type.label} ~${d.amountTo}'
-        : d.type.label;
+    var key = d.type.label;
+    if ((d.type == ActionType.bet || d.type == ActionType.raise) && pot > 0) {
+      final frac = ((d.amountTo ?? 0) - ref) / pot;
+      final bucket = (frac * 20).round() / 20;
+      key = '${d.type.label} ~${(100 * bucket).toStringAsFixed(0)}%池';
+    }
     counts[key] = (counts[key] ?? 0) + 1;
   }
 
@@ -75,7 +81,11 @@ _Result _sample({
         final d = ai.decide(g, p.player);
         if (!recorded && g.street == target) {
           recorded = true;
-          res.add(d);
+          res.add(
+            d,
+            pot: g.potTotal(),
+            ref: d.type == ActionType.bet ? p.player.streetBet : g.currentBet,
+          );
         }
         g.apply('ai', d.type, amount: d.amountTo);
         continue;

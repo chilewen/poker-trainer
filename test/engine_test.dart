@@ -221,6 +221,186 @@ void main() {
     expect(r!.hands, greaterThan(20));
     expect(r.seen, greaterThan(5), reason: '攒到了足够「面对下注」的样本');
     expect(r.foldToBet, 1.0, reason: '英雄翻后见注就弃 = 弃牌率 100%');
+    expect(r.aggroRate, lessThan(0.2),
+        reason: '英雄从没主动下注过，进攻性读数应该很低');
+  });
+
+  test('读人：对手是疯子还是岩石，决定我们抓诈唬时跟不跟', () {
+    // 先跟一个「逮到机会就下注/加注」的疯子、和一个「只跟不主动」的岩石
+    // 各打一批准牌，攒出进攻性读数；再拿同一手第二对面对同一个 3 倍池
+    // 超池下注，看 AI 敢不敢抓。
+    ({double callRate, double aggroRate, int total}) callVsRead(
+        {required bool maniac}) {
+      final ai = AiPlayer(AiStyle.tightAggressive, random: Random(7));
+      ({ActionType? act}) play(int seed, bool record) {
+        final g = GameEngine(
+          config: const GameConfig(
+              startingStack: 10000, smallBlind: 50, bigBlind: 100),
+          random: Random(seed),
+        )
+          ..addPlayer('hero', '我')
+          ..addPlayer('ai', 'AI');
+        g.startHand(
+          holeOverride: {'ai': _cs('Ks Jd'), 'hero': _cs('3c 2h')},
+          boardOverride: _cs('Qc Jh 2s'),
+        );
+        ActionType? act;
+        var guard = 0;
+        while (!g.handOver && guard++ < 300) {
+          final p = g.pendingAction();
+          final legal = p.actions;
+          final facing = legal.any((a) => a.type == ActionType.call);
+          if (p.player.id == 'ai') {
+            final d = ai.decide(g, p.player);
+            if (record && g.street == Street.flop && facing && act == null) {
+              act = d.type;
+            }
+            g.apply('ai', d.type, amount: d.amountTo);
+            continue;
+          }
+          ActionType wants;
+          if (record) {
+            wants = g.street == Street.flop && !facing
+                ? ActionType.bet
+                : (facing ? ActionType.call : ActionType.check);
+          } else if (maniac) {
+            wants = legal.any((a) => a.type == ActionType.raise)
+                ? ActionType.raise
+                : (legal.any((a) => a.type == ActionType.bet)
+                    ? ActionType.bet
+                    : (facing ? ActionType.call : ActionType.check));
+          } else {
+            wants = facing ? ActionType.call : ActionType.check;
+          }
+          if (wants == ActionType.bet || wants == ActionType.raise) {
+            final pot = g.potTotal();
+            final la = legal.firstWhere((a) => a.type == wants,
+                orElse: () => legal.first);
+            final amount = wants == ActionType.bet
+                ? p.player.streetBet + (pot * 3.0).round()
+                : g.currentBet + (pot * 3.0).round();
+            g.apply(p.player.id, wants,
+                amount: amount.clamp(la.minAmount, la.maxAmount));
+            continue;
+          }
+          g.apply(p.player.id,
+              legal.any((a) => a.type == wants) ? wants : legal.first.type);
+        }
+        return (act: act);
+      }
+
+      for (var i = 0; i < 150; i++) {
+        play(2000 + i, false);
+      }
+      var calls = 0, total = 0;
+      for (var i = 0; i < 120; i++) {
+        final r = play(300 + i, true);
+        if (r.act == null) continue;
+        total++;
+        if (r.act == ActionType.call) calls++;
+      }
+      final read = ai.readOf('hero');
+      return (
+        callRate: total == 0 ? 0.0 : calls / total,
+        aggroRate: read?.aggroRate ?? -1,
+        total: total,
+      );
+    }
+
+    final vsManiac = callVsRead(maniac: true);
+    final vsNit = callVsRead(maniac: false);
+    expect(vsManiac.aggroRate, greaterThan(vsNit.aggroRate + 0.2),
+        reason: '进攻性读数要能区分这两种对手');
+    expect(vsManiac.total, greaterThan(30));
+    expect(vsManiac.callRate, greaterThan(vsNit.callRate + 0.15),
+        reason: '对爱开火的对手抓得更多，对岩石弃得更多 '
+            '(${(100 * vsManiac.callRate).toStringAsFixed(0)}% vs '
+            '${(100 * vsNit.callRate).toStringAsFixed(0)}%)');
+  });
+
+  test('下注尺度：干面用小注、湿面加大、多人底池抬价', () {
+    // 量 AI 在翻牌圈拿顶对顶踢时「下注额 ÷ 下注前底池」。
+    ({double frac, int n, List<double> all}) flopBetFrac(
+        {required String board, int others = 0}) {
+      final all = <double>[];
+      var sum = 0.0;
+      var n = 0;
+      for (var seed = 0; seed < 120; seed++) {
+        final rnd = Random(seed);
+        final g = GameEngine(
+          config: const GameConfig(
+              startingStack: 10000, smallBlind: 50, bigBlind: 100),
+          random: rnd,
+        )
+          ..addPlayer('ai', 'AI')
+          ..addPlayer('hero', '我');
+        for (var i = 0; i < others; i++) {
+          g.addPlayer('c$i', 'C$i');
+        }
+        final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+        const extra = ['4c 5c', '6c 7c', '8d 9d'];
+        final holes = <String, List<Card>>{
+          'ai': _cs('Ah Qd'),
+          'hero': _cs('3c 2h'),
+        };
+        for (var i = 0; i < others; i++) {
+          holes['c$i'] = _cs(extra[i % extra.length]);
+        }
+        g.startHand(holeOverride: holes, boardOverride: _cs(board));
+        var guard = 0;
+        var recorded = false;
+        while (!g.handOver && guard++ < 300) {
+          final p = g.pendingAction();
+          final legal = p.actions;
+          if (p.player.id == 'ai') {
+            final d = ai.decide(g, p.player);
+            final facing = legal.any((a) => a.type == ActionType.call);
+            if (!recorded && g.street == Street.flop && !facing) {
+              recorded = true;
+              if (d.type == ActionType.bet) {
+                final pot = g.potTotal();
+                final add = (d.amountTo ?? 0) - p.player.streetBet;
+                if (pot > 0) {
+                  sum += add / pot;
+                  all.add(add / pot);
+                  n++;
+                }
+              }
+            }
+            g.apply('ai', d.type, amount: d.amountTo);
+            continue;
+          }
+          final facing = legal.any((a) => a.type == ActionType.call);
+          final wants = facing ? ActionType.call : ActionType.check;
+          g.apply(p.player.id,
+              legal.any((a) => a.type == wants) ? wants : legal.first.type);
+        }
+      }
+      return (frac: n == 0 ? 0.0 : sum / n, n: n, all: all);
+    }
+
+    final dry = flopBetFrac(board: 'Qh 7d 2c');
+    final wet = flopBetFrac(board: 'Qh 9h 8c');
+    final multi = flopBetFrac(board: 'Qh 7d 2c', others: 2);
+    expect(dry.n, greaterThan(40));
+    expect(wet.frac, greaterThan(dry.frac + 0.1),
+        reason: '干面用范围小注、湿面加大保护 '
+            '(${dry.frac.toStringAsFixed(2)} vs '
+            '${wet.frac.toStringAsFixed(2)} 池)');
+    expect(multi.frac, greaterThan(dry.frac + 0.05),
+        reason: '多人底池总有人会跟，价值下注更大 '
+            '(${multi.frac.toStringAsFixed(2)} vs '
+            '${dry.frac.toStringAsFixed(2)} 池)');
+
+    // 尺度混合：同一个牌面、同一手牌，尺寸要换档，不能永远是同一个数。
+    final sizes = dry.all.toSet().toList()..sort();
+    expect(sizes.length, greaterThanOrEqualTo(3),
+        reason: '同一手牌应该有多种尺寸 '
+            '(${sizes.map((x) => '${(100 * x).toStringAsFixed(0)}%').join('/')})');
+    // 干面基准 = 0.62（价值）× 0.62（范围小注）= 0.384，混合不该改变均值。
+    expect((dry.frac - 0.384).abs(), lessThan(0.04),
+        reason: '混合只打散尺寸，平均尺度基本不动 '
+            '(${dry.frac.toStringAsFixed(3)} 池)');
   });
 
   test('第二枪选牌：转牌发空白牌继续开火，发 A 就收手', () {
