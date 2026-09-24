@@ -579,6 +579,77 @@ void main() {
     return (fold: r(fold), call: r(call), raise: r(raise), total: total);
   }
 
+  /// 单挑：AI 按钮开池、英雄跟注；翻牌英雄过牌/跟注，转牌英雄按 [frac] 池
+  /// 下注，统计 AI 在转牌面对下注的应对（就是「听牌面对第二枪」那条线）。
+  ({double fold, double call, double raise, int n}) aiVsTurnBet(
+      String hole, String board, double frac,
+      {AiStyle style = AiStyle.tightAggressive, int seeds = 200}) {
+    var fold = 0, call = 0, raise = 0, n = 0;
+    for (var seed = 0; seed < seeds; seed++) {
+      final rnd = Random(seed);
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      )
+        ..addPlayer('ai', 'AI')
+        ..addPlayer('hero', '我');
+      final ai = AiPlayer(style, random: rnd);
+      g.startHand(
+        holeOverride: {'ai': _cs(hole), 'hero': _cs('3s 2s')},
+        boardOverride: _cs(board),
+      );
+      g.apply('ai', ActionType.raise, amount: 250);
+      g.apply('hero', ActionType.call);
+      var guard = 0;
+      var asked = false;
+      var heroBet = false;
+      while (!g.handOver && guard++ < 200) {
+        final p = g.pendingAction();
+        final legal = p.actions;
+        final facing = g.currentBet > p.player.streetBet;
+        if (p.player.id == 'ai') {
+          final d = ai.decide(g, p.player);
+          if (g.street == Street.turn && facing && !asked) {
+            asked = true;
+            n++;
+            switch (d.type) {
+              case ActionType.fold:
+                fold++;
+              case ActionType.call:
+                call++;
+              default:
+                raise++;
+            }
+            break;
+          }
+          g.apply('ai', d.type, amount: d.amountTo);
+          continue;
+        }
+        // 英雄：转牌拿到说话权就按 [frac] 池下注（第二枪），其余过牌/跟注。
+        if (g.street == Street.turn &&
+            !facing &&
+            !heroBet &&
+            legal.any((a) => a.type == ActionType.bet)) {
+          heroBet = true;
+          final la = legal.firstWhere((a) => a.type == ActionType.bet);
+          g.apply(
+              'hero',
+              ActionType.bet,
+              amount: (g.potTotal() * frac)
+                  .round()
+                  .clamp(la.minAmount, la.maxAmount));
+          continue;
+        }
+        final want = facing ? ActionType.call : ActionType.check;
+        g.apply(p.player.id,
+            legal.any((a) => a.type == want) ? want : ActionType.check);
+      }
+    }
+    double r(int v) => n == 0 ? 0 : v / n;
+    return (fold: r(fold), call: r(call), raise: r(raise), n: n);
+  }
+
   /// 单挑：AI 按钮开池（写死 250，任何起手牌都能进翻牌）、英雄跟注，
   /// 翻牌英雄按 [frac] 池下注，统计 AI 在翻牌圈的应对。
   ({double fold, double call, double raise, int n}) aiVsFlopBet(
@@ -1603,6 +1674,33 @@ void main() {
       spr: spr / n,
     );
   }
+
+  test('听牌面对转牌第二枪：正常尺度该跟，超池和弱听牌照旧弃', () {
+    // 坚果花听 + 两张高张（AdKd 在 Qd7d2c5h）：只数 outs 是 9 个，算出来
+    // 19.6% + 隐含 8% = 27.6%，对着转牌 2/3 池下注（要 28.6%）永远差一个
+    // 多点，于是这类牌一律弃——探针实测跟注 0%，要么加注要么弃，一眼就不
+    // 像真人。高张、后门这些出路「数 outs」看不见，得用对着对手范围算的
+    // 蒙特卡洛胜率兜底（真实胜率三成上下，跟这个价格是够的）。
+    String pct(double v) => '${(100 * v).round()}%';
+    final normal = aiVsTurnBet('Ad Kd', 'Qd 7d 2c 5h', 0.66);
+    expect(normal.n, greaterThan(40), reason: '样本要够（${normal.n}）');
+    expect(normal.call, greaterThan(0.4),
+        reason: '坚果花听面对 2/3 池的下注要跟（跟 ${pct(normal.call)}）');
+    expect(normal.fold, lessThan(0.3),
+        reason: '不该一路弃（弃 ${pct(normal.fold)}）');
+
+    // 超池是另一回事：敢超池的人范围偏价值，成牌之后也收不回钱，
+    // 隐含赔率被吃掉，所以这时退回保守估值、老实弃牌。
+    final over = aiVsTurnBet('Ad Kd', 'Qd 7d 2c 5h', 1.35);
+    expect(over.fold, greaterThan(0.55),
+        reason: '超池面前以弃为主（弃 ${pct(over.fold)}）');
+
+    // 弱听牌（卡顺 4 outs）不享受这个兜底：对着范围算胜率会把它算高，
+    // 真实可兑现的出路没那么多，该弃还是弃。
+    final gut = aiVsTurnBet('7h 6h', '9d 5c 2s Kh', 0.66);
+    expect(gut.fold, greaterThan(0.55),
+        reason: '卡顺对着 2/3 池以弃为主（弃 ${pct(gut.fold)}）');
+  });
 
   test('三条同花面：只有成花才打光，顺子/三条/两对转为跟注', () {
     // 实战第 175 手：转牌 10♦Q♦3♠K♦（三张方片），AI 拿 7♦6♦ 成花打光。

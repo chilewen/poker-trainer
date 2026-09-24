@@ -26,17 +26,43 @@ IPA_URL="$4"
 BASE="https://$USER.github.io/$REPO"
 OUT="${OTA_OUT:-build/ota}"
 REMOTE="${OTA_REMOTE:-git@github.com:$USER/$REPO.git}"
+# 先记下脚本所在目录：下面会 cd 进发布目录，之后再算 $(dirname "$0") 就找不到人了。
+TOOL_DIR=$(cd "$(dirname "$0")" && pwd)
+# 发布目录统一转成绝对路径：脚本中途会 cd 进去，后面 "$OUT/xxx" 再按相对路径拼
+# 就会变成 build/ota/build/ota/xxx。
+mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd)"
 
 if [ -n "$IPA_URL" ]; then
-  zsh "$(dirname "$0")/make_ota.sh" "$IPA" "$BASE" "$OUT" "$IPA_URL"
+  zsh "$TOOL_DIR/make_ota.sh" "$IPA" "$BASE" "$OUT" "$IPA_URL"
 else
-  zsh "$(dirname "$0")/make_ota.sh" "$IPA" "$BASE" "$OUT"
+  zsh "$TOOL_DIR/make_ota.sh" "$IPA" "$BASE" "$OUT"
 fi
 
 cd "$OUT"
 if [ ! -d .git ]; then
   git init -q -b main
 fi
+
+# 记下「本机怎么发布」，并装一个 pre-commit 钩子。
+# 没有它的话，手动发布（把新 ipa 拷进来 → git add . → git commit → push）会直接
+# 提交上一次生成的 install.html，页面上的版本号永远不变——这个坑踩过一次了。
+CONF_IPA_URL="${IPA_URL:-$BASE/$(basename "$IPA")}"
+cat > "$OUT/.ota.conf" <<CONF_EOF
+# 本机发布配置，由 publish_gh_pages.sh 生成；已在 .gitignore 里，不要提交。
+OTA_TOOL="$TOOL_DIR"
+OTA_BASE="$BASE"
+OTA_IPA_URL="$CONF_IPA_URL"
+CONF_EOF
+grep -qxF '.ota.conf' "$OUT/.gitignore" 2>/dev/null || echo '.ota.conf' >> "$OUT/.gitignore"
+mkdir -p "$OUT/.git/hooks"
+cat > "$OUT/.git/hooks/pre-commit" <<HOOK_EOF
+#!/bin/zsh
+# 自动生成：逻辑在 poker_trainer 仓库的 tool/ota/ota_precommit.sh
+exec zsh "$TOOL_DIR/ota_precommit.sh"
+HOOK_EOF
+chmod +x "$OUT/.git/hooks/pre-commit"
+
 git add -A
 git commit -q -m "Poker Trainer OTA $(date '+%Y-%m-%d %H:%M')" || echo "（内容没变，跳过提交）"
 

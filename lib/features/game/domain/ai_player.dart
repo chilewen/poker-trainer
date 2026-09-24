@@ -1290,7 +1290,7 @@ class AiPlayer {
         _registerFire(game.street, _PlanKind.semiBluff);
         return _raise(game, me, 0.75);
       }
-      return _drawCallOrFold(game, me, spot, read, potOdds);
+      return _drawCallOrFold(game, me, spot, read, potOdds, equity);
     }
     // 4) 中等牌：按赔率跟注，面对大注/强线弃牌；小注时偶尔反击。
     if (read.tier == HandTier.medium) {
@@ -1404,7 +1404,7 @@ class AiPlayer {
 
   /// 听牌面对下注：跟注要跟得上「隐含赔率」，跟不动就弃。
   AiDecision _drawCallOrFold(GameEngine game, PlayerState me, _Spot spot,
-      HandReading read, double potOdds) {
+      HandReading read, double potOdds, double Function() equity) {
     if (spot.toCall <= 0) return const AiDecision(ActionType.check);
     // 河牌听牌已死：不再跟注买牌，改为小频率诈唬（有阻断牌时更合理）。
     if (game.street == Street.river) {
@@ -1418,7 +1418,40 @@ class AiPlayer {
     final deep = me.stack > spot.pot * 1.5;
     // 隐含赔率：坚果花听/组合听牌成牌后还能再赢一笔。
     final implied = (read.nutFlushDraw || read.isComboDraw) ? 0.08 : 0.06;
-    final drawEq = read.drawEquity(streets) + (deep ? implied : 0);
+    // 「数 outs」只数得出花/顺的出路，高张、后门这些全看不见：AdKd 在
+    // Qd7d2c5h 是 9 outs 的坚果花听，可它还有两张高张能赢，真实胜率三成
+    // 上下，对着转牌 2/3 池的下注（要 28.6%）该跟——只数 outs 会算成
+    // 19.6%+8% = 27.6%，差一个多点，于是这种牌一律弃牌（探针实测：
+    // 面对 2/3 池的转牌下注，跟注 0%，要么加要么弃，一眼就不像真人）。
+    // 所以这里跟蒙特卡洛胜率（对着对手范围算的，什么都算进去了）取大值：
+    // 谁更乐观听谁的，边缘牌才不会因为估值方式差一个档就整档弃掉。
+    // 「数 outs」只数得出花/顺的出路，高张和后门全看不见：AdKd 在
+    // Qd7d2c5h 是 9 outs 的坚果花听，可它还有两张高张能赢，真实胜率三成
+    // 上下，对着转牌 2/3 池的下注（要 28.6%）该跟——只数 outs 算出来是
+    // 19.6%+8%，差一个多点，于是这种牌一律弃牌（探针实测：面对 2/3 池的
+    // 转牌下注跟注 0%，要么加要么弃，一眼就不像真人）。
+    // 所以强听牌（8 个出路以上：花听、两头顺、组合听）改用蒙特卡洛胜率
+    // ——它是对着对手的实际范围算的，高张、后门、对手在诈唬全都算进去了。
+    //
+    // 两条边界不能越：
+    //   · 卡顺这种 4~5 outs 的弱听牌不享受这个待遇。它们能赢的出路本来就
+    //     少，「对着范围算胜率」会把对手诈唬的那一份也算成我们的，
+    //     真实可兑现的胜率没那么多——继续按数 outs 来，该弃就弃。
+    //   · 超池也是例外：敢超池的人范围明显偏价值，范围模型给的胜率偏乐观，
+    //     而且成牌之后也收不回钱（隐含赔率被超池吃掉）。这时退回保守估值，
+    //     不硬凑，超池面前老实弃牌。
+    //   · 面对「加注」同样不算：能加注出来的范围强得多，而且我们手上那点
+    //     成牌（第二对之类，这类牌也算听牌线）在加注线里根本兑现不了，
+    //     把它按摊牌价值算进去就变成「拿第二对去接加注」。
+    final strongDraw =
+        read.drawOuts >= 8 || read.isComboDraw || read.nutFlushDraw;
+    final trustRange = strongDraw &&
+        !spot.villainRaisedThisStreet &&
+        spot.betSizeRel < 1.15;
+    final base = trustRange
+        ? max(read.drawEquity(streets), equity())
+        : read.drawEquity(streets);
+    final drawEq = base + (deep ? implied : 0);
     // 听牌的门槛只比裸赔率高一点点。以前在这上面再乘 1.25 × 1.1 的
     // 「安全余量」，等于要求 9 outs 的花听对着 1 倍池要有 46% 胜率才跟，
     // 结果 8~9 outs 的顺听/花听对着正常尺度一律弃掉——真人拿到这些牌
@@ -1426,7 +1459,15 @@ class AiPlayer {
     // 真正要防的是被更强的成牌清空，所以余量只留在「对手线很强」和
     // 「超池」这两项上。
     var need = potOdds * (spot.villainStrength > 0.75 ? 1.08 : 1.0);
-    if (spot.betSizeRel >= 1.2) need *= 1.1;
+    // 超池是两极的：真东西和空气都在里面。模型给的胜率是「对着整条范围」
+    // 算的，被价值牌清空的风险没算进去；而且注额越大，成牌之后能再收回来的
+    // 钱越少（隐含赔率被超池吃掉），门槛要跟着抬。
+    // 门槛写 1.15 而不是 1.2：注额是整数，1.2 倍池的下注算出来常常是
+    // 1.1997，写 1.2 这条判断等于永远不生效（以前就是这样，超池的余量
+    // 一直是白写的）。
+    if (spot.betSizeRel >= 1.15) {
+      need *= spot.polarizedBet ? 1.1 : 1.2;
+    }
     need *= _callVsReadFactor(game, me); // 疯子付得出隐含赔率，岩石付不出
     // 没位置的听牌不好兑现：跟注之后转牌还得先挨一枪，成牌了也很难
     // 在后面两条街收满价值（先说话的人收不到薄价值）。
@@ -1434,7 +1475,13 @@ class AiPlayer {
     if (!spot.villainRaisedThisStreet) {
       need *= 1 - 0.6 * _p.callSlack; // 跟注站连听牌都买得更便宜
     }
-    if (drawEq >= need) return const AiDecision(ActionType.call);
+    // 边缘局面混着打：胜率和门槛挨得近时按比例决定跟不跟。以前这里是硬
+    // 阈值，同一个牌线每次都一样——听牌面对下注要么跟、要么弃，一眼看得出
+    // 是程序（真人这种局面本来就是混着来的）。只在强听牌上混：卡顺这种
+    // 出路太少的牌不值得给自己找理由，赔率不够就干净弃掉。
+    if (strongDraw ? _callMix(drawEq, need) : drawEq >= need) {
+      return const AiDecision(ActionType.call);
+    }
     // 便宜的小注：弱听牌也可以跟一张看转牌。
     if (spot.betSizeRel <= 0.3 &&
         read.drawOuts >= 4 &&
