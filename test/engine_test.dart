@@ -1847,8 +1847,9 @@ void main() {
         reason: '顶对过牌后面对半池也该有过牌-加注（加 ${pct(topPair.raise)}）');
     expect(topPair.raise, lessThan(topPair.call),
         reason: '主体还是跟注，加注只是混入的频率');
-    // 实测第二对约 8%（以前是 0%），阈值取 3% 留出余量。
-    expect(secondPair.raise, greaterThan(0.03),
+    // 实测第二对约 4%（以前是 0%）——弱成牌的过牌-加注是纯诈唬，
+    // 频率压在有位置那一侧的水平上就够了，阈值取 2% 留出余量。
+    expect(secondPair.raise, greaterThan(0.02),
         reason: '第二对也要有反击频率（加 ${pct(secondPair.raise)}）');
     expect(topPair.raise, greaterThan(secondPair.raise),
         reason: '牌越强加得越多（${pct(topPair.raise)} vs ${pct(secondPair.raise)}）');
@@ -1973,6 +1974,40 @@ void main() {
     expect(minRaise.fold, lessThan(secondPair.fold - 0.15),
         reason: '小加注不该弃得跟三倍加注一样多 '
             '（弃 ${pct(minRaise.fold)} vs ${pct(secondPair.fold)}）');
+  });
+
+  test('位置反转：没位置不该比有位置更爱加注', () {
+    // 面对下注时「没位置」这一侧本来就该更少加注：加完还要在不利位置打
+    // 后面两条街，被 3-bet 也更难受。以前过牌-加注的倍率对所有牌力一视
+    // 同仁（强牌 ×1.5、弱成牌也照吃），结果是没位置的加注率反过来压过
+    // 有位置——翻牌顶对顶踢 78% vs 56%、转牌底对 8% vs 2%，方向是反的。
+    String pct(double v) => '${(100 * v).round()}%';
+    const flop = 'Kd 8c 3h';
+
+    // 强牌（顶对顶踢）：两边都该有一半上下的加注，差距要收在 10 个点内。
+    final tpIp = aiVsCheckBet('Ah Kd', flop, 0.5, seeds: 200, oop: false);
+    final tpOop = aiVsCheckBet('Ah Kd', flop, 0.5, seeds: 200);
+    expect(tpIp.total, greaterThan(100), reason: '有位置样本要够');
+    expect(tpOop.total, greaterThan(50), reason: '没位置样本要够（n=${tpOop.total}）');
+    expect(tpIp.raise, greaterThan(0.3),
+        reason: '顶对顶踢该有一部分反击（有位置加 ${pct(tpIp.raise)}）');
+    // 改前是 78% vs 56%（没位置反而高出 22 个点）；现在两边都在六成上下、
+    // 没位置略高一点（过牌-加注本来就是没位置一方的武器），差距收进 15 点。
+    expect(tpOop.raise, lessThan(tpIp.raise + 0.15),
+        reason: '没位置不该加得比有位置还凶 '
+            '（${pct(tpOop.raise)} vs ${pct(tpIp.raise)}）');
+
+    // 一对弱牌：两边都只能留一点点反击频率——拿底对去过牌-加注打走的是
+    // 更差的牌、留下的都是更好的牌，等于把有摊牌价值的牌变成纯诈唬。
+    final weakIp = aiVsCheckBet('8h 7s', flop, 0.5, seeds: 200, oop: false);
+    final weakOop = aiVsCheckBet('8h 7s', flop, 0.5, seeds: 200);
+    expect(weakOop.total, greaterThan(50), reason: '没位置样本要够');
+    expect(weakIp.raise, lessThan(0.08),
+        reason: '有位置的第二对也只是混一点反击（加 ${pct(weakIp.raise)}）');
+    expect(weakOop.raise, lessThan(0.08),
+        reason: '没位置的第二对别乱加（加 ${pct(weakOop.raise)}）');
+    expect(weakOop.call, greaterThan(weakOop.raise * 4),
+        reason: '弱成牌面对下注主体还是跟注（跟 ${pct(weakOop.call)}）');
   });
 
   /// 单挑：翻牌/转牌都过牌，河牌没人下注时量 AI 的选择——
@@ -2355,7 +2390,7 @@ void main() {
       aiThinkTime: Duration.zero,
     );
     first.startRealTable(
-        label: '实战 6人桌 · 50/100', config: config, playerCount: 6);
+        name: '实战 6人桌', config: config, playerCount: 6);
     first.engine.players[0].stack = 13400;
     first.engine.players[1].stack = 7200;
     first.engine.buttonIndex = 3;
@@ -2468,7 +2503,7 @@ void main() {
       aiThinkTime: Duration.zero,
     );
     first.startRealTable(
-        label: '实战 单挑 · 50/100', config: config, playerCount: 2);
+        name: '实战 单挑', config: config, playerCount: 2);
     // 打几个动作，停在手牌中途（没打完就「退出 App」）。
     var steps = 0;
     while (!first.engine.handOver && steps++ < 3) {
@@ -2544,7 +2579,7 @@ void main() {
       aiThinkTime: Duration.zero,
     );
     first.startRealTable(
-        label: '实战 单挑 · 50/100', config: config, playerCount: 2);
+        name: '实战 单挑', config: config, playerCount: 2);
     var guard = 0;
     while (!first.engine.handOver && guard++ < 400) {
       if (first.heroToAct) first.heroAct(ActionType.fold);
@@ -2570,6 +2605,29 @@ void main() {
     expect(second.engine.handOver, isFalse, reason: '恢复后直接发下一手');
     expect(second.engine.lastHand!.id, isNot(finishedId),
         reason: '上一手已经结算，不该重开同一手');
+  });
+
+  test('对局标题：桌名不带盲注，本手输赢跟着筹码走', () {
+    final t = TableController(random: Random(7), aiThinkTime: Duration.zero);
+    t.startRealTable(
+      name: '实战 单挑',
+      config: const GameConfig(
+          startingStack: 10000, smallBlind: 50, bigBlind: 100),
+      playerCount: 2,
+    );
+    // 大厅卡片和存档继续带盲注级别，导航栏标题用不带盲注的桌名。
+    expect(t.tableLabel, '实战 单挑 · 50/100');
+    expect(t.tableName, '实战 单挑');
+    // 单挑：英雄坐按钮 = 小盲，一开局就投了 50。
+    expect(t.heroHandNet, -50, reason: '盲注已经出去了');
+
+    // 弃牌走完这一手：导航栏的数字要和结算条里的「本手输赢」对得上。
+    t.heroAct(ActionType.fold);
+    expect(t.engine.handOver, isTrue, reason: '英雄弃牌后本手结束');
+    expect(t.heroHandNet, -50);
+    expect(t.heroHandNet, t.lastHand!.netResult[TableController.heroId],
+        reason: '标题里的数字必须等于结算数值');
+    expect(t.handsPlayed, 1);
   });
 
   test('补码：补满至起始买入', () {

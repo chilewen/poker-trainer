@@ -49,8 +49,12 @@ class TableController extends ChangeNotifier {
   final Random _random;
   final Map<String, AiPlayer> _ais = {};
 
-  /// 当前桌名称（大厅场景选择后更新）。
+  /// 当前桌名称（大厅场景选择后更新）。含盲注级别，用于大厅/存档显示。
   String tableLabel = '常规 6 人桌';
+
+  /// 对局页顶部标题用的桌名：不带盲注级别。盲注在大厅卡片和存档里已经
+  /// 有了，导航栏那一行留给「打到第几手」和本手输赢。
+  String tableName = '常规 6 人桌';
 
   void _setupPlayers(List<AiStyle> opponentStyles) {
     _ais.clear();
@@ -69,6 +73,7 @@ class TableController extends ChangeNotifier {
     _generation++;
     replayingHand = null;
     tableLabel = label;
+    tableName = label;
     handsPlayed = 0;
     _sessionId = 'table-${DateTime.now().microsecondsSinceEpoch}';
     engine = GameEngine(config: _config, random: _random);
@@ -81,8 +86,11 @@ class TableController extends ChangeNotifier {
 
   /// 实战开桌：按盲注级别与人数重建一桌（筹码重置），并立即发牌。
   /// AI 风格按紧凶 / 松被动 / 松凶循环分配，桌上三种打法都有。
+  ///
+  /// [name] 只给桌名（如「实战 6人桌」）；带盲注级别的完整 [tableLabel]
+  /// 由控制器拼出来，对局页的标题则用不带盲注的 [tableName]。
   void startRealTable({
-    required String label,
+    required String name,
     required GameConfig config,
     required int playerCount,
   }) {
@@ -93,9 +101,10 @@ class TableController extends ChangeNotifier {
       AiStyle.loosePassive,
       AiStyle.looseAggressive,
     ];
-    startScenario(label, [
+    startScenario('$name · ${config.smallBlind}/${config.bigBlind}', [
       for (var i = 0; i < playerCount - 1; i++) rotation[i % rotation.length],
     ]);
+    tableName = name;
   }
 
   int _generation = 0; // 防呆：AI 延迟回调落在旧手牌上
@@ -234,6 +243,17 @@ class TableController extends ChangeNotifier {
   }
 
   PlayerState get hero => engine.players.firstWhere((p) => p.id == heroId);
+
+  /// 英雄本手的净赢输（正 = 赢、负 = 输）。没有牌局时返回 null。
+  ///
+  /// 用「当前筹码 - 本手起始筹码」算：下注/跟注的筹码已经从筹码里扣掉，
+  /// 赢下的底池也已经加回来，所以本手进行中显示的就是这一刻的输赢，
+  /// 打完就等于 [HandHistory.netResult]。
+  int? get heroHandNet {
+    final start = lastHand?.startingStacks[heroId];
+    if (start == null) return null;
+    return hero.stack - start;
+  }
 
   /// 英雄是否已破产：本手结束后筹码不足一个大盲，需要补充。
   bool get heroBusted =>

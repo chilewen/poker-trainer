@@ -99,12 +99,7 @@ class _GameScreenState extends ConsumerState<GameScreen> {
         backgroundColor: _bg,
         foregroundColor: Colors.white70,
         elevation: 0,
-        title: Text(
-          table.handsPlayed > 0
-              ? '${table.tableLabel} · 第 ${table.handsPlayed + 1} 手'
-              : table.tableLabel,
-          style: const TextStyle(fontSize: 15),
-        ),
+        title: _TableTitle(table: table),
         actions: [
           IconButton(
             tooltip: '行动路线',
@@ -924,6 +919,81 @@ class _ActionBarState extends State<_ActionBar> {
     ];
     final seen = <int>{};
     return presets.where((p) => seen.add(p.$2)).toList();
+  }
+}
+
+/// 顶部标题：桌名 · 第几手 + 本手输赢。
+///
+/// 盲注级别不在导航栏里显示（大厅卡片和存档里已经有），这一行留给
+/// 「打到第几手、本手赢了多少」——一抬头就能看见这一手是赚是亏。
+class _TableTitle extends StatelessWidget {
+  const _TableTitle({required this.table});
+
+  final TableController table;
+
+  @override
+  Widget build(BuildContext context) {
+    final net = table.heroHandNet;
+    // 手数跟着右边的输赢数字走：数字是「刚打完/正在打的那一手」的，
+    // 手数也是那一手的（本手结算完停在同一个数上，下一手发牌才 +1）。
+    final handNo = table.engine.handOver
+        ? (table.handsPlayed < 1 ? 1 : table.handsPlayed)
+        : table.handsPlayed + 1;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Flexible(
+          child: Text(
+            // 还没发牌时只写桌名，发下来就一直带手数（第 1 手也显示，
+            // 以前要等第一手打完才冒出手数，标题会突然变长）。
+            table.lastHand == null
+                ? table.tableName
+                : '${table.tableName} · 第 $handNo 手',
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 15),
+          ),
+        ),
+        if (net != null) ...[
+          const SizedBox(width: 8),
+          _HandNetPill(net: net),
+        ],
+      ],
+    );
+  }
+}
+
+/// 本手输赢小药丸：赢绿、亏红、不亏不赚灰。
+///
+/// 本手进行中就是实时值（跟注/下注的筹码已经出去了），本手打完就是
+/// 最终结果——和结算条里的「本手赢利/亏损」是同一个数。
+class _HandNetPill extends StatelessWidget {
+  const _HandNetPill({required this.net});
+
+  final int net;
+
+  @override
+  Widget build(BuildContext context) {
+    final (text, color) = net > 0
+        ? ('本手 +$net', const Color(0xFF7CC98B))
+        : net < 0
+            ? ('本手 $net', const Color(0xFFE56B6B))
+            : ('本手 ±0', const Color(0xFF8A9299));
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+          color: color,
+        ),
+      ),
+    );
   }
 }
 

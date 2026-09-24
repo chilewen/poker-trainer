@@ -155,7 +155,7 @@ class _TableSetupScreenState extends ConsumerState<TableSetupScreen> {
     final count = _playerCount;
     final level = _level;
     ref.read(tableProvider).startRealTable(
-          label: '实战 ${count == 2 ? "单挑" : "$count人桌"} · ${level.label}',
+          name: '实战 ${count == 2 ? "单挑" : "$count人桌"}',
           config: GameConfig(
             startingStack: level.buyIn,
             smallBlind: level.smallBlind,

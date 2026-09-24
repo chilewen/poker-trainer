@@ -27,7 +27,7 @@ void main() {
       aiThinkTime: Duration.zero,
     );
     live.startRealTable(
-        label: '实战 单挑 · 50/100', config: config, playerCount: 2);
+        name: '实战 单挑', config: config, playerCount: 2);
     var steps = 0;
     while (!live.engine.handOver && steps++ < 2) {
       if (live.heroToAct) live.heroAct(ActionType.call);
