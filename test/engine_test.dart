@@ -1741,6 +1741,87 @@ void main() {
         reason: '顺子同理（${pct(straight.donk)}）');
   });
 
+  /// 多人底池：AI 坐按钮（最后行动），英雄先下注、中间 [callers] 个人
+  /// 依次跟注，量 AI 面对同一个下注时的选择。callers = 0 就是单挑。
+  ({double fold, double call, double raise, double jam, int n})
+      aiVsBetMultiway(String hole, String board,
+          {int callers = 0, double frac = 0.5, int seeds = 200}) {
+    var fold = 0, call = 0, raise = 0, jam = 0, n = 0;
+    for (var seed = 0; seed < seeds; seed++) {
+      final rnd = Random(seed);
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      )
+        ..addPlayer('ai', 'AI');
+      final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+      g.addPlayer('hero', '我');
+      for (var i = 0; i < callers; i++) {
+        g.addPlayer('c$i', 'C$i');
+      }
+      g.startHand(
+        holeOverride: {'ai': _cs(hole), 'hero': _cs('3h 2c')},
+        boardOverride: _cs(board),
+      );
+      var guard = 0;
+      var recorded = false;
+      while (!g.handOver && guard++ < 300) {
+        final pa = g.pendingAction();
+        final p = pa.player;
+        final legal = pa.actions;
+        final facing = g.currentBet > p.streetBet;
+        if (p.id == 'ai') {
+          final d = ai.decide(g, p);
+          if (!recorded && facing && g.street == Street.flop) {
+            recorded = true;
+            n++;
+            switch (d.type) {
+              case ActionType.fold:
+                fold++;
+              case ActionType.call:
+                call++;
+              default:
+                raise++;
+                // 加注直接把筹码推光 = 走的是「低 SPR 套进去」那条分支。
+                if (d.amountTo != null &&
+                    d.amountTo! >= p.stack + p.streetBet) {
+                  jam++;
+                }
+            }
+            break;
+          }
+          g.apply('ai', d.type, amount: d.amountTo);
+          continue;
+        }
+        // 别人一律按「英雄能下注就下注、其余跟注」喂到 AI 面前。
+        if (p.id == 'hero' &&
+            !facing &&
+            legal.any((a) => a.type == ActionType.bet)) {
+          final la = legal.firstWhere((a) => a.type == ActionType.bet);
+          g.apply(
+              'hero',
+              ActionType.bet,
+              amount: (g.potTotal() * frac)
+                  .round()
+                  .clamp(la.minAmount, la.maxAmount));
+          continue;
+        }
+        final want = legal.any((a) => a.type == ActionType.call)
+            ? ActionType.call
+            : ActionType.check;
+        g.apply(p.id, want);
+      }
+    }
+    return (
+      fold: n == 0 ? 0 : fold / n,
+      call: n == 0 ? 0 : call / n,
+      raise: n == 0 ? 0 : raise / n,
+      jam: n == 0 ? 0 : jam / n,
+      n: n,
+    );
+  }
+
   /// 单挑：英雄开池（溜入）、AI 补到 100，翻后 AI 先过牌、英雄按
   /// [frac] 池下注，统计 AI 在 [street] 面对下注的应对。
   ///
@@ -2008,6 +2089,49 @@ void main() {
         reason: '没位置的第二对别乱加（加 ${pct(weakOop.raise)}）');
     expect(weakOop.call, greaterThan(weakOop.raise * 4),
         reason: '弱成牌面对下注主体还是跟注（跟 ${pct(weakOop.call)}）');
+  });
+
+  test('多人底池：顶对顶踢收着加，不再单挑多人一个频率', () {
+    // 池里的人越多，顶对顶踢被两对/三条压住的概率越大，各家的继续范围
+    // 也更强——还按单挑的频率加注，就是拿一手「能摊牌、但扛不住反击」
+    // 的牌去打大底池。以前这个分支完全不看人数：探针实测 2/3/4 人池
+    // 全是 55%（A8 在 8♣5♠4♠ 上的顶对顶踢）。
+    String pct(double v) => '${(100 * v).round()}%';
+
+    final heads = aiVsBetMultiway('Ah 8d', '8h 5s 4s', seeds: 200);
+    final three = aiVsBetMultiway('Ah 8d', '8h 5s 4s', callers: 1, seeds: 200);
+    final five = aiVsBetMultiway('Ah 8d', '8h 5s 4s', callers: 3, seeds: 200);
+
+    expect(heads.n, greaterThan(100), reason: '单挑样本要够');
+    expect(five.n, greaterThan(100), reason: '多人池样本要够');
+    expect(heads.raise, greaterThan(0.4),
+        reason: '单挑里顶对顶踢该有一部分反击（加 ${pct(heads.raise)}）');
+    expect(three.raise, lessThan(heads.raise - 0.1),
+        reason: '三人池要明显收着加（${pct(three.raise)} vs 单挑 ${pct(heads.raise)}）');
+    expect(five.raise, lessThan(three.raise + 0.1),
+        reason: '池里五个人只会更少加（${pct(five.raise)}）');
+    expect(five.call, greaterThan(0.6),
+        reason: '多人池主体是跟注看牌，不是加注（跟 ${pct(five.call)}）');
+  });
+
+  test('低 SPR：单挑可以推全下，池里人多就只跟注', () {
+    // 跟注/全下的分界看 SPR（筹码 ÷ 底池），以前这条线对所有人数都是
+    // 1.5：五人池里人人跟一注底池就涨到 SPR≈1.3，A8 这种顶对顶踢于是
+    // 整叠推出去——被跟上的范围里两对/三条已经占多数，等于只被更好的
+    // 牌跟。现在门槛按人数收紧（1 人 1.5 / 2 人 1.15 / 3 人以上 0.85），
+    // 人多的池里先跟注控池，筹码反正跑不掉。
+    String pct(double v) => '${(100 * v).round()}%';
+
+    final heads = aiVsBetMultiway('Ah 8d', '8h 5s 4s', seeds: 200);
+    final five = aiVsBetMultiway('Ah 8d', '8h 5s 4s', callers: 3, seeds: 200);
+
+    expect(five.n, greaterThan(100), reason: '多人池样本要够');
+    // 深筹码时两边都不该无脑全下；真正要盯的是五人池里那一堆
+    // 「底池已经涨起来」的牌局——以前那里 85% 是把筹码推光的。
+    expect(five.jam, lessThan(0.15),
+        reason: '五人池的顶对顶踢别把整叠推出去（全下 ${pct(five.jam)}）');
+    expect(heads.jam, lessThan(0.15),
+        reason: '深筹码单挑也不该随便全下（全下 ${pct(heads.jam)}）');
   });
 
   /// 单挑：翻牌/转牌都过牌，河牌没人下注时量 AI 的选择——
@@ -2628,6 +2752,46 @@ void main() {
     expect(t.heroHandNet, t.lastHand!.netResult[TableController.heroId],
         reason: '标题里的数字必须等于结算数值');
     expect(t.handsPlayed, 1);
+  });
+
+  test('本局累计：本手跟着筹码走，本局跟着存档走', () async {
+    final dir = Directory.systemTemp.createTempSync('pt_session_net');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final file = File('${dir.path}/session.json');
+    const config =
+        GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
+    final t = TableController(
+      sessionStore: TableSessionStore(file),
+      random: Random(11),
+      aiThinkTime: Duration.zero,
+    );
+    t.startRealTable(name: '实战 单挑', config: config, playerCount: 2);
+
+    // 单挑英雄坐按钮 = 小盲：本手 -50，本局也刚开始，等于本手。
+    expect(t.heroHandNet, -50);
+    expect(t.heroSessionNet, -50);
+    t.heroAct(ActionType.fold);
+    expect(t.heroSessionNet, -50, reason: '本手结算后不能再重复加一次实时值');
+    await t.persistSession();
+    expect(t.savedSession!.heroNet, -50, reason: '本局累计要落盘');
+
+    // 冷启动恢复：本局累计跟着存档回来（不会从 0 重新数）。
+    final cold = TableController(
+      sessionStore: TableSessionStore(file),
+      random: Random(12),
+      aiThinkTime: Duration.zero,
+    );
+    await cold.loadSession();
+    expect(cold.resumeSession(), isTrue);
+    expect(cold.heroSessionNet, lessThanOrEqualTo(-100),
+        reason: '恢复后本局要带上之前那 -50，再算上这一手刚投的盲注 '
+            '(实际 ${cold.heroSessionNet})');
+
+    // 补码是把钱补进桌上，不是赢来的钱：补满之后本局还是负的。
+    cold.hero.stack = 0;
+    cold.heroRebuy();
+    expect(cold.heroSessionNet, lessThan(0),
+        reason: '补码不能被算成赢钱（实际 ${cold.heroSessionNet}）');
   });
 
   test('补码：补满至起始买入', () {

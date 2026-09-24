@@ -43,15 +43,29 @@ void main() {
     expect(find.textContaining('50/100'), findsNothing,
         reason: '导航栏里不再显示盲注级别');
 
-    // 单挑里英雄坐按钮 = 小盲：一开局就投了 50，标题先显示 -50。
+    // 单挑里英雄坐按钮 = 小盲：一开局就投了 50，先显示 -50。
     expect(table.heroHandNet, -50);
     expect(find.text('本手 -50'), findsOneWidget);
+    // 本局累计也一起显示（还没打完任何一手，本局 = 本手）。
+    expect(find.text('本局 -50'), findsOneWidget);
+
+    // 这一条不能压到标题那一行：药丸声明的高度不够时，它会往上顶进
+    // AppBar 的标题区（中文字体比测试字体更高，真机上更明显）。
+    final strip = find.byWidgetPredicate(
+        (w) => w.runtimeType.toString() == '_NetStrip');
+    final titleRect = tester.getRect(find.textContaining('实战 单挑 · 第 1 手'));
+    final stripRect = tester.getRect(strip);
+    expect(stripRect.top, greaterThanOrEqualTo(titleRect.bottom),
+        reason: '输赢条要落在标题下面，不能盖住桌名/手数');
+    expect(stripRect.height, lessThanOrEqualTo(30),
+        reason: '高度别超过 AppBar.bottom 声明的那 30px');
 
     // 弃牌走完这一手：数字换成最终结果，和结算条里的「本手输赢」一致。
     table.heroAct(ActionType.fold);
     await tester.pump();
     expect(table.engine.handOver, isTrue);
     expect(find.text('本手 -50'), findsOneWidget);
+    expect(find.text('本局 -50'), findsOneWidget);
     // 结算期间手数停在刚打完的那一手（下一手发牌才 +1），
     // 和结算条里的「本手亏损」对得上。
     expect(find.textContaining('第 1 手'), findsOneWidget,

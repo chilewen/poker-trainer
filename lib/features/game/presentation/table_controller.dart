@@ -75,6 +75,7 @@ class TableController extends ChangeNotifier {
     tableLabel = label;
     tableName = label;
     handsPlayed = 0;
+    _heroNetTotal = 0;
     _sessionId = 'table-${DateTime.now().microsecondsSinceEpoch}';
     engine = GameEngine(config: _config, random: _random);
     _setupPlayers(styles);
@@ -126,6 +127,12 @@ class TableController extends ChangeNotifier {
   /// 当前这张桌已经打完多少手（存档恢复时一起带回来）。
   int handsPlayed = 0;
 
+  /// 英雄在本局的累计输赢（只累已打完的手牌，跟着存档走）。
+  ///
+  /// 补码是「往桌上补钱」，不该算成赢钱，所以这里累的是每手的净赢输，
+  /// 而不是「当前筹码 - 起始筹码」。
+  int _heroNetTotal = 0;
+
   /// 磁盘上有上一局的存档。
   bool get hasSavedSession => savedSession != null;
 
@@ -163,6 +170,7 @@ class TableController extends ChangeNotifier {
       ],
       buttonIndex: engine.buttonIndex,
       handsPlayed: handsPlayed,
+      heroNet: _heroNetTotal,
       savedAt: DateTime.now(),
       handSnapshot: _inProgressSnapshot(),
     );
@@ -204,8 +212,10 @@ class TableController extends ChangeNotifier {
     _generation++;
     replayingHand = null;
     tableLabel = s.label;
+    tableName = s.label;
     _config = s.config;
     handsPlayed = s.handsPlayed;
+    _heroNetTotal = s.heroNet;
     final rebuilt = restoreTable(s, heroId: heroId, random: _random);
     engine = rebuilt.engine;
     _ais
@@ -243,6 +253,12 @@ class TableController extends ChangeNotifier {
   }
 
   PlayerState get hero => engine.players.firstWhere((p) => p.id == heroId);
+
+  /// 英雄本局的累计输赢：已经打完的手牌之和 + 正在进行这一手的实时输赢。
+  ///
+  /// 本手结算完就不再加实时值（那一手的钱已经算进 [_heroNetTotal] 了）。
+  int get heroSessionNet =>
+      _heroNetTotal + (engine.handOver ? 0 : heroHandNet ?? 0);
 
   /// 英雄本手的净赢输（正 = 赢、负 = 输）。没有牌局时返回 null。
   ///
@@ -370,6 +386,7 @@ class TableController extends ChangeNotifier {
     if (h == null) return;
     if (history.any((x) => x.id == h.id)) return;
     handsPlayed++;
+    _heroNetTotal += h.netResult[heroId] ?? 0;
     history.insert(0, h);
     unawaited(store?.save(h));
     unawaited(persistSession());

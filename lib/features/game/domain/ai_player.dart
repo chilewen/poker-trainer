@@ -1206,7 +1206,14 @@ class AiPlayer {
       return _raise(game, me, 0.85);
     }
     // 2) 强牌 + 低 SPR：筹码已经套进去了，没有弃牌的道理。
-    if (read.tier == HandTier.strong && spot.spr <= 1.5) {
+    //    但「套进去」的门槛要看池里几个人：单挑 SPR 1.5 拿顶对顶踢推全下
+    //    没问题（对手范围里还有更差的顶对和听牌），池里四五个人就不同了
+    //    ——人人跟注之后底池涨得快，SPR 掉到 1.5 很容易，可跟上全下的
+    //    范围里两对/三条已经占了多数，推出去等于只被更好的牌跟。人越多，
+    //    越得先跟注控池（筹码反正也跑不掉，后面再推进去）。
+    final jamSpr =
+        spot.opponents >= 3 ? 0.85 : (spot.opponents == 2 ? 1.15 : 1.5);
+    if (read.tier == HandTier.strong && spot.spr <= jamSpr) {
       if (canRaise) return _jam(me);
       return const AiDecision(ActionType.call);
     }
@@ -1230,6 +1237,15 @@ class AiPlayer {
         Street.turn => 0.35,
         _ => 0.18,
       };
+      // 多人底池要收着加：池里的人越多，顶对顶踢被两对/三条压住的机会越大，
+      // 而且每一家的继续范围都比我单挑时面对的更强。以前这里完全不分人数，
+      // 顶对顶踢在三人池、五人池里和单挑一样加 55%（探针实测：1/2/3 家
+      // 都是 55%），牌桌上就成了「拿顶对一直加」。
+      final manyWay = spot.opponents >= 3
+          ? 0.3
+          : spot.opponents == 2
+              ? 0.55
+              : 1.0;
       // 过牌-加注的倍率别拉满：强牌一路只会加注，跟注范围就全剩中等牌，
       // 对手随便开一枪都能把我们打走（反正我们加注他弃、我们跟注他继续开）。
       // 留一部分强牌只是跟注，对手的诈唬才有人抓、我们的过牌也才有人怕。
@@ -1246,6 +1262,7 @@ class AiPlayer {
       if (canRaise &&
           spot.raisesThisStreet <= 2 &&
           _roll(base *
+              manyWay *
               _aggression *
               _p.aggressionScale *
               (read.texture.wetness > 0.6 ? 0.8 : 1.0) *

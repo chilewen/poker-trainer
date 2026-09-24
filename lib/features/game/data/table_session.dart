@@ -27,19 +27,29 @@ class TableSession {
   const TableSession({
     required this.id,
     required this.label,
+    required this.name,
     required this.config,
     required this.styles,
     required this.seats,
     required this.buttonIndex,
     required this.handsPlayed,
     required this.savedAt,
+    this.heroNet = 0,
     this.handSnapshot,
   });
 
   /// 本局唯一标识：内存里的牌桌与它一致，说明「就是这一桌」，不必重建。
   final String id;
 
+  /// 存档/大厅列表用的完整桌名，带盲注级别（如「实战 9人桌 · 50/100」）。
   final String label;
+
+  /// 对局页标题用的桌名，**不带**盲注级别（如「实战 9人桌」）。
+  ///
+  /// 单独存一份是因为「继续上局」恢复牌桌时不能拿 [label] 当桌名——那样
+  /// 标题里又会冒出 50/100。
+  final String name;
+
   final GameConfig config;
 
   /// 对手风格（取 `AiStyle.name`），顺序与 [seats] 里的非英雄座位一致。
@@ -55,6 +65,9 @@ class TableSession {
   final int handsPlayed;
 
   final DateTime savedAt;
+
+  /// 英雄在本局的累计输赢（已完成手牌之和，不含存档时正在进行的那一手）。
+  final int heroNet;
 
   /// 存档时正在进行的那手牌（[GameEngine.toSnapshotJson] 的结果）。
   ///
@@ -82,6 +95,7 @@ class TableSession {
   Map<String, Object?> toJson() => {
         'id': id,
         'label': label,
+        'name': name,
         'startingStack': config.startingStack,
         'smallBlind': config.smallBlind,
         'bigBlind': config.bigBlind,
@@ -89,17 +103,24 @@ class TableSession {
         'seats': [for (final s in seats) s.toJson()],
         'buttonIndex': buttonIndex,
         'handsPlayed': handsPlayed,
+        'heroNet': heroNet,
         'savedAt': savedAt.millisecondsSinceEpoch,
         if (handSnapshot != null) 'hand': handSnapshot,
       };
 
-  factory TableSession.fromJson(Map<String, Object?> json) => TableSession(
+  factory TableSession.fromJson(Map<String, Object?> json) {
+    final label = json['label']! as String;
+    final sb = (json['smallBlind']! as num).toInt();
+    final bb = (json['bigBlind']! as num).toInt();
+    return TableSession(
         id: json['id']! as String,
-        label: json['label']! as String,
+        label: label,
+        // 老存档没有 'name'：从 label 里把盲注后缀剪掉当桌名。
+        name: (json['name'] as String?) ?? _nameWithoutBlinds(label, sb, bb),
         config: GameConfig(
           startingStack: (json['startingStack']! as num).toInt(),
-          smallBlind: (json['smallBlind']! as num).toInt(),
-          bigBlind: (json['bigBlind']! as num).toInt(),
+          smallBlind: sb,
+          bigBlind: bb,
         ),
         styles: [
           for (final s in (json['styles']! as List)) s! as String,
@@ -110,9 +131,20 @@ class TableSession {
         ],
         buttonIndex: (json['buttonIndex']! as num).toInt(),
         handsPlayed: (json['handsPlayed']! as num).toInt(),
+        // 老存档没有 'heroNet'：按 0 处理（本局累计从这一手重新数）。
+        heroNet: (json['heroNet'] as num?)?.toInt() ?? 0,
         savedAt:
             DateTime.fromMillisecondsSinceEpoch((json['savedAt']! as num).toInt()),
         // 老存档（或两手之间的存档）没有 'hand' 字段，按「两手之间」处理。
         handSnapshot: (json['hand'] as Map?)?.cast<String, Object?>(),
       );
+  }
+
+  /// 从「实战 9人桌 · 50/100」里剪掉盲注后缀；后缀对不上就原样返回。
+  static String _nameWithoutBlinds(String label, int sb, int bb) {
+    final suffix = ' · $sb/$bb';
+    return label.endsWith(suffix)
+        ? label.substring(0, label.length - suffix.length)
+        : label;
+  }
 }

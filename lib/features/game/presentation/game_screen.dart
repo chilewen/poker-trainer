@@ -100,6 +100,14 @@ class _GameScreenState extends ConsumerState<GameScreen> {
         foregroundColor: Colors.white70,
         elevation: 0,
         title: _TableTitle(table: table),
+        // 标题下面一条：本手 / 本局输赢。标题那一行放不下两个数字
+        // （窄屏还要给返回键和两个按钮留位置），单开一条更清楚。
+        // 高度要留够：药丸本身（字号 12 + 上下内边距 + 描边）约 23px，
+        // 加下边距已经超过 24——声明小了这条会往上压住标题那一行。
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(30),
+          child: _NetStrip(table: table),
+        ),
         actions: [
           IconButton(
             tooltip: '行动路线',
@@ -922,10 +930,10 @@ class _ActionBarState extends State<_ActionBar> {
   }
 }
 
-/// 顶部标题：桌名 · 第几手 + 本手输赢。
+/// 顶部标题：桌名 · 第几手。
 ///
-/// 盲注级别不在导航栏里显示（大厅卡片和存档里已经有），这一行留给
-/// 「打到第几手、本手赢了多少」——一抬头就能看见这一手是赚是亏。
+/// 盲注级别不在导航栏里显示（大厅卡片和存档里已经有），数字都在下面
+/// 那条 [_NetStrip] 上。
 class _TableTitle extends StatelessWidget {
   const _TableTitle({required this.table});
 
@@ -933,51 +941,66 @@ class _TableTitle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final net = table.heroHandNet;
     // 手数跟着右边的输赢数字走：数字是「刚打完/正在打的那一手」的，
     // 手数也是那一手的（本手结算完停在同一个数上，下一手发牌才 +1）。
     final handNo = table.engine.handOver
         ? (table.handsPlayed < 1 ? 1 : table.handsPlayed)
         : table.handsPlayed + 1;
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Flexible(
-          child: Text(
-            // 还没发牌时只写桌名，发下来就一直带手数（第 1 手也显示，
-            // 以前要等第一手打完才冒出手数，标题会突然变长）。
-            table.lastHand == null
-                ? table.tableName
-                : '${table.tableName} · 第 $handNo 手',
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 15),
-          ),
-        ),
-        if (net != null) ...[
-          const SizedBox(width: 8),
-          _HandNetPill(net: net),
-        ],
-      ],
+    return Text(
+      // 还没发牌时只写桌名，发下来就一直带手数（第 1 手也显示，
+      // 以前要等第一手打完才冒出手数，标题会突然变长）。
+      table.lastHand == null
+          ? table.tableName
+          : '${table.tableName} · 第 $handNo 手',
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(fontSize: 15),
     );
   }
 }
 
-/// 本手输赢小药丸：赢绿、亏红、不亏不赚灰。
+/// 标题下面那条：本手输赢 + 本局输赢。
 ///
-/// 本手进行中就是实时值（跟注/下注的筹码已经出去了），本手打完就是
-/// 最终结果——和结算条里的「本手赢利/亏损」是同一个数。
-class _HandNetPill extends StatelessWidget {
-  const _HandNetPill({required this.net});
+/// 「本手」是这一手牌的输赢（进行中就是实时值，打完就是最终结果，
+/// 和结算条里的「本手赢利/亏损」是同一个数）；「本局」是坐在这张桌上
+/// 从头到现在的累计。
+class _NetStrip extends StatelessWidget {
+  const _NetStrip({required this.table});
 
-  final int net;
+  final TableController table;
 
   @override
   Widget build(BuildContext context) {
-    final (text, color) = net > 0
-        ? ('本手 +$net', const Color(0xFF7CC98B))
-        : net < 0
-            ? ('本手 $net', const Color(0xFFE56B6B))
-            : ('本手 ±0', const Color(0xFF8A9299));
+    final hand = table.heroHandNet;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 5),
+      child: Row(
+        children: [
+          if (hand != null) ...[
+            _NetChip(label: '本手', value: hand),
+            const SizedBox(width: 6),
+          ],
+          _NetChip(label: '本局', value: table.heroSessionNet),
+        ],
+      ),
+    );
+  }
+}
+
+/// 输赢小药丸：赢绿、亏红、不亏不赚灰。
+class _NetChip extends StatelessWidget {
+  const _NetChip({required this.label, required this.value});
+
+  final String label;
+  final int value;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = value > 0
+        ? const Color(0xFF7CC98B)
+        : value < 0
+            ? const Color(0xFFE56B6B)
+            : const Color(0xFF8A9299);
+    final sign = value > 0 ? '+' : '';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       decoration: BoxDecoration(
@@ -986,7 +1009,7 @@ class _HandNetPill extends StatelessWidget {
         border: Border.all(color: color.withValues(alpha: 0.45)),
       ),
       child: Text(
-        text,
+        '$label $sign${compactChips(value)}',
         style: TextStyle(
           fontSize: 12,
           fontWeight: FontWeight.w600,
@@ -995,6 +1018,13 @@ class _HandNetPill extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 筹码数缩写：上万之后改写成「万」，免得导航栏被长数字撑爆。
+String compactChips(int v) {
+  final n = v.abs();
+  if (n < 10000) return '$v';
+  return '${v < 0 ? '-' : ''}${(n / 10000).toStringAsFixed(1)}万';
 }
 
 /// 结算条：盈亏 + 下一手。
