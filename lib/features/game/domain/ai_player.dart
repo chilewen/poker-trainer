@@ -620,6 +620,10 @@ class AiPlayer {
       return 0.65; // 溜入底池：范围宽得像个谜，但不是随机牌
     }
 
+    // 读线：对手连着几条街开火，他范围里的「空气 / 弱对」就该大幅缩水——
+    // 真人就是这么收窄范围的，而不是只看这一条街的下注大小。
+    final airKeep = 1 - 0.22 * spot.priorAgg;
+
     return (hole, score) {
       final pre = preflopWeight(hole);
       if (pre <= 0.0) return 0.0;
@@ -628,12 +632,14 @@ class AiPlayer {
         >= 5 => 1.0, // 同花以上
         >= 3 => 1.0, // 三条以上
         >= 2 => 0.95, // 两对
-        1 => street == Street.flop
-            ? 0.75
-            : (street == Street.turn ? 0.6 : 0.45),
-        _ => street == Street.flop
-            ? 0.4
-            : (street == Street.turn ? 0.25 : 0.12),
+        1 => (street == Street.flop
+                ? 0.75
+                : (street == Street.turn ? 0.6 : 0.45)) *
+            airKeep,
+        _ => (street == Street.flop
+                ? 0.4
+                : (street == Street.turn ? 0.25 : 0.12)) *
+            airKeep,
       };
       return (pre * keep * tightness).clamp(0.0, 1.0);
     };
@@ -1121,6 +1127,7 @@ class _Spot {
     required this.raisesThisStreet,
     required this.preflopRaises,
     required this.limpers,
+    required this.priorAgg,
     required this.villainStrength,
     required this.villainTightness,
     required this.canRaise,
@@ -1160,6 +1167,10 @@ class _Spot {
   final int raisesThisStreet;
   final int preflopRaises;
   final int limpers;
+
+  /// 对手在前面几条街已经在开火的累计强度（0~2）：
+  /// 一条街一条街地砸过来，手里的东西和「只开一枪」完全不是一回事。
+  final double priorAgg;
 
   /// 对手这条线的强度（0~1）与由此推出的范围紧凑度。
   final double villainStrength;
@@ -1250,6 +1261,17 @@ class _Spot {
         toCall > 0 ? toCall / max(bb, pot - toCall) : 0.0;
     final spr = me.stack / max(pot, 1);
 
+    // 读线：对手在前面几条街是不是一直在开火（每条街的价值递减，
+    // 因为开火的人也可能是在连打三枪诈唬，但总体上范围强得多）。
+    var priorAgg = 0.0;
+    for (final a in actions) {
+      if (a.street == Street.preflop || a.street == game.street) continue;
+      if (a.actorId == me.id) continue;
+      if (a.type != ActionType.bet && a.type != ActionType.raise) continue;
+      priorAgg += a.street == Street.flop ? 1.0 : 1.3;
+    }
+    priorAgg = priorAgg.clamp(0.0, 2.0);
+
     var vs = switch (preflopRaises) {
       0 => 0.25,
       1 => 0.5,
@@ -1257,6 +1279,7 @@ class _Spot {
     };
     if (isPreflopAggressor && preflopRaises >= 1) vs -= 0.1;
     vs += 0.12 * villainAgg;
+    vs += 0.07 * priorAgg; // 连着开火 = 这条线上真东西更多
     if (betSizeRel >= 0.9) vs += 0.1;
     final villainStrength = vs.clamp(0.1, 1.0);
 
@@ -1278,6 +1301,7 @@ class _Spot {
       raisesThisStreet: raisesThisStreet,
       preflopRaises: preflopRaises,
       limpers: limpers,
+      priorAgg: priorAgg,
       villainStrength: villainStrength,
       villainTightness: (0.55 + 0.45 * villainStrength).clamp(0.5, 1.0),
       canRaise: me.stack > toCall,

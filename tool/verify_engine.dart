@@ -665,6 +665,17 @@ void main() {
       '进攻性读数 ${vsManiac.aggroRate.toStringAsFixed(2)} / '
       '${vsNit.aggroRate.toStringAsFixed(2)})');
 
+  // --- 读线：对手连开三枪 vs 一路过牌后再开枪，抓诈唬的态度不一样 ---
+  // 面对一个 3 倍池的超池：谁在诈唬？
+  final vsBarrel = riverCallVsLine(barrel: true);
+  final vsCheckThenBet = riverCallVsLine(barrel: false);
+  check(vsBarrel.total > 40 && vsCheckThenBet.total > 40,
+      '读线：样本够多 (${vsBarrel.total} / ${vsCheckThenBet.total})');
+  check(vsCheckThenBet.callRate > vsBarrel.callRate + 0.15,
+      '读线：对手一路过牌后突然超池，比连开三枪更值得抓 '
+      '(${(100 * vsBarrel.callRate).toStringAsFixed(0)}% vs '
+      '${(100 * vsCheckThenBet.callRate).toStringAsFixed(0)}%)');
+
   // --- 下注尺度：干面小注、湿面大注、人多抬价 ---
   final dryCbet = flopBetFrac(board: 'Qh 7d 2c'); // 顶对顶踢，干面
   final wetCbet = flopBetFrac(board: 'Qh 9h 8c'); // 同一手牌，湿面
@@ -809,6 +820,74 @@ void main() {
     bluffRate: total == 0 ? 0.0 : fire / total,
     valueSize: sizeN == 0 ? 0.0 : sizeSum / sizeN,
   );
+}
+
+/// 河牌拿第二对（抓诈唬牌）面对同一个 [betFrac] 倍池的河牌下注时敢不敢跟：
+/// [barrel] 为真时对手翻牌/转牌都开半池（连开三枪），
+/// 为假时对手翻牌/转牌一路过牌、只在河牌超池。同一手牌、同一个尺度，
+/// 只差「前面几条街有没有一直在开火」这一条线。
+({double callRate, int total}) riverCallVsLine({
+  required bool barrel,
+  double betFrac = 2.0,
+  int rounds = 200,
+}) {
+  var calls = 0;
+  var total = 0;
+  for (var seed = 0; seed < rounds; seed++) {
+    final rnd = Random(seed);
+    final g = GameEngine(
+      config: const GameConfig(
+          startingStack: 10000, smallBlind: 50, bigBlind: 100),
+      random: rnd,
+    )
+      ..addPlayer('ai', 'AI')
+      ..addPlayer('hero', 'Hero');
+    final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+    g.startHand(
+      holeOverride: {'ai': cs('Ks Jd'), 'hero': cs('3c 2h')},
+      boardOverride: cs('Qc Jh 2s 5d 9c'),
+    );
+    final acted = <Street, int>{};
+    var guard = 0;
+    var recorded = false;
+    while (!g.handOver && guard++ < 300) {
+      final p = g.pendingAction();
+      final legal = p.actions;
+      final facing = legal.any((a) => a.type == ActionType.call);
+      if (p.player.id == 'ai') {
+        final d = ai.decide(g, p.player);
+        if (!recorded && g.street == Street.river && facing) {
+          recorded = true;
+          total++;
+          if (d.type == ActionType.call) calls++;
+        }
+        g.apply('ai', d.type, amount: d.amountTo);
+        continue;
+      }
+      final n = acted[g.street] ?? 0;
+      acted[g.street] = n + 1;
+      final shouldBet = g.street == Street.river ||
+          (barrel &&
+              (g.street == Street.flop || g.street == Street.turn));
+      var type = facing ? ActionType.call : ActionType.check;
+      if (n == 0 && shouldBet && legal.any((a) => a.type == ActionType.bet)) {
+        type = ActionType.bet;
+      }
+      if (type == ActionType.bet) {
+        final pot = g.potTotal();
+        final la =
+            legal.firstWhere((a) => a.type == type, orElse: () => legal.first);
+        g.apply(p.player.id, type,
+            amount: (p.player.streetBet +
+                    (pot * (g.street == Street.river ? betFrac : 0.5)).round())
+                .clamp(la.minAmount, la.maxAmount));
+        continue;
+      }
+      g.apply(p.player.id,
+          legal.any((a) => a.type == type) ? type : legal.first.type);
+    }
+  }
+  return (callRate: total == 0 ? 0.0 : calls / total, total: total);
 }
 
 /// 翻牌圈 c-bet 的尺度：AI 拿顶对顶踢（[hole]）面对一张没人下注的牌面，

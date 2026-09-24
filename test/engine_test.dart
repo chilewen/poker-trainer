@@ -318,6 +318,79 @@ void main() {
             '${(100 * vsNit.callRate).toStringAsFixed(0)}%)');
   });
 
+  test('读线：对手前面几条街一路开火后河牌超池，就别轻易跟', () {
+    // 同一手牌（AI 第二对）、同一个河牌超池尺度，只差对手前面几条街
+    // 有没有一直在下注：一路开火说明价值更实，一路过牌再突然超池更像诈唬。
+    ({double callRate, int total}) riverCallVsLine({required bool barrel}) {
+      var calls = 0;
+      var total = 0;
+      for (var seed = 0; seed < 200; seed++) {
+        final rnd = Random(seed);
+        final g = GameEngine(
+          config: const GameConfig(
+              startingStack: 10000, smallBlind: 50, bigBlind: 100),
+          random: rnd,
+        )
+          ..addPlayer('ai', 'AI')
+          ..addPlayer('hero', '我');
+        final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+        g.startHand(
+          holeOverride: {'ai': _cs('Ks Jd'), 'hero': _cs('3c 2h')},
+          boardOverride: _cs('Qc Jh 2s 5d 9c'),
+        );
+        final acted = <Street, int>{};
+        var guard = 0;
+        var recorded = false;
+        while (!g.handOver && guard++ < 300) {
+          final p = g.pendingAction();
+          final legal = p.actions;
+          final facing = legal.any((a) => a.type == ActionType.call);
+          if (p.player.id == 'ai') {
+            final d = ai.decide(g, p.player);
+            if (!recorded && g.street == Street.river && facing) {
+              recorded = true;
+              total++;
+              if (d.type == ActionType.call) calls++;
+            }
+            g.apply('ai', d.type, amount: d.amountTo);
+            continue;
+          }
+          final n = acted[g.street] ?? 0;
+          acted[g.street] = n + 1;
+          final shouldBet = g.street == Street.river ||
+              (barrel &&
+                  (g.street == Street.flop || g.street == Street.turn));
+          var type = facing ? ActionType.call : ActionType.check;
+          if (n == 0 && shouldBet && legal.any((a) => a.type == ActionType.bet)) {
+            type = ActionType.bet;
+          }
+          if (type == ActionType.bet) {
+            final pot = g.potTotal();
+            final la = legal
+                .firstWhere((a) => a.type == type, orElse: () => legal.first);
+            g.apply(p.player.id, type,
+                amount: (p.player.streetBet +
+                        (pot * (g.street == Street.river ? 2.0 : 0.5)).round())
+                    .clamp(la.minAmount, la.maxAmount));
+            continue;
+          }
+          g.apply(p.player.id,
+              legal.any((a) => a.type == type) ? type : legal.first.type);
+        }
+      }
+      return (callRate: total == 0 ? 0.0 : calls / total, total: total);
+    }
+
+    final vsBarrel = riverCallVsLine(barrel: true);
+    final vsCheckThenBet = riverCallVsLine(barrel: false);
+    expect(vsBarrel.total, greaterThan(40));
+    expect(vsCheckThenBet.total, greaterThan(40));
+    expect(vsCheckThenBet.callRate, greaterThan(vsBarrel.callRate + 0.15),
+        reason: '对手一路过牌后突然超池，比连开三枪更值得抓 '
+            '(${(100 * vsBarrel.callRate).toStringAsFixed(0)}% vs '
+            '${(100 * vsCheckThenBet.callRate).toStringAsFixed(0)}%)');
+  });
+
   test('下注尺度：干面用小注、湿面加大、多人底池抬价', () {
     // 量 AI 在翻牌圈拿顶对顶踢时「下注额 ÷ 下注前底池」。
     ({double frac, int n, List<double> all}) flopBetFrac(
