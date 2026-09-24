@@ -344,6 +344,33 @@ class PreflopRanges {
         Seat.bb => const PreflopRange(),
       };
 
+  /// 开门溜入范围（前面还没有人进池时的溜入）。
+  ///
+  /// 这跟「跟在别人后面溜入」是两回事。前面空着的时候用一个跟注把全桌都
+  /// 请进来，自己既没有位置、翻后又拿不到弃牌率（没人认为我们有牌），是
+  /// 牌桌上最典型的鱼味破绽。真人在这里基本只有两个动作：加注，或者弃。
+  ///
+  /// 实测以前两种溜入共用一个范围：紧凶在前位拿 A5s / 76s / J9s 是 100%
+  /// 溜入，中位 A5s 也是 100%——一手本该开池加注的牌被自己打成了最便宜的
+  /// 看翻牌，对手读几手就能确定「他溜入 = 没有强牌」。
+  ///
+  /// 所以标准范围只留小盲补齐：已经投了 0.5bb，补齐 0.5bb 就能看翻牌，
+  /// 是全场最好的赔率，真人确实会拿很宽的范围补齐。其它位置留空表，
+  /// [limp] 只在后面已经有人进池时才用。
+  static PreflopRange limpOpen(Seat seat) => switch (seat) {
+        Seat.sb => const PreflopRange(
+            pair: 2,
+            suitedAce: 2,
+            suitedBroadway: 10,
+            suitedConnector: 5,
+            suitedGapper: 5,
+            suitedAny: 5,
+            offsuitAce: 10,
+            offsuitBroadway: 12,
+          ),
+        _ => const PreflopRange(),
+      };
+
   /// 跟注站的溜入范围：标准溜入范围只玩「同花牌 + 对子 + A 高张」，
   /// 松被动玩家连非同花连张、非同花大牌都便宜跟，所以单独列一张表。
   static PreflopRange limpLoose(Seat seat) => switch (seat) {
@@ -527,18 +554,29 @@ class PreflopRanges {
     offsuitBroadway: 12,
   );
 
-  /// 没位置跟 3bet 的范围：只留有牌力的那一半（TT+ / AQs+ / AKo / KQs）。
+  /// 没位置跟 3bet 的范围：99+ / ATs+ / KQs~JTs / AQo+。
   ///
-  /// 靠位置的投机牌（小对子、同花连张、ATs 这类）没位置一律不跟——翻后
-  /// 先行动、中一对也不够打，只会把筹码一条街一条街送出去。以前这里根本
-  /// 没有这一档：没位置的人面对 3bet 除了 4bet 就是 100% 弃牌，连带 KK/QQ
-  /// 都被扔了（紧凶还剩 4bet 兜底，跟注站连 4bet 都不打，直接弃）。
-  /// 一条「永远不会用强牌跟注」的线，对手拿任意两张牌 3bet 都是赚的。
+  /// 靠位置的投机牌（小对子、同花连张）没位置一律不跟——翻后先行动、中
+  /// 一对也不够打，只会把筹码一条街一条街送出去。以前这里根本没有这一档：
+  /// 没位置的人面对 3bet 除了 4bet 就是 100% 弃牌，连带 KK/QQ 都被扔了。
+  ///
+  /// 但「不玩投机牌」不等于「把中等对子和大牌全扔了」。以前这一档是
+  /// TT+ / AQs+ / KQs / AKo，比真人在同一个 spot 的防守窄了一整档：开池
+  /// 者面对按钮 3bet 到 7bb 时，99 有 63% 直接弃、AQo 也有 63% 弃——这两手
+  /// 对着任何合理的 3bet 范围都有 44% 以上的胜率，跟 4bb 去抢 11.5bb 的
+  /// 底池（只要 26% 赔率）是明显的正期望。对手发现我们只有 TT+ 才接，
+  /// 就能拿任意两张牌在我们身上 3bet 抢盲。
+  ///
+  /// AQo 用 offsuitAce 这一档单独点名（而不是把 offsuitBroadway 放宽到
+  /// 12），是为了把 KQo 留在有位置才跟——KQo 没位置翻后很难实现胜率，
+  /// 真人拿它在 3bet 底池里也是弃多跟少。这样「没位置比有位置紧」这条
+  /// 真人骨架仍然成立，只是不再紧到把 99/AQo 一起扔掉。
   static const PreflopRange callThreeBetOop = PreflopRange(
-    pair: 10,
-    suitedAce: 12, // AQs+
-    suitedBroadway: 12, // KQs
+    pair: 9, // 99+
+    suitedAce: 11, // ATs+
+    suitedBroadway: 11, // KQs / QJs / AJs / KJs（ATs / JTs 留在混着打的边缘）
     offsuitBroadway: 13, // AKo
+    offsuitAce: 12, // AQo（KQo 留给有位置）
   );
 
   /// 面对「小 3bet」（最小加注到 4~5bb 那种）的跟注范围，有位置版本。

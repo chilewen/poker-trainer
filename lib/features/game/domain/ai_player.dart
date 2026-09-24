@@ -524,10 +524,16 @@ class AiPlayer {
             amountTo: _openSize(game, bb, spot.limpers, seat));
       }
       // 溜入 / 补齐：位置越好、价格越便宜越愿意；跟注站几乎什么都跟。
+      // 但「开门溜入」（前面还没人进池）和「跟在别人后面溜入」是两个
+      // 场合：前者的正确动作是加注或弃牌，标准风格只有小盲补齐值得做
+      // （见 [PreflopRanges.limpOpen]）。本来就爱溜入的松被动照旧走宽范围。
       final cheap = toCall <= bb;
-      final limpBase = _p.wideLimp
-          ? PreflopRanges.limpLoose(seat)
-          : PreflopRanges.limp(seat);
+      final openLimp = spot.limpers == 0 && !_p.limpsAnyPrice;
+      final limpBase = openLimp
+          ? PreflopRanges.limpOpen(seat)
+          : (_p.wideLimp
+              ? PreflopRanges.limpLoose(seat)
+              : PreflopRanges.limp(seat));
       final limpRange = limpBase.shifted(_p.limpShift + w);
       if (limpRange.contains(hand) && (cheap || _p.limpsAnyPrice)) {
         return const AiDecision(ActionType.call);
@@ -597,6 +603,15 @@ class AiPlayer {
       final smallThreeBet = threeBetBb <= 5.5 ||
           (spot.preflopOpenTo > 0 &&
               game.currentBet <= spot.preflopOpenTo * 2.2);
+      // 大 3bet 的另一头：加到 12bb 以上（或者要价超过 10bb）时，中等对子
+      // 和同花大牌是负期望——跟 11bb 去抢一个 19bb 的底池要 37% 赔率，
+      // 99/JTs 对着一个 4.7 倍的 3bet 范围、还没位置，根本实现不了这个
+      // 胜率。收回两档正好落在 JJ+ / AKs / KQs / AKo。
+      // 只有没位置才收这一档：面对盲注位的 3bet，对方的范围又宽又虚，
+      // 大尺度说明不了什么，有位置照样该用整个跟注范围接。
+      final pricey = !spot.inPosition &&
+          !smallThreeBet &&
+          (threeBetBb >= 12 || toCall >= bb * 10);
       // 其它风格：有位置才用整个跟注范围（含投机牌），没位置只跟有牌力的。
       final callRange = station
           ? PreflopRanges.callThreeBetStation
@@ -609,7 +624,7 @@ class AiPlayer {
                   : (stackBb >= 200
                       ? PreflopRanges.callThreeBet
                       : PreflopRanges.callThreeBet.withoutSmallPairs())));
-      final shifted = callRange.shifted(w);
+      final shifted = callRange.shifted(w + (pricey ? 2 : 0));
       // 投机的那一半（小对子 / 同花连张）混着跟：真人对这些边缘牌不是
       // 每次都跟，一部分直接弃，跟注范围才不会宽到对手一开火就收走。
       // 松的性格跟得多一点（_looseness 0.9~1.15）。
@@ -778,7 +793,25 @@ class AiPlayer {
     final lineAgg = spot.priorAgg +
         (spot.facingBet ? 0.8 : 0.0) +
         (facingRaise ? 0.7 : 0.0);
-    final airKeep = (1 - 0.22 * lineAgg).clamp(0.25, 1.0);
+    // 下注尺度是单独一维信息，不能只靠「开过几枪」来收范围：真人看到大注
+    // 会把对手的弱牌权重整个往下压（一个满池里诈唬的比例远低于 1/4 池），
+    // 看到小注则留着那一整片弱范围去抓。以前范围模型完全不吃尺度——同一
+    // 个牌面上的 1/4 池和满池被当成同一条线，算出来的胜率一模一样，于是
+    // 「注越大跟得越少」只能靠跟注门槛去补；补不动的时候就成了探针里那种
+    // 「第二对面对 2/3 池和面对满池的跟注率都是六成」。
+    // 只在面对下注时算（面对加注已经有 [facingRaise] 那一维）。
+    // [polarizedBet] 那条线要打折：前面几条街都没人开火、这条街突然砸出来
+    // 的大注本来就是「坚果或空气」的两极线，范围里一半是诈唬，按尺度硬收
+    // 就等于把自己最该抓的那条线一起收掉了。但也不能完全不收——真人的超池
+    // 再两极，2 倍池里的诈唬比例还是低于刚够到这条线的 1 倍池，所以折扣
+    // 随尺度递减（这也让「同一条线里注越大跟得越少」继续成立）。
+    final sizeDiscount = spot.polarizedBet
+        ? (0.5 - 0.30 * (spot.betSizeRel - 0.8)).clamp(0.10, 0.5)
+        : 0.5;
+    final sizeAgg = spot.facingBet
+        ? (spot.betSizeRel - 0.35).clamp(0.0, 0.85) * sizeDiscount
+        : 0.0;
+    final airKeep = (1 - 0.22 * lineAgg - sizeAgg).clamp(0.18, 1.0);
     /// 比顶对弱的一对牌（第二对、底对、被盖过的口袋对）在加注线里
     /// 还剩多少权重；顶对以下的对子基本只剩「他也在诈唬」那一小撮。
     final weakPairKeep =
@@ -1144,7 +1177,16 @@ class AiPlayer {
     base *= _positionFactor(spot, 1.2, 0.85);
     // 诈唬选牌：真人不会拿「什么也没挡到」的牌乱开火。握着坚果花/顺子的
     // 阻断牌（[HandReading.blockerScore]）时对手接不动，才值得加大频率。
-    base *= 0.85 + 0.5 * read.blockerScore;
+    // 越往后这条越重要：被跟过两条街之后再开火，唯一说得通的理由就是
+    // 「我挡掉了他能跟注的那部分牌」，所以阻断牌的权重跟 [villainCalls] 一起涨。
+    base *= 0.85 + (0.5 + 0.35 * spot.villainCalls) * read.blockerScore;
+    // 第二枪/第三枪的「抵抗」折扣：他跟了我几条街，我这条线就该缩多少。
+    // 没被跟过（前面都过牌 / 我是刚接手的）不打折；被跟一条街略收；被跟
+    // 两条街时纯空气只剩四成——真人这时候早就放弃了，只有最好的那几手
+    // 破听牌（[HandReading.blockerScore] 高）还能靠上面那项把频率补回来。
+    if (spot.villainCalls > 0) {
+      base *= 1 - 0.20 * spot.villainCalls;
+    }
     // 开火选牌的另一半是「后路」：一直开火的牌自己也得有成长空间。
     // 以前不看这一项，结果「两张高张配后门花」和「7 高什么都没配到」的
     // 频率一样——跟注方拿一对跟到底就能赢，我们开火范围里全是白送的牌。
@@ -1207,16 +1249,17 @@ class AiPlayer {
     // 算出来的胜率偏悲观——实测底对面对 1/4 池只算到 16.6%（赔率 20%），
     // 于是 100% 弃牌。下面几档跟注门槛统一按这个小注档打个折。
     final smallStab = game.street == Street.river && spot.betSizeRel <= 0.4;
-    // 「后面还有街」的系数：翻牌跟完之后还要打转牌和河牌，转牌跟完还剩
-    // 一条街要面对第三次开火——同样 2/3 池的注，翻牌该跟的牌到了转牌
-    // 就该收窄一档（真人这两条街的防守范围差别很明显）。以前跟注门槛
-    // 在翻牌/转牌/河牌完全一样，探针实测第二对面对 2/3 池：翻牌跟 96%、
-    // 转牌还是跟 95%，一整条街的差别都看不出来。河牌没有下一手，不调。
-    final streetCost = switch (game.street) {
-      Street.flop => 1.08,
-      Street.turn => 1.2,
-      _ => 1.0,
-    };
+    // 「后面还有街」的系数：只有转牌要额外收窄。翻牌跟注之后还有两张牌
+    // 可看、对手也还可能先收手；转牌跟完就只剩一条街，而对手多半还会再
+    // 开一枪——同样一个 2/3 池的注，翻牌该跟的牌到了转牌常常就该放了。
+    // 真人这两条街的防守范围差别很明显，而以前 AI 的跟注门槛在翻牌/转牌/
+    // 河牌完全一样：探针实测第二对面对 2/3 池，翻牌跟 96%、转牌还是跟
+    // 95%，一整条街的差别都看不出来。河牌没有下一手，不调。
+    //
+    // 只在「面对下注」时用：面对加注时已经有专门的加注惩罚（对手那一下
+    // 本身就说明范围强得多），再叠一层会把「最小加注也不该交牌」那条线
+    // 又打回去。
+    final streetCost = (!facingRaise && game.street == Street.turn) ? 1.2 : 1.0;
 
     // 1) 怪兽牌：价值加注；加注战里已经打太多就转为跟注。
     //    底池相对筹码已经很大时，加注就是全下。
@@ -1225,10 +1268,8 @@ class AiPlayer {
       if (!canRaise || spot.raisesThisStreet >= 3) {
         return const AiDecision(ActionType.call);
       }
-      // 慢打：只是面对一次下注（不是加注战）时，先跟一手把对手留在底池里。
-      // 被动风格最常这么干——「中了也不加」正是跟注站的招牌；加注战里
-      // 就不慢打了，那边每一手都在往底池里塞钱。
-      if (!facingRaise && _roll(_p.slowPlay)) {
+      if (_roll(
+          _monsterTrap(game, spot, read, facingRaise: facingRaise))) {
         return const AiDecision(ActionType.call);
       }
       return _raise(game, me, 0.85);
@@ -1380,7 +1421,17 @@ class AiPlayer {
       // 收紧。以前不分这两种线，一律把赔率乘 1.5 倍以上，结果第二对对着
       // 0.75 池的「过牌-过牌-重注」会 97% 弃牌，对手随便抡一枪我们就交牌。
       final stab = spot.polarizedBet || (spot.checkedThrough && bigBet);
-      var need = potOdds * (spot.villainStrength > 0.7 ? 1.7 : 1.35);
+      // 河牌只剩一次决策：门槛只比赔率高一点点就够了。前面几条街要留安全
+      // 余量，是因为后面还有钱要投、胜率也得能兑现；河牌没有「下一枪」，
+      // 按赔率跟就是对的。以前河牌和翻牌共用同一个 1.35 的余量——探针实测
+      // 第二对对着河牌 2/3 池有 31.3% 胜率、赔率只要 28.6%（够本），却被
+      // 38.4% 的门槛卡掉，弃 92%；面对 1 池弃 93%、底对更是 100%。这等于
+      // 告诉对手「你随便两张牌下 2/3 池我都走」，谁来诈唬都能白拿底池，
+      // 我们的河牌跟注范围也只剩顶对以上、一眼就能读出来。
+      final margin = game.street == Street.river
+          ? (spot.villainStrength > 0.7 ? 1.25 : 1.15)
+          : (spot.villainStrength > 0.7 ? 1.7 : 1.35);
+      var need = potOdds * margin;
       // 一对牌是抓诈唬的主力，跟注站抓得更宽（但面对加注照样收手）。
       if (!facingRaise) need *= 1 - _p.callSlack;
       if (bigBet) need *= stab ? 0.85 : 1.35;
@@ -1395,6 +1446,25 @@ class AiPlayer {
       if (!spot.inPosition) need *= 1.2;
       if (smallStab) need *= 0.7; // 小注面前按赔率抓（见 smallStab 说明）
       need *= streetCost * callFactor; // 街道成本 + 抓诈唬牌（越疯越要跟）
+      // 河牌封顶：手里是个真对子，就不能 100% 弃牌。探针实测以前第二对
+      // 面对河牌 2/3 池弃 92%、面对 1 池弃 93%（底对更是 100%），等于告诉
+      // 对手「你随便两张牌下 2/3 池我都走」——会诈唬的人白拿底池，我们的
+      // 跟注范围也只剩顶对以上，一眼就能读出来。真人这里靠的是 MDF：
+      // 注再大也要留一部分「次好的对子」按赔率抓（只有超池例外，超池线
+      // 是两极的，不硬接）。封顶后底对/空气照样弃（它们离这个门槛还远），
+      // 只有第二对这类刚好够边界的牌会被抓回来。
+      //
+      // 封顶的量还得跟着尺度往上走，不能是个定值：定值会把「注越大抓得
+      // 越少」这条规律整个压平——探针实测第二对面对 2/3 池跟 52%、面对
+      // 一个满池还是跟 53%，尺度这个变量在河牌跟注上被抹得一干二净，
+      // 对手打多大我们都一样跟，他拿任意两张牌打个满池就能白拿底池。
+      // 改成「小注封得低、大注封得高」之后，2/3 池保持原来的五成上下，
+      // 满池掉到两成多，跟注率重新随尺度递减。
+      if (game.street == Street.river &&
+          !facingRaise &&
+          spot.betSizeRel < 1.15) {
+        need = min(need, 0.34 + 0.12 * spot.betSizeRel);
+      }
 
       // 底对、第二对也能拿来反击：频率比中等牌低，但只要有这个频率，
       // 对手就不能拿「加注 = 大牌」来读我们，我们的跟注范围也才有掩护。
@@ -1538,6 +1608,38 @@ class AiPlayer {
       return const AiDecision(ActionType.call);
     }
     return const AiDecision(ActionType.fold);
+  }
+
+  /// 怪兽牌面对进攻时「只跟不加」（慢打）的频率。
+  ///
+  /// 以前这一档几乎是常量：面对一次下注跟 11% / 加 89%，面对加注再加 100%，
+  /// 而且干面湿面、翻牌河牌全都一样。等于对手只要看我们「加没加」就知道
+  /// 我们有没有大家伙——拿着顶对、听牌的都老远就弃，我们反而收不到价值；
+  /// 加注战也一路往上打，最后只剩能打败我们的牌愿意继续放筹码。
+  ///
+  /// 真人慢打是有条件的，而且理由很具体：
+  ///   · 牌面越干越该慢打：加注保护不到任何东西（没听牌可赶），还把对手
+  ///     范围里的诈唬和中等牌全打走——干面上「他会不会跟」跟「他有什么」
+  ///     几乎无关，留他一手才能让他接着开火；
+  ///   · 湿面上听牌愿意付钱，这一笔要收，慢打明显变少（河牌没有听牌了，
+  ///     这一条自动失效）；
+  ///   · 面对加注比面对下注更少慢打：他既然加注出来，范围本来就更强，
+  ///     再加他接得住的概率高，而「留住诈唬」这一半收益却小得多；
+  ///   · 河牌没有「以后」了，跟注换不到更多价值，慢打也压一档。
+  /// 风格给的 [_Profile.slowPlay] 仍是基准：跟注站本来「中了也不加」。
+  double _monsterTrap(GameEngine game, _Spot spot, HandReading read,
+      {required bool facingRaise}) {
+    // 「湿面少慢打」讲的其实是「收听牌的钱」：这件事只有翻牌/转牌才有。
+    // 河牌发完最后一张牌，已经没有听牌要赶，剩下唯一的理由是留住他的诈唬，
+    // 所以河牌一律按「干面」那一档算（再乘下面那个河牌折扣）。
+    final chargeDraws =
+        game.street != Street.river && read.texture.wetness > 0.6;
+    var trap = (_p.slowPlay + 0.12) *
+        (chargeDraws ? 0.6 : 1.4) *
+        (facingRaise ? 0.75 : 1.0);
+    if (!spot.inPosition) trap *= 0.8; // 没位置：跟完后面两条街先说话
+    if (game.street == Street.river) trap *= 0.7;
+    return trap.clamp(0.0, 0.7);
   }
 
   /// 有摊牌价值的成牌（中等牌 / 弱成牌）面对下注时的加注频率。
@@ -1797,6 +1899,7 @@ class _Spot {
     required this.preflopOpenTo,
     required this.limpers,
     required this.priorAgg,
+    required this.villainCalls,
     required this.polarizedBet,
     required this.villainStrength,
     required this.villainTightness,
@@ -1851,6 +1954,17 @@ class _Spot {
   /// 对手在前面几条街已经在开火的累计强度（0~2）：
   /// 一条街一条街地砸过来，手里的东西和「只开一枪」完全不是一回事。
   final double priorAgg;
+
+  /// 前面几条街「我下注、他跟注」了几次（0~2）。
+  ///
+  /// [priorAgg] 记的是**他**开火，这一项记的是**我**开火之后他的回应。
+  /// 第三枪最关键的输入就是这个：翻牌开一枪被跟、转牌再开一枪被跟，对手
+  /// 的范围已经从「随便看看」筛成了真东西，同样的空气在河牌再开一枪就是
+  /// 白送一个底池。真人这时候只剩「阻断牌够硬」和「最强的那些破听牌」还
+  /// 会开火，以前 AI 完全没有这个变量——不管被跟了几条街，河牌的开火频率
+  /// 都是同一个数（探针：破坚果花听 65%、纯空气 37%，而这两条线的对手
+  /// 范围其实差着一整个数量级）。
+  final int villainCalls;
 
   /// 前面都过牌、这条街突然来的大注（转牌/河牌）：两极化的线，
   /// 大注在这里不代表牌力，跟注门槛不该按「大注 = 真牌」往上抬。
@@ -1963,6 +2077,23 @@ class _Spot {
     }
     priorAgg = priorAgg.clamp(0.0, 2.0);
 
+    // 「我下注、他跟注」发生过的条数（只看翻牌和转牌，翻前的跟注是常规
+    // 动作、说明不了什么）。过牌给他、他下注我跟，都不算——那条线里他才是
+    // 主动的一方，已经由 [priorAgg] 记着了。
+    var villainCalls = 0;
+    for (final st in const [Street.flop, Street.turn]) {
+      if (st == game.street) continue;
+      final onStreet = actions.where((a) => a.street == st);
+      final iFired = onStreet.any((a) =>
+          a.actorId == me.id &&
+          (a.type == ActionType.bet || a.type == ActionType.raise));
+      if (iFired &&
+          onStreet.any(
+              (a) => a.actorId != me.id && a.type == ActionType.call)) {
+        villainCalls++;
+      }
+    }
+
     // 转牌/河牌前面都没人开火，这条街突然砸一个大注：两极化的线
     // （坚果或空气），不能按「大注 = 真牌」去收紧跟注门槛——
     // 真人的超池一多半就是这么来的，拿中等牌抓他反而更划算。
@@ -2003,6 +2134,7 @@ class _Spot {
       preflopOpenTo: preflopOpenTo,
       limpers: limpers,
       priorAgg: priorAgg,
+      villainCalls: villainCalls,
       polarizedBet: polarizedBet,
       villainStrength: villainStrength,
       villainTightness: (0.55 + 0.45 * villainStrength).clamp(0.5, 1.0),

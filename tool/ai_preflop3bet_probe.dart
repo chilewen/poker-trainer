@@ -6,6 +6,8 @@
 // ignore_for_file: avoid_print
 import 'dart:math';
 
+import 'probe_scale.dart';
+
 import 'package:poker_trainer/engine/card.dart';
 import 'package:poker_trainer/engine/game.dart';
 import 'package:poker_trainer/engine/types.dart';
@@ -29,7 +31,7 @@ List<Card> cs(String s) => s.split(' ').map(Card.parse).toList();
   final facing = <String, int>{};
   final openSizes = <int>[];
   var n = 0;
-  for (var seed = 0; seed < seeds; seed++) {
+  for (var seed = 0; seed < probeSeeds(seeds); seed++) {
     final rnd = Random(seed);
     final g = GameEngine(
       config: GameConfig(startingStack: stack, smallBlind: 50, bigBlind: 100),

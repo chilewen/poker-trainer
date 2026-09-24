@@ -6,6 +6,8 @@
 // ignore_for_file: avoid_print
 import 'dart:math';
 
+import 'probe_scale.dart';
+
 import 'package:poker_trainer/engine/card.dart';
 import 'package:poker_trainer/engine/game.dart';
 import 'package:poker_trainer/engine/types.dart';
@@ -26,7 +28,7 @@ List<Card> cs(String s) => s.split(' ').map(Card.parse).toList();
   int seeds = 300,
 }) {
   var raise = 0, call = 0, fold = 0, n = 0;
-  for (var seed = 0; seed < seeds; seed++) {
+  for (var seed = 0; seed < probeSeeds(seeds); seed++) {
     final rnd = Random(seed);
     final g = GameEngine(random: rnd)..addPlayer('ai', 'AI');
     final ai = AiPlayer(style, random: rnd);

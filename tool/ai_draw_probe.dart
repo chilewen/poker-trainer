@@ -8,6 +8,8 @@
 // ignore_for_file: avoid_print
 import 'dart:math';
 
+import 'probe_scale.dart';
+
 import 'package:poker_trainer/engine/card.dart';
 import 'package:poker_trainer/engine/game.dart';
 import 'package:poker_trainer/engine/types.dart';
@@ -44,7 +46,7 @@ Stat probe({
   AiStyle style = AiStyle.tightAggressive,
 }) {
   final stat = Stat();
-  for (var seed = 0; seed < seeds; seed++) {
+  for (var seed = 0; seed < probeSeeds(seeds); seed++) {
     final rnd = Random(seed);
     final g = GameEngine(
       config: const GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100),

@@ -4,6 +4,8 @@
 // ignore_for_file: avoid_print
 import 'dart:math';
 
+import 'probe_scale.dart';
+
 import 'package:poker_trainer/engine/card.dart';
 import 'package:poker_trainer/engine/game.dart';
 import 'package:poker_trainer/engine/types.dart';
@@ -48,12 +50,19 @@ class _Result {
 /// 用来对比同一个局面下有/没位置的差别。
 /// [facingOnly] = true 时只记录「面对下注/加注」的那次决策，不然没位置
 /// 这一侧记录到的都是「先说话时怎么打」，比不出面对下注的应对。
+///
+/// [preflopScript] 是「开场脚本」：在 AI 开始决策之前按顺序替双方把翻前
+/// 动作走完。翻前的线是**读盘的前提**（谁开的池、AI 是不是翻前主动方），
+/// 有位置/没位置两张桌子如果连翻前线都不一样，后面所有的对比都被污染了。
+typedef _Step = ({String who, ActionType type, int? amount});
+
 _Result _sample({
   required String hole,
   required String heroHole,
   required String board,
   required Street target,
   Map<Street, ({ActionType type, double frac})> heroFirst = const {},
+  List<_Step> preflopScript = const [],
   int seeds = 300,
   AiStyle style = AiStyle.tightAggressive,
   int stack = 10000,
@@ -62,7 +71,7 @@ _Result _sample({
   bool facingOnly = false,
 }) {
   final res = _Result();
-  for (var seed = 0; seed < seeds; seed++) {
+  for (var seed = 0; seed < probeSeeds(seeds); seed++) {
     final rnd = Random(seed);
     final g = GameEngine(
       config: GameConfig(startingStack: stack, smallBlind: bb ~/ 2, bigBlind: bb),
@@ -78,8 +87,14 @@ _Result _sample({
       boardOverride: boardCards,
     );
 
+    // 开场脚本：替双方把翻前动作走完，把「翻前线」这个变量固定住。
+    for (final st in preflopScript) {
+      g.apply(st.who, st.type, amount: st.amount);
+    }
+
     // 英雄脚本：每条街第一次行动按配置，之后跟注。
     final acted = <Street, int>{};
+    if (preflopScript.isNotEmpty) acted[Street.preflop] = 99;
     var guard = 0;
     var recorded = false;
     while (!g.handOver && guard++ < 300) {
@@ -146,6 +161,12 @@ void main() {
       if (street != Street.flop) Street.flop: (type: ActionType.bet, frac: 0.5),
       street: (type: ActionType.bet, frac: frac),
     };
+    // 翻前线必须在两边一样，不然比出来的不是「位置」而是「翻前谁开的池」。
+    // 这里统一成「AI 开池 3bb、英雄跟注」：
+    //   有位置：AI 坐按钮、翻前先说话 → 它自己开池，英雄跟。
+    //   没位置：英雄坐按钮、翻前先说话 → 让英雄先补齐，AI 从大盲加注到
+    //           3bb，英雄再跟。两条线的 AI 都是「翻前主动方、一次加注」，
+    //           翻后唯一的差别就只剩谁先说话。
     _Result run({required bool oop}) => _sample(
           hole: hole,
           heroHole: '4c 5d',
@@ -155,6 +176,16 @@ void main() {
           oop: oop,
           facingOnly: true,
           heroFirst: script,
+          preflopScript: oop
+              ? [
+                  (who: 'hero', type: ActionType.call, amount: null),
+                  (who: 'ai', type: ActionType.raise, amount: 3 * 100),
+                  (who: 'hero', type: ActionType.call, amount: null),
+                ]
+              : [
+                  (who: 'ai', type: ActionType.raise, amount: 3 * 100),
+                  (who: 'hero', type: ActionType.call, amount: null),
+                ],
         );
     final ip = run(oop: false);
     final oop = run(oop: true);
@@ -283,6 +314,24 @@ void main() {
   show('河牌底对（面对 1/4 池 bet）',
       _sample(hole: '4h 3h', heroHole: '3c 2h', board: 'Ks 7d 3c 5h 9s', target: Street.river,
           heroFirst: {Street.river: (type: ActionType.bet, frac: 0.25)}));
+  show('河牌第二对（面对 1/3 池 bet）',
+      _sample(hole: '8h 7s', heroHole: '3c 2h', board: 'Kh 8d 3c 5h 9s', target: Street.river,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 0.33)}));
+  show('河牌第二对（面对 1/2 池 bet）',
+      _sample(hole: '8h 7s', heroHole: '3c 2h', board: 'Kh 8d 3c 5h 9s', target: Street.river,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 0.5)}));
+  show('河牌第二对（面对 2/3 池 bet）',
+      _sample(hole: '8h 7s', heroHole: '3c 2h', board: 'Kh 8d 3c 5h 9s', target: Street.river,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 0.66)}));
+  show('河牌第二对（面对 1 池 bet）',
+      _sample(hole: '8h 7s', heroHole: '3c 2h', board: 'Kh 8d 3c 5h 9s', target: Street.river,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 1.0)}));
+  show('河牌底对（面对 2/3 池 bet）',
+      _sample(hole: '4h 3h', heroHole: '3c 2h', board: 'Ks 7d 3c 5h 9s', target: Street.river,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 0.66)}));
+  show('miss 花（面对 2/3 池 bet）',
+      _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c 5h 9s', target: Street.river,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 0.66)}));
   show('河牌底对（面对 1 池 bet）',
       _sample(hole: '4h 3h', heroHole: '3c 2h', board: 'Ks 7d 3c 5h 9s', target: Street.river,
           heroFirst: {Street.river: (type: ActionType.bet, frac: 1.0)}));
@@ -319,6 +368,19 @@ void main() {
       frac: 0.66, street: Street.turn);
   pos('第二对（转牌 2/3 池）', hole: '8h 7s', board: 'Kh 8d 3c 5s',
       frac: 0.66, street: Street.turn);
+
+  print('');
+  print('== 河牌小注抓诈唬：有位置 vs 没位置 == ');
+  pos('A 高（河牌 1/4 池）', hole: 'Ad Kd', board: 'Qd 7d 2c 5h 9s',
+      frac: 0.25, street: Street.river);
+  pos('A 高（河牌 1/3 池）', hole: 'Ad Kd', board: 'Qd 7d 2c 5h 9s',
+      frac: 0.33, street: Street.river);
+  pos('第二对（河牌 1/4 池）', hole: '8h 7s', board: 'Kh 8d 3c 5h 9s',
+      frac: 0.25, street: Street.river);
+  pos('底对（河牌 1/4 池）', hole: 'Ah 4h', board: 'Qc 7d 4s 5h 9d',
+      frac: 0.25, street: Street.river);
+  pos('第二对（河牌 2/3 池）', hole: '8h 7s', board: 'Kh 8d 3c 5h 9s',
+      frac: 0.66, street: Street.river);
 
   print('');
   print('== 松凶风格对照 == ');

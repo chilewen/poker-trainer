@@ -11,6 +11,8 @@
 // ignore_for_file: avoid_print
 import 'dart:math';
 
+import 'probe_scale.dart';
+
 import 'package:poker_trainer/engine/card.dart';
 import 'package:poker_trainer/engine/game.dart';
 import 'package:poker_trainer/engine/types.dart';
@@ -31,7 +33,7 @@ Row vsRaise(
   int seeds = 400,
 }) {
   var fold = 0, call = 0, raise = 0, n = 0;
-  for (var seed = 0; seed < seeds; seed++) {
+  for (var seed = 0; seed < probeSeeds(seeds); seed++) {
     final rnd = Random(seed);
     final g = GameEngine(
       config: const GameConfig(
