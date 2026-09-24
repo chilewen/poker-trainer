@@ -104,11 +104,18 @@ class PreflopRange {
 
   bool contains(PreflopHand h) {
     if (h.isPair) return _ok(h.high, pair);
+    // 大牌（含 A 带高张）：同花/非同花各看自己的大牌门槛；
+    // AQo 这类「A + 大牌」再额外用 A 的门槛兜底，避免被漏掉。
+    if (h.isBroadway) {
+      if (h.suited) {
+        if (_ok(h.low, suitedBroadway)) return true;
+        return h.isAce && _ok(h.low, suitedAce);
+      }
+      if (_ok(h.low, offsuitBroadway)) return true;
+      return h.isAce && _ok(h.low, offsuitAce);
+    }
     if (h.isAce) {
       return h.suited ? _ok(h.low, suitedAce) : _ok(h.low, offsuitAce);
-    }
-    if (h.isBroadway) {
-      return h.suited ? _ok(h.low, suitedBroadway) : _ok(h.low, offsuitBroadway);
     }
     if (h.suited) {
       if (h.gap <= 1) {
@@ -214,25 +221,26 @@ class PreflopRanges {
 
   /// 开池范围，括号里是 9 人桌的大致入池率。
   static PreflopRange open(Seat seat) => switch (seat) {
-        // 55+ / A9s+ / KTs+ / JTs / T9s / 98s / AJo+ / KQo
+        // 44+ / A8s+ / 全部同花大牌 / 87s+ / ATo+ / KQo
         Seat.ep => const PreflopRange(
-            pair: 5,
-            suitedAce: 9,
-            offsuitAce: 11,
-            suitedBroadway: 10,
-            offsuitBroadway: 12,
-            suitedConnector: 9,
-          ), // ~12%
-        // 44+ / A8s+ / KTs+ / T9s / 87s / ATo+ / KJo+ / QJo
-        Seat.mp => const PreflopRange(
             pair: 4,
             suitedAce: 8,
             offsuitAce: 10,
             suitedBroadway: 10,
-            offsuitBroadway: 11,
+            offsuitBroadway: 12,
             suitedConnector: 8,
-          ), // ~17%
-        // 任意对子 / 任意同花 A / ATo+ / 全部大牌 / 54s+ / 75s+ / ATo+
+          ), // ~15%
+        // 33+ / A7s+ / 全部同花大牌 / 76s+ / 75s+ / ATo+ / KJo+ / QJo
+        Seat.mp => const PreflopRange(
+            pair: 3,
+            suitedAce: 7,
+            offsuitAce: 10,
+            suitedBroadway: 10,
+            offsuitBroadway: 11,
+            suitedConnector: 7,
+            suitedGapper: 8,
+          ), // ~21%
+        // 任意对子 / 任意同花 A / ATo+ / 全部大牌 / 54s+ / 75s+ / 98o+
         Seat.co => const PreflopRange(
             pair: 2,
             suitedAce: 2,
@@ -241,23 +249,23 @@ class PreflopRanges {
             offsuitBroadway: 10,
             suitedConnector: 5,
             suitedGapper: 5,
-            suitedAny: 7,
-            offsuitConnector: 9,
+            suitedAny: 6,
+            offsuitConnector: 8,
             offsuitAny: 9,
-          ), // ~24%
-        // 按钮位：任意对子 / 任意同花 A / A4o+ / 43s+ / 64s+ / K4s+ / 65o+
+          ), // ~27%
+        // 按钮位：任意对子 / 任意同花 A / A5o+ / 54s+ / 75s+ / 87o+ / QTo+
         Seat.btn => const PreflopRange(
             pair: 2,
             suitedAce: 2,
-            offsuitAce: 4,
+            offsuitAce: 5,
             suitedBroadway: 10,
             offsuitBroadway: 10,
-            suitedConnector: 4,
-            suitedGapper: 4,
+            suitedConnector: 5,
+            suitedGapper: 5,
             suitedAny: 4,
-            offsuitConnector: 6,
-            offsuitAny: 7,
-          ), // ~42%
+            offsuitConnector: 7,
+            offsuitAny: 8,
+          ), // ~45%
         // 小盲偷盲：比按钮略紧（翻后没位置），基本是「加注或弃牌」
         Seat.sb => const PreflopRange(
             pair: 2,
@@ -267,10 +275,10 @@ class PreflopRanges {
             offsuitBroadway: 10,
             suitedConnector: 5,
             suitedGapper: 6,
-            suitedAny: 5,
+            suitedAny: 4,
             offsuitConnector: 7,
             offsuitAny: 8,
-          ), // ~36%
+          ), // ~38%
         Seat.bb => const PreflopRange(), // 大盲不主动开池
       };
 
@@ -298,6 +306,38 @@ class PreflopRanges {
             offsuitBroadway: 12,
           ),
         Seat.bb => const PreflopRange(),
+      };
+
+  /// 跟注站的溜入范围：标准溜入范围只玩「同花牌 + 对子 + A 高张」，
+  /// 松被动玩家连非同花连张、非同花大牌都便宜跟，所以单独列一张表。
+  static PreflopRange limpLoose(Seat seat) => switch (seat) {
+        // 小盲补齐：先投了 0.5bb，补齐很便宜。
+        Seat.sb => const PreflopRange(
+            pair: 2,
+            suitedAce: 2,
+            suitedBroadway: 10,
+            offsuitAce: 10,
+            offsuitBroadway: 12,
+            suitedConnector: 5,
+            suitedGapper: 5,
+            suitedAny: 5,
+            offsuitConnector: 9,
+            offsuitAny: 9,
+          ),
+        Seat.bb => const PreflopRange(),
+        // 其它位置：几乎什么便宜牌都跟，只扔掉真正的垃圾。
+        _ => const PreflopRange(
+            pair: 2,
+            suitedAce: 2,
+            suitedBroadway: 9,
+            offsuitAce: 8,
+            offsuitBroadway: 10,
+            suitedConnector: 3,
+            suitedGapper: 4,
+            suitedAny: 2,
+            offsuitConnector: 7,
+            offsuitAny: 8,
+          ),
       };
 
   // ---------- 面对加注 ----------
@@ -333,24 +373,24 @@ class PreflopRanges {
   static const _ipDefend = PreflopRange(
     pair: 2,
     suitedAce: 2,
-    offsuitAce: 12,
+    offsuitAce: 11,
     suitedBroadway: 10,
-    offsuitBroadway: 12,
+    offsuitBroadway: 11,
     suitedConnector: 5,
     suitedGapper: 6,
-    suitedAny: 8,
+    suitedAny: 7,
   );
 
   // 没位置防守：更依赖牌力，少玩同花杂牌。
   static const _oopDefend = PreflopRange(
     pair: 2,
     suitedAce: 3,
-    offsuitAce: 13,
+    offsuitAce: 12,
     suitedBroadway: 10,
-    offsuitBroadway: 13,
+    offsuitBroadway: 12,
     suitedConnector: 6,
     suitedGapper: 8,
-    suitedAny: 9,
+    suitedAny: 8,
   );
 
   // 大盲防守：价格最好，范围最宽（含大量同花牌和便宜的高张）。
@@ -364,7 +404,7 @@ class PreflopRanges {
     suitedGapper: 5,
     suitedAny: 2,
     offsuitConnector: 6,
-    offsuitAny: 9,
+    offsuitAny: 10,
   );
 
   // 小盲平跟：不关门又没位置，只用来买三条/买同花（还要有人跟注）。
@@ -383,6 +423,24 @@ class PreflopRanges {
     }
     return !h.suited && h.high == 13 && h.low == 12; // KQo
   }
+
+  /// 冷跟开池的范围（翻后给对手范围建模用）。
+  static PreflopRange coldCallRange({
+    required Seat seat,
+    required bool inPosition,
+  }) =>
+      switch (seat) {
+        Seat.bb => _bbDefend,
+        Seat.sb => _sbDefend,
+        _ => inPosition ? _ipDefend : _oopDefend,
+      };
+
+  /// 这个位置加注（开池或 3bet）时范围有多强：0 = 后位偷盲，2 = 前位好牌。
+  static int raiserTightness(Seat raiser) => switch (raiser) {
+        Seat.ep => 2,
+        Seat.mp => 1,
+        _ => 0,
+      };
 
   /// 面对单个开池加注的应对。
   ///
@@ -412,10 +470,15 @@ class PreflopRanges {
         isLightThreeBetHand(hand);
 
     var range = switch (seat) {
-      Seat.bb => callers == 0 ? _bbDefend : _bbDefend,
-      Seat.sb => callers >= 2 ? _sbDefend : const PreflopRange(),
+      // 大盲价格最好：已经投过 1bb，范围最宽；多人跟注后再收紧。
+      Seat.bb => callers >= 2 ? _bbDefend.shifted(1) : _bbDefend,
+      // 小盲不关门又没位置：没人跟注时就是「3bet 或弃牌」，
+      // 有人跟注才有便宜的隐含赔率去买三条/买同花。
+      Seat.sb => callers >= 1 ? _sbDefend : const PreflopRange(),
       _ => inPosition ? _ipDefend : _oopDefend,
     };
+    // 加注者越靠前，范围越强：冷跟的牌力门槛跟着提高。
+    range = range.shifted(raiserTightness(raiser));
 
     // 加注越大越贵：小注可以便宜看翻牌，大注要收紧。
     if (raiseBb <= 2.5) {

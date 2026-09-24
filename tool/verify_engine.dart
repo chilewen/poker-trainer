@@ -10,6 +10,7 @@ import '../lib/engine/hand_evaluator.dart';
 import '../lib/engine/types.dart';
 import '../lib/features/game/domain/ai_player.dart';
 import '../lib/features/game/domain/hand_strength.dart';
+import '../lib/features/game/domain/preflop_ranges.dart';
 import '../lib/trainer/odds.dart';
 
 e.Card c(String s) => e.Card.parse(s);
@@ -237,6 +238,150 @@ void main() {
   check(vsRange < vsRandom - 0.05,
       '范围为随机牌时胜率 ${(vsRandom * 100).toStringAsFixed(1)}%，'
       '收紧到「至少一对」后 ${(vsRange * 100).toStringAsFixed(1)}%');
+
+  // --- 翻前位置范围：越靠后越宽，大盲防守最宽，盲注位不轻易平跟 ---
+  PreflopHand ph(String s) => PreflopHand.of(cs(s));
+  bool has(PreflopRange r, String hole) => r.contains(ph(hole));
+
+  /// 范围里有多少个 2 张组合（一共 1326 个），用来估算入池率。
+  int combos(PreflopRange r) {
+    var n = 0;
+    for (final hi in e.Rank.values) {
+      for (final lo in e.Rank.values) {
+        if (hi.value < lo.value) continue;
+        if (hi == lo) {
+          if (r.contains(PreflopHand.of(
+              [e.Card(hi, e.Suit.spades), e.Card(lo, e.Suit.hearts)]))) {
+            n += 6;
+          }
+          continue;
+        }
+        if (r.contains(PreflopHand.of(
+            [e.Card(hi, e.Suit.spades), e.Card(lo, e.Suit.spades)]))) {
+          n += 4;
+        }
+        if (r.contains(PreflopHand.of(
+            [e.Card(hi, e.Suit.spades), e.Card(lo, e.Suit.hearts)]))) {
+          n += 12;
+        }
+      }
+    }
+    return n;
+  }
+
+  String pct(PreflopRange r) =>
+      '${(100 * combos(r) / 1326).toStringAsFixed(0)}%';
+
+  final openEp = combos(PreflopRanges.open(Seat.ep));
+  final openMp = combos(PreflopRanges.open(Seat.mp));
+  final openCo = combos(PreflopRanges.open(Seat.co));
+  final openBtn = combos(PreflopRanges.open(Seat.btn));
+  check(openEp < openMp && openMp < openCo && openCo < openBtn,
+      '开池范围随位置递增：前位 ${pct(PreflopRanges.open(Seat.ep))} < '
+      '中位 ${pct(PreflopRanges.open(Seat.mp))} < '
+      '劫位 ${pct(PreflopRanges.open(Seat.co))} < '
+      '按钮 ${pct(PreflopRanges.open(Seat.btn))}');
+  check(openEp > 0.10 * 1326 && openEp < 0.18 * 1326,
+      '前位开池大约 10~18%（${pct(PreflopRanges.open(Seat.ep))}）');
+  check(openBtn > 0.36 * 1326 && openBtn < 0.55 * 1326,
+      '按钮开池大约 36~55%（${pct(PreflopRanges.open(Seat.btn))}）');
+
+  check(has(PreflopRanges.open(Seat.btn), '7s 6s') &&
+          !has(PreflopRanges.open(Seat.ep), '7s 6s'),
+      '同花连张 76s：按钮位开池，前位不玩');
+  check(has(PreflopRanges.open(Seat.btn), 'Ad 4d') &&
+          !has(PreflopRanges.open(Seat.ep), 'Ad 4d'),
+      'A4s：按钮位偷盲会打，前位不玩');
+  check(has(PreflopRanges.open(Seat.btn), 'Ad 5c') &&
+          !has(PreflopRanges.open(Seat.ep), 'Ad 5c'),
+      'A5o：按钮位偷盲会打，前位不玩');
+  check(has(PreflopRanges.open(Seat.btn), 'Ad Qc') &&
+          has(PreflopRanges.open(Seat.ep), 'Ad Kc'),
+      'AQo 在按钮开池范围里，AKo 连前位都能开');
+
+  PreflopRange defend(Seat seat, bool ip) =>
+      PreflopRanges.coldCallRange(seat: seat, inPosition: ip);
+  check(combos(defend(Seat.bb, false)) >
+          combos(defend(Seat.btn, true)) &&
+      combos(defend(Seat.btn, true)) > combos(defend(Seat.co, false)),
+      '防守范围：大盲 ${pct(defend(Seat.bb, false))} > '
+      '有位置 ${pct(defend(Seat.btn, true))} > '
+      '没位置 ${pct(defend(Seat.co, false))}');
+
+  OpenDefense versus({
+    required Seat seat,
+    required String hole,
+    required Seat raiser,
+    bool inPosition = false,
+    int callers = 0,
+    double raiseBb = 3,
+    double stackBb = 100,
+  }) =>
+      PreflopRanges.versusOpen(
+        seat: seat,
+        hand: ph(hole),
+        raiser: raiser,
+        inPosition: inPosition,
+        callers: callers,
+        raiseBb: raiseBb,
+        stackBb: stackBb,
+      );
+
+  check(versus(seat: Seat.bb, hole: 'Qd 10h', raiser: Seat.btn).call &&
+          !versus(seat: Seat.bb, hole: 'Qd 10h', raiser: Seat.ep).call,
+      'QTo 在大盲会防守按钮开池，但弃给前位开池');
+  check(versus(seat: Seat.bb, hole: 'Ah Ad', raiser: Seat.ep).valueThreeBet &&
+          !versus(seat: Seat.bb, hole: '8h 8d', raiser: Seat.ep).valueThreeBet,
+      'AA 对着前位开池做 3bet，88 只在后面跟注');
+  check(!versus(seat: Seat.sb, hole: '9h 9d', raiser: Seat.btn).call &&
+          versus(seat: Seat.sb, hole: '9h 9d', raiser: Seat.btn, callers: 2).call,
+      '小盲没人跟注时不平跟 99，有人跟注才便宜买三条');
+  check(!versus(seat: Seat.bb, hole: 'Qd Jh', raiser: Seat.ep, raiseBb: 3).call &&
+          versus(seat: Seat.bb, hole: 'Qd Jh', raiser: Seat.ep, raiseBb: 2.2).call,
+      '加注越大，大盲防守越紧（3bb 弃 QJo，2.2bb 跟）');
+  check(versus(seat: Seat.bb, hole: '5h 5d', raiser: Seat.ep, stackBb: 20).call ==
+          false,
+      '短筹码（20bb）没有买三条的隐含赔率，小对子直接弃');
+
+  check(PreflopRanges.isLightThreeBetHand(ph('As 5s')) &&
+          PreflopRanges.isLightThreeBetHand(ph('Kd Qc')) &&
+          !PreflopRanges.isLightThreeBetHand(ph('Ah Ad')) &&
+          !PreflopRanges.isLightThreeBetHand(ph('7d 2c')),
+      '轻 3bet 候选牌：A5s / KQo 是，AA / 72o 不是');
+
+  // 座位识别：9 人桌按钮、小盲、大盲、枪口、劫位各就各位。
+  final g9 = GameEngine(random: Random(3));
+  for (var i = 0; i < 9; i++) {
+    g9.addPlayer('p$i', 'P$i');
+  }
+  g9.startHand();
+  final bIdx = g9.buttonIndex;
+  check(PreflopRanges.seatOf(g9, g9.players[bIdx]) == Seat.btn &&
+          PreflopRanges.seatOf(g9, g9.players[(bIdx + 1) % 9]) == Seat.sb &&
+          PreflopRanges.seatOf(g9, g9.players[(bIdx + 2) % 9]) == Seat.bb &&
+          PreflopRanges.seatOf(g9, g9.players[(bIdx + 3) % 9]) == Seat.ep &&
+          PreflopRanges.seatOf(g9, g9.players[(bIdx + 8) % 9]) == Seat.co,
+      '座位识别：按钮/小盲/大盲/枪口/劫位');
+
+  // --- AI 真的会按位置打牌：前位扔 72o，按钮位用 A4s 偷盲 ---
+  final g9ai = GameEngine(
+    config: const GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100),
+    random: Random(9),
+  );
+  for (var i = 0; i < 9; i++) {
+    g9ai.addPlayer('p$i', 'P$i');
+  }
+  g9ai.startHand(holeOverride: {'p3': cs('7h 2c'), 'p0': cs('Ad 4d')});
+  final ai9 = AiPlayer(AiStyle.tightAggressive, random: Random(1));
+  final utgSeatPlayer = g9ai.pendingAction().player;
+  final utgFolds = utgSeatPlayer.id == 'p3' &&
+      PreflopRanges.seatOf(g9ai, utgSeatPlayer) == Seat.ep &&
+      ai9.decide(g9ai, utgSeatPlayer).type == ActionType.fold;
+  check(utgFolds, '前位（枪口）拿着 72o 直接弃牌');
+  final btnPlayer = g9ai.players[g9ai.buttonIndex];
+  check(PreflopRanges.seatOf(g9ai, btnPlayer) == Seat.btn &&
+          ai9.decide(g9ai, btnPlayer).type == ActionType.raise,
+      '按钮位拿着 A4s 会开池偷盲');
 
   // --- AI 行为：听牌半诈唬 / 河牌放弃 ---
   final flopDraw = aiMix(

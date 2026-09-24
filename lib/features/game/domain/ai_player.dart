@@ -6,6 +6,7 @@ import '../../../engine/hand_history.dart';
 import '../../../engine/types.dart';
 import '../../../trainer/odds.dart';
 import 'hand_strength.dart';
+import 'preflop_ranges.dart';
 
 /// AI 风格：
 /// - 紧凶：打得少打得凶，会用听牌和空气持续施压；
@@ -31,13 +32,11 @@ enum AiStyle {
 /// 而不是散落在决策代码里的 `_tag ? a : b`。
 class _Profile {
   const _Profile({
-    required this.openBase,
-    required this.openByPosition,
-    required this.limpLine,
-    required this.threeBetLine,
+    required this.openShift,
+    required this.limpShift,
+    required this.defendShift,
+    required this.threeBetShift,
     required this.lightThreeBet,
-    required this.callBase,
-    required this.callByPosition,
     required this.openSizeBb,
     required this.positionSensitivity,
     required this.bluffScale,
@@ -47,25 +46,27 @@ class _Profile {
     required this.bluffRaiseScale,
     this.lightThreeBetAnyPosition = false,
     this.limpsAnyPrice = false,
+    this.wideLimp = false,
   });
 
-  /// 开池加注的 Chen 阈值 = [openBase] - [openByPosition] × 位置系数。
-  final double openBase;
-  final double openByPosition;
+  /// 开池范围的整体偏移（正 = 比标准范围更紧，负 = 更松）。
+  ///
+  /// 标准范围来自 [PreflopRanges.open]（按位置分档），这里只做风格微调，
+  /// 所以「前位紧、后位松」这个骨架是共用的。
+  final int openShift;
 
-  /// 无人加注时的溜入阈值。
-  final double limpLine;
+  /// 溜入 / 补齐范围的偏移。
+  final int limpShift;
 
-  /// 价值 3bet（再加注）的 Chen 阈值。
-  final double threeBetLine;
+  /// 面对加注时冷跟范围的偏移。
+  final int defendShift;
+
+  /// 价值再加注范围的偏移。
+  final int threeBetShift;
 
   /// 轻 3bet 的频率（0 = 不做）。
   final double lightThreeBet;
   final bool lightThreeBetAnyPosition;
-
-  /// 面对加注的冷跟阈值 = [callBase] - [callByPosition] × 位置系数。
-  final double callBase;
-  final double callByPosition;
 
   /// 开池加注的基准大小（bb）。
   final double openSizeBb;
@@ -91,16 +92,17 @@ class _Profile {
 
   /// 跟注站特性：溜入时不看价格。
   final bool limpsAnyPrice;
+
+  /// 跟注站特性：溜入范围放宽到「非同花杂牌也跟」。
+  final bool wideLimp;
 }
 
 const _tightProfile = _Profile(
-  openBase: 8.6,
-  openByPosition: 3.2,
-  limpLine: 4.5,
-  threeBetLine: 11.5,
+  openShift: 0,
+  limpShift: 1,
+  defendShift: 0,
+  threeBetShift: 0,
   lightThreeBet: 0.12,
-  callBase: 9.6,
-  callByPosition: 1.6,
   openSizeBb: 3,
   positionSensitivity: 1.0,
   bluffScale: 1.0,
@@ -111,13 +113,11 @@ const _tightProfile = _Profile(
 );
 
 const _passiveProfile = _Profile(
-  openBase: 11.5,
-  openByPosition: 2.0,
-  limpLine: 1.5,
-  threeBetLine: 13.5,
+  openShift: 5,
+  limpShift: 0,
+  defendShift: -3,
+  threeBetShift: 3,
   lightThreeBet: 0.0,
-  callBase: 6.0,
-  callByPosition: 1.0,
   openSizeBb: 2,
   positionSensitivity: 1.0,
   bluffScale: 0.45,
@@ -126,17 +126,16 @@ const _passiveProfile = _Profile(
   semiBluffRaiseScale: 0.5,
   bluffRaiseScale: 0.6,
   limpsAnyPrice: true,
+  wideLimp: true,
 );
 
 const _looseAggressiveProfile = _Profile(
-  openBase: 8.2,
-  openByPosition: 3.0,
-  limpLine: 3.0,
-  threeBetLine: 10.5,
+  openShift: -2,
+  limpShift: 2,
+  defendShift: -2,
+  threeBetShift: -1,
   lightThreeBet: 0.22,
   lightThreeBetAnyPosition: true,
-  callBase: 7.6,
-  callByPosition: 1.4,
   openSizeBb: 3,
   positionSensitivity: 0.4,
   bluffScale: 1.6,
@@ -173,14 +172,17 @@ class _Plan {
   final _PlanKind kind;
 }
 
-/// 规则型 AI：翻牌前用 Chen 公式给起手牌打分，翻牌后「读牌 + 读人」。
-/// 风格差异全部通过 [_Profile] 参数体现。
+/// 规则型 AI：翻牌前查「位置感知的范围表」（[PreflopRanges]），
+/// 翻牌后「读牌 + 读人」。风格差异全部通过 [_Profile] 参数体现。
 ///
 /// 决策流程：
-/// 1. 先读出自己手里是什么（[HandTier] 成牌层级 + 听牌 outs）；
-/// 2. 用「受限对手范围」的蒙特卡洛胜率代替「对随机牌」的胜率，
+/// 1. 翻前按座位（前位/中位/劫位/按钮/小盲/大盲）取开池、溜入、防守、
+///    再加注的范围，风格只做整体松紧偏移；
+/// 2. 翻后先读出自己手里是什么（[HandTier] 成牌层级 + 听牌 outs）；
+/// 3. 用「受限对手范围」的蒙特卡洛胜率代替「对随机牌」的胜率
+///    （对手范围同样按他翻前的位置与动作来收紧），
 ///    再和底池赔率、隐含赔率、位置、下注尺度结合；
-/// 3. 听牌主动半诈唬（有弃牌率也保有成牌概率），没成牌就按计划
+/// 4. 听牌主动半诈唬（有弃牌率也保有成牌概率），没成牌就按计划
 ///    在转牌/河牌决定继续开火还是放弃，而不是无脑跟注到底。
 class AiPlayer {
   AiPlayer(this.style, {Random? random}) : _random = random ?? Random() {
@@ -226,7 +228,7 @@ class AiPlayer {
 
   bool _roll(double p) => _random.nextDouble() < p;
 
-  // ---------- 翻牌前：Chen 公式 + 位置 + 前面动作 ----------
+  // ---------- 翻牌前：位置范围 + 前面动作 ----------
 
   /// Chen 公式打分。大致对应：AA=20，KK=16，AKs≈12，22≈5，72o=0。
   static double preflopScore(List<Card> hole) {
@@ -258,72 +260,115 @@ class AiPlayer {
     return max(0.0, score);
   }
 
+  /// 位置感知的翻前决策：开池 / 溜入 / 3bet / 防守全部查 [PreflopRanges]，
+  /// 风格只在标准范围上做整体偏移。这样「前位紧、后位松、大盲防守最宽、
+  /// 盲注位不轻易平跟」这些真人的骨架是三种风格共用的。
   AiDecision _preflop(GameEngine game, PlayerState me, _Spot spot) {
-    final score = preflopScore(me.holeCards);
+    final hand = PreflopHand.of(me.holeCards);
+    final seat = spot.seat;
     final bb = game.config.bigBlind;
     final toCall = spot.toCall;
-    final pos = spot.position; // 0（最差）~1（庄位）
-    final raises = spot.preflopRaises; // 前面的加注次数
-    final pocketPair =
-        me.holeCards[0].rank == me.holeCards[1].rank;
+    final raises = spot.preflopRaises;
     final shortStack = me.stack <= bb * 20;
+    final stackBb = me.stack / bb;
+    final score = preflopScore(me.holeCards);
+    // 性格带来的整体松紧（-1 / 0 / +1），让同风格的 AI 也不完全一样。
+    final w = ((1.0 - _looseness) * 5).round();
 
     // ---- 无人加注：开池拉升，或便宜溜入看翻牌 ----
     if (raises == 0) {
-      final openLine = _p.openBase - _p.openByPosition * pos;
-      final openThreshold = openLine * (2 - _looseness);
-      if (score >= openThreshold && me.stack > 0) {
+      var openRange = PreflopRanges.open(seat).shifted(_p.openShift + w);
+      // 前面已经有人溜入：非同花牌容易被后面压制，收紧一点。
+      if (spot.limpers > 0) {
+        openRange = openRange.shiftedOffsuit(spot.limpers >= 2 ? 2 : 1);
+      }
+      final openable = openRange.contains(hand);
+      if (toCall == 0) {
+        // 大盲免费看牌：只有强牌才主动加注（隔离溜入者 / 反偷盲）。
+        if (openable && spot.limpers > 0) {
+          return AiDecision(ActionType.raise,
+              amountTo: _openSize(game, bb, spot.limpers));
+        }
+        return const AiDecision(ActionType.check);
+      }
+      if (openable && me.stack > 0) {
         return AiDecision(ActionType.raise,
             amountTo: _openSize(game, bb, spot.limpers));
       }
-      if (toCall == 0) return const AiDecision(ActionType.check); // 大盲免费
-      // 溜入：位置越好越愿意；跟注站几乎什么牌都便宜跟。
+      // 溜入 / 补齐：位置越好、价格越便宜越愿意；跟注站几乎什么都跟。
       final cheap = toCall <= bb;
-      if (score >= _p.limpLine * _looseness && (cheap || _p.limpsAnyPrice)) {
+      final limpBase = _p.wideLimp
+          ? PreflopRanges.limpLoose(seat)
+          : PreflopRanges.limp(seat);
+      final limpRange = limpBase.shifted(_p.limpShift + w);
+      if (limpRange.contains(hand) && (cheap || _p.limpsAnyPrice)) {
         return const AiDecision(ActionType.call);
       }
       return const AiDecision(ActionType.fold);
     }
 
-    // ---- 面对 3bet 及以上：只有顶端牌力继续 ----
+    final raiserSeat = spot.raiserSeat ?? Seat.btn;
+
+    // ---- 面对 3bet 及以上：只打顶端，深筹码+有位置才用跟注范围 ----
     if (raises >= 2) {
-      if (score >= 12.0 || (shortStack && score >= 11.0)) {
+      final fourBet = PreflopRanges.valueFourBet.shifted(_p.threeBetShift + w);
+      if (fourBet.contains(hand)) {
         if (toCall >= me.stack || shortStack) {
           return const AiDecision(ActionType.raise); // 全下
         }
-        return AiDecision(ActionType.call);
+        return const AiDecision(ActionType.call);
       }
+      final deepCall = !shortStack &&
+          stackBb >= 80 &&
+          spot.inPosition &&
+          toCall <= me.stack / 3 &&
+          PreflopRanges.callThreeBet.shifted(w).contains(hand);
+      if (deepCall) return const AiDecision(ActionType.call);
       return const AiDecision(ActionType.fold);
     }
 
     // ---- 面对单个开池加注 ----
-    final jam = toCall >= me.stack || (shortStack && score >= 11.0);
-    if (score >= _p.threeBetLine || (jam && score >= 10.5)) {
-      if (jam) return const AiDecision(ActionType.raise);
-      final size = spot.inPosition ? 3 : 4;
-      return AiDecision(ActionType.raise, amountTo: game.currentBet * size);
-    }
-    // 轻 3bet（位置 + 阻断牌）：真人也会用 A5s、KQo 这类牌保护范围。
-    if (_p.lightThreeBet > 0 &&
-        (_p.lightThreeBetAnyPosition || spot.inPosition) &&
-        raises == 1 &&
-        score >= 8.0 &&
-        _roll(_p.lightThreeBet * _bluffiness)) {
-      return AiDecision(ActionType.raise, amountTo: game.currentBet * 3);
-    }
+    final defense = PreflopRanges.versusOpen(
+      seat: seat,
+      hand: hand,
+      raiser: raiserSeat,
+      inPosition: spot.inPosition,
+      // 已经进池的人（溜入者 + 冷跟者）越多，我们的冷跟范围就要越紧。
+      callers: spot.limpers,
+      raiseBb: game.currentBet / bb,
+      stackBb: stackBb,
+      threeBetWidth: _p.threeBetShift + w,
+      callWidth: _p.defendShift + w,
+    );
 
-    // 冷跟：位置越好、越便宜越愿意跟；小对子深筹码可以买三条。
-    final callLine = _p.callBase - _p.callByPosition * pos;
-    final setMine = pocketPair &&
-        toCall <= me.stack / 12 &&
-        me.stack > bb * 25 &&
-        toCall > 0;
-    if ((score >= callLine * (2 - _looseness) && toCall <= me.stack / 2) ||
-        setMine) {
-      return const AiDecision(ActionType.call);
+    // 价值 3bet：没位置就加得重一点，压掉对手的跟注赔率。
+    if (defense.valueThreeBet) {
+      if (toCall >= me.stack) return const AiDecision(ActionType.raise);
+      return AiDecision(ActionType.raise,
+          amountTo: game.currentBet * (spot.inPosition ? 3 : 4));
     }
-    // 大盲位便宜的补注：放宽一点点。
-    if (toCall <= bb && score >= callLine - 2) {
+    // 轻 3bet（A5s、KQo 这类有阻断牌/成牌潜力的牌）：针对后位偷盲，
+    // 既保护自己的范围，也让对手不敢随便开池。范围表给出「能不能打」，
+    // 频率由风格（松凶打得最凶）+ 性格决定。
+    if (_p.lightThreeBet > 0 && _roll(_p.lightThreeBet * _bluffiness)) {
+      final lateOpen = raiserSeat == Seat.co ||
+          raiserSeat == Seat.btn ||
+          raiserSeat == Seat.sb;
+      // 松凶在哪个位置都敢压，别的风格只在有位置（或盲注位）时才打。
+      final mayLight = defense.lightThreeBet ||
+          (_p.lightThreeBetAnyPosition &&
+              lateOpen &&
+              PreflopRanges.isLightThreeBetHand(hand));
+      if (mayLight) {
+        return AiDecision(ActionType.raise, amountTo: game.currentBet * 3);
+      }
+    }
+    // 短筹码：与其翻后打小球，不如直接推进去（弃牌率 + 摊牌胜率）。
+    if (shortStack && toCall < me.stack && score >= 10.0) {
+      return const AiDecision(ActionType.raise);
+    }
+    // 冷跟防守：位置、加注规模、筹码深度全部由范围表决定。
+    if (defense.call && toCall <= me.stack / 2) {
       return const AiDecision(ActionType.call);
     }
     return const AiDecision(ActionType.fold);
@@ -359,20 +404,36 @@ class AiPlayer {
   int _trials(int opponents) =>
       opponents >= 5 ? 130 : (opponents >= 3 ? 180 : (opponents == 2 ? 240 : 400));
 
-  /// 对手范围模型：翻前动作定下限，翻后激进程度收紧弱牌比例。
+  /// 对手范围模型：先用「位置感知的翻前范围」筛掉对手大概率没有的牌，
+  /// 再按对手翻后的激进程度收紧弱牌比例。
   RangePredicate _rangeFilter(GameEngine game, PlayerState me, _Spot spot) {
-    var minChen = switch (spot.preflopRaises) {
-      0 => 1.5, // 溜入底池：范围很宽
-      1 => 6.0, // 开池加注
-      _ => 10.0, // 3bet 及以上
-    };
-    if (spot.isPreflopAggressor && spot.preflopRaises >= 1) {
-      minChen = max(minChen, 5.5); // 对手是跟我们的加注：范围也不会太差
-    }
+    final raiserSeat = spot.raiserSeat ?? Seat.co;
     final street = game.street;
     final tightness = spot.villainTightness;
+
+    /// 这手底牌出现在对手翻前范围里的权重（0~1）。
+    double preflopWeight(List<Card> hole) {
+      final h = PreflopHand.of(hole);
+      if (spot.preflopRaises >= 2) {
+        // 3bet 底池：要么是再加注的顶端牌力，要么是跟注 3bet 的投机牌。
+        if (PreflopRanges.valueThreeBet(raiserSeat).contains(h)) return 1.0;
+        return PreflopRanges.callThreeBet.contains(h) ? 0.3 : 0.06;
+      }
+      if (spot.preflopRaises == 1) {
+        // 对手是主动开池的人 → 用开池范围；对手是跟注的人 → 用冷跟范围。
+        final range = spot.isPreflopAggressor
+            ? PreflopRanges.coldCallRange(seat: Seat.bb, inPosition: true)
+            : PreflopRanges.open(raiserSeat);
+        if (range.contains(h)) return 1.0;
+        // 范围内侧一点点的牌（轻 3bet / 便宜跟注）还留一点点可能。
+        return PreflopRanges.isLightThreeBetHand(h) ? 0.25 : 0.06;
+      }
+      return 0.65; // 溜入底池：范围宽得像个谜，但不是随机牌
+    }
+
     return (hole, score) {
-      if (preflopScore(hole) < minChen) return 0.0;
+      final pre = preflopWeight(hole);
+      if (pre <= 0.0) return 0.0;
       final cat = score.category.rank;
       final keep = switch (cat) {
         >= 5 => 1.0, // 同花以上
@@ -385,7 +446,7 @@ class AiPlayer {
             ? 0.4
             : (street == Street.turn ? 0.25 : 0.12),
       };
-      return (keep * tightness).clamp(0.0, 1.0);
+      return (pre * keep * tightness).clamp(0.0, 1.0);
     };
   }
 
@@ -676,6 +737,8 @@ class AiPlayer {
 /// 单次决策的桌面快照：位置、底池、对手的动作线。
 class _Spot {
   _Spot({
+    required this.seat,
+    required this.raiserSeat,
     required this.toCall,
     required this.pot,
     required this.opponents,
@@ -692,6 +755,12 @@ class _Spot {
     required this.villainTightness,
     required this.canRaise,
   });
+
+  /// 我在什么位置（前位/中位/劫位/按钮/小盲/大盲）。
+  final Seat seat;
+
+  /// 翻前最后一个加注者在什么位置；没人加注时为 null。
+  final Seat? raiserSeat;
 
   final int toCall;
   final int pot;
@@ -735,6 +804,17 @@ class _Spot {
       }
     }
     final isPreflopAggressor = lastPreflopRaiser == me.id;
+
+    // 加注者的位置决定了对手范围有多强（前位开池 vs 按钮偷盲差别很大）。
+    Seat? raiserSeat;
+    if (lastPreflopRaiser != null) {
+      for (final p in game.players) {
+        if (p.id == lastPreflopRaiser) {
+          raiserSeat = PreflopRanges.seatOf(game, p);
+          break;
+        }
+      }
+    }
 
     var raisesThisStreet = 0;
     var villainAgg = 0;
@@ -787,6 +867,8 @@ class _Spot {
     final villainStrength = vs.clamp(0.1, 1.0);
 
     return _Spot(
+      seat: PreflopRanges.seatOf(game, me),
+      raiserSeat: raiserSeat,
       toCall: toCall,
       pot: pot,
       opponents: game.active.length - 1,
