@@ -1425,14 +1425,6 @@ class AiPlayer {
     // 面对 2/3 池的转牌下注，跟注 0%，要么加要么弃，一眼就不像真人）。
     // 所以这里跟蒙特卡洛胜率（对着对手范围算的，什么都算进去了）取大值：
     // 谁更乐观听谁的，边缘牌才不会因为估值方式差一个档就整档弃掉。
-    // 「数 outs」只数得出花/顺的出路，高张和后门全看不见：AdKd 在
-    // Qd7d2c5h 是 9 outs 的坚果花听，可它还有两张高张能赢，真实胜率三成
-    // 上下，对着转牌 2/3 池的下注（要 28.6%）该跟——只数 outs 算出来是
-    // 19.6%+8%，差一个多点，于是这种牌一律弃牌（探针实测：面对 2/3 池的
-    // 转牌下注跟注 0%，要么加要么弃，一眼就不像真人）。
-    // 所以强听牌（8 个出路以上：花听、两头顺、组合听）改用蒙特卡洛胜率
-    // ——它是对着对手的实际范围算的，高张、后门、对手在诈唬全都算进去了。
-    //
     // 两条边界不能越：
     //   · 卡顺这种 4~5 outs 的弱听牌不享受这个待遇。它们能赢的出路本来就
     //     少，「对着范围算胜率」会把对手诈唬的那一份也算成我们的，
@@ -1521,7 +1513,13 @@ class AiPlayer {
     if (spot.isThreeBetPot) base *= 0.7; // 3bet 底池大家范围都强
     base *= 1 - 0.6 * spot.villainStrength; // 对手线越强越少加
     // 对手小注更像阻挡注，值得抬回去；大注通常是真牌，别硬顶。
-    base *= spot.betSizeRel >= 0.8 ? 0.45 : (spot.betSizeRel <= 0.35 ? 1.3 : 1.0);
+    // 但「加注」和「下注」是两码事：最小加注也是加注，不能按阻挡注处理
+    // （这一维以前只看了尺度，没看对手是 bet 还是 raise）。
+    if (spot.villainRaisedThisStreet) {
+      base *= spot.betSizeRel >= 0.8 ? 0.35 : 0.6;
+    } else {
+      base *= spot.betSizeRel >= 0.8 ? 0.45 : (spot.betSizeRel <= 0.35 ? 1.3 : 1.0);
+    }
     // 顶对是翻牌圈的主力价值牌，反击的频率本来就更高。
     if (read.topPair && game.street == Street.flop) base *= 1.3;
     base *= _aggression * _p.aggressionScale;
@@ -1581,6 +1579,13 @@ class AiPlayer {
     base *= barrel;
     // 先过牌再对下注加注（过牌-加注）本来就是没位置时打听牌的主力。
     if (spot.checkedThisStreet) base *= 1.5;
+    // 对手已经加注出来了：再加就成了 3-bet 一个范围很实的人——弃牌率低，
+    // 被跟就被压着打，而且他这手牌不会再被我们的小加注逼走。真人拿听牌
+    // 在这儿的再加注频率明显低于「面对单纯下注」，多数是先跟一手看牌
+    // （隐含赔率还在）。以前这一维完全没算，探针实测：卡顺在转牌被加注
+    // 有 36% 直接 3-bet、跟注 0%，成了一条「要么加要么弃」的线，
+    // 一眼就能被读出来（AI 的加注范围里全是怪兽和听牌，没有强成牌）。
+    if (spot.villainRaisedThisStreet) base *= 0.45;
     return base.clamp(0.0, 0.5);
   }
 
@@ -1592,7 +1597,16 @@ class AiPlayer {
         _p.bluffRaiseScale;
     base *= _bluffiness;
     base *= _exploitBluffFactor(game, me);
-    if (spot.betSizeRel <= 0.35) base *= 2.0; // 对手小注 = 牌力偏弱
+    if (spot.villainRaisedThisStreet) {
+      // 加注线不套「小注 = 牌力偏弱」那一套：最小加注也是加注，代表他愿意
+      // 把筹码放进去，冲着它去诈唬加注是纯烧钱（被跟之后手里什么都没有）。
+      // 老逻辑把最小加注当成阻挡注，还额外乘 2 倍，探针实测：AKQ 这种
+      // 完全没后路的空气面对最小加注，11% 直接 3-bet、跟注 0%——
+      // 真人在这儿的频率只有它的三分之一。
+      base *= spot.betSizeRel >= 0.8 ? 0.2 : 0.45;
+    } else if (spot.betSizeRel <= 0.35) {
+      base *= 2.0; // 对手小注 = 牌力偏弱
+    }
     if (spot.betSizeRel >= 0.75) base *= 0.35; // 大注通常是真牌，别硬顶
     if (spot.villainStrength > 0.7) base *= 0.4;
     if (spot.inPosition) base *= 1.3;
