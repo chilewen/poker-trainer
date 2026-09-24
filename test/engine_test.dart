@@ -971,13 +971,14 @@ void main() {
 
   /// 6 人桌：p3 弃 → p4 开 300 → p5 3bet 900 → 轮到按钮位 p0（AI）。
   ({int raise, int call, int fold}) aiFacingThreeBet(String hole,
-      {int seeds = 200, AiStyle style = AiStyle.tightAggressive}) {
+      {int seeds = 200, AiStyle style = AiStyle.tightAggressive,
+      int stack = 10000}) {
     var raise = 0, call = 0, fold = 0;
     for (var seed = 0; seed < seeds; seed++) {
       final rnd = Random(seed);
       final g = GameEngine(
-        config: const GameConfig(
-            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        config: GameConfig(
+            startingStack: stack, smallBlind: 50, bigBlind: 100),
         random: rnd,
       );
       for (var i = 0; i < 6; i++) {
@@ -1001,6 +1002,63 @@ void main() {
     }
     return (raise: raise, call: call, fold: fold);
   }
+
+  test('翻前防守 3bet：投机牌混着跟，弱 A 同花改成轻 4bet', () {
+    PreflopHand h(String s) => PreflopHand.of(_cs(s));
+    final flat = PreflopRanges.callThreeBet;
+
+    // 范围表：同花大牌必须在里面。范围表的「大牌」分支是短路的——同花大牌
+    // 只查 suitedBroadway，查不到就直接判「不在范围内」，不会掉到下面的
+    // 同花连张档。以前这里漏了 suitedBroadway，KQs 面对 3bet 被当成垃圾
+    // 弃掉，87s 反而一路跟，跟注范围长成「有 A 的同花 + 小连张」。
+    expect(flat.contains(h('Kh Qh')), isTrue, reason: 'KQs 跟 3bet 是标准打法');
+    expect(flat.contains(h('Kc Jc')), isTrue, reason: 'KJs 同花大牌');
+    expect(flat.contains(h('Ad 5d')), isFalse, reason: 'A5s 不是老实跟注的牌');
+
+    // 同花连张只留最上面两张；76s/87s 在 3bet 底池里实现不了胜率。
+    expect(flat.contains(h('10h 9h')), isTrue);
+    expect(flat.contains(h('9h 8h')), isTrue);
+    expect(flat.contains(h('8h 7h')), isFalse, reason: '87s 不在跟注范围里');
+    expect(flat.contains(h('7h 6h')), isFalse, reason: '76s 不在跟注范围里');
+
+    // 买三条（22~88）是单独一档：摘掉它不该顺手把 99+ 和大牌也摘掉。
+    final noSetMine = flat.withoutSmallPairs();
+    expect(flat.contains(h('5h 5d')), isTrue);
+    expect(noSetMine.contains(h('5h 5d')), isFalse, reason: '摘掉买三条');
+    expect(noSetMine.contains(h('9h 9d')), isTrue, reason: '99+ 不受影响');
+    expect(noSetMine.contains(h('Kh Qh')), isTrue, reason: '大牌不受影响');
+
+    // A5s/A2s 面对 3bet 用来轻 4bet（挡住 AA/AK），不是弃牌。
+    expect(PreflopRanges.isLightFourBetHand(h('Ad 5d')), isTrue);
+    expect(PreflopRanges.isLightFourBetHand(h('Ad 2d')), isTrue);
+    expect(PreflopRanges.isLightFourBetHand(h('Ad 9d')), isFalse,
+        reason: 'A9s 有摊牌价值，不该拿来 4bet 诈唬');
+
+    // 实测（100bb 紧凶，200 次）。
+    final s76 = aiFacingThreeBet('7h 6h');
+    expect(s76.fold / 200, greaterThan(0.85),
+        reason: '76s 面对 3bet 该弃（弃 ${s76.fold}/200）');
+    final s87 = aiFacingThreeBet('8h 7h');
+    expect(s87.fold / 200, greaterThan(0.5),
+        reason: '87s 多数该弃（弃 ${s87.fold}/200）');
+    final kqs = aiFacingThreeBet('Kh Qh');
+    expect(kqs.call / 200, greaterThan(0.9),
+        reason: 'KQs 该跟（跟 ${kqs.call}/200）');
+    final a5s = aiFacingThreeBet('Ad 5d');
+    expect(a5s.raise / 200, greaterThan(0.15),
+        reason: 'A5s 该有一部分轻 4bet（4bet ${a5s.raise}/200）');
+    expect(a5s.call, 0, reason: 'A5s 不做老实跟注（拖到翻后也是白送）');
+
+    // 100bb 不买三条；300bb 深筹码才值得跟进去。
+    final p55 = aiFacingThreeBet('5h 5d');
+    expect(p55.call / 200, lessThan(0.25),
+        reason: '100bb 不该买三条（跟 ${p55.call}/200）');
+    final p55deep = aiFacingThreeBet('5h 5d', stack: 30000);
+    expect(p55deep.call / 200, greaterThan(0.4),
+        reason: '300bb 深筹码可以买三条（跟 ${p55deep.call}/200）');
+    final tt = aiFacingThreeBet('10h 10d');
+    expect(tt.fold, 0, reason: 'TT 不会弃给 3bet');
+  });
 
   test('翻前 4bet：QQ+/AK 面对方 3bet 会再加注回去，不是一路慢打', () {
     for (final hole in ['Ah Ad', 'Kh Kd', 'Qh Qd', 'As Ks', 'Ah Kc']) {
@@ -1205,12 +1263,15 @@ void main() {
             '${(100 * mediumBlank).round()}%)');
   });
 
-  /// 单挑：英雄（按钮位）开池、AI（大盲）跟注；翻牌英雄下重注、
-  /// 转牌 AI 先动手、英雄再加注，统计 AI 在转牌面对加注的应对。
-  /// 专门量「牌面已经三张同花」时它会不会拿非同花的大牌打光。
+  /// 单挑：英雄（按钮位）开池、AI（大盲）跟注；翻牌英雄下小注、
+  /// 转牌 AI 先领打、英雄再加注 —— 也就是实战里「AI 领先下注被抬」这条线。
+  /// 统计 AI 在转牌面对加注的应对，只取深筹码（SPR > 4）的样本：
+  /// 筹码浅的时候「强牌直接全下」本来就是对的，量不出牌力分档。
   ({double fold, double call, double raise, int total, double spr})
       aiFacingTurnRaise(String hole, String board,
-          {int seeds = 200, AiStyle style = AiStyle.loosePassive}) {
+          {int seeds = 400,
+          AiStyle style = AiStyle.loosePassive,
+          double minSpr = 4.0}) {
     var fold = 0, call = 0, raise = 0, total = 0;
     var spr = 0.0;
     for (var seed = 0; seed < seeds; seed++) {
@@ -1229,6 +1290,7 @@ void main() {
       );
       var guard = 0;
       var seen = 0;
+      var led = false; // 转牌是它先领打（实战那条线）还是先过牌
       var recorded = false;
       while (!g.handOver && guard++ < 60) {
         final pa = g.pendingAction();
@@ -1239,9 +1301,12 @@ void main() {
           final d = ai.decide(g, p);
           if (g.street == Street.turn) {
             if (seen == 0) {
+              led = d.type == ActionType.bet;
+            } else if (seen == 1 && led) {
+              final s = p.stack / max(1, g.potTotal());
+              if (s < minSpr) break; // 浅筹码不算
               total++;
-              spr += p.stack / max(1, g.potTotal());
-            } else if (seen == 1) {
+              spr += s;
               recorded = true;
               switch (d.type) {
                 case ActionType.fold:
@@ -1258,14 +1323,14 @@ void main() {
           if (recorded) break; // 要量的就是这一下
           continue;
         }
-        // 英雄：翻前加注、翻牌重注、转牌再加注，一路把压力拉满。
+        // 英雄：翻前加注、翻牌下小注、转牌再加注，把压力拉满。
         var type = ActionType.check;
         var frac = 0.0;
         if (g.street == Street.preflop) {
           type = ActionType.raise;
         } else if (g.street == Street.flop) {
           type = ActionType.bet;
-          frac = 1.05;
+          frac = 0.5;
         } else if (g.street == Street.turn) {
           type = legal.any((a) => a.type == ActionType.raise)
               ? ActionType.raise
@@ -1299,37 +1364,43 @@ void main() {
   }
 
   test('三条同花面：只有成花才打光，顺子/三条/两对转为跟注', () {
-    // 实战第 175 手：转牌 10♦Q♦3♠K♦，AI 拿 7♦6♦ 成花打光。
+    // 实战第 175 手：转牌 10♦Q♦3♠K♦（三张方片），AI 拿 7♦6♦ 成花打光。
     const board = '10d Qd 3s Kd';
-    final flush = aiFacingTurnRaise('7d 6d', board, seeds: 400);
+    final flush = aiFacingTurnRaise('7d 6d', board);
     final straight = aiFacingTurnRaise('Jc 9c', board);
     final set = aiFacingTurnRaise('3h 3d', board);
     final twoPair = aiFacingTurnRaise('Qs 3s', board);
+    final secondPair = aiFacingTurnRaise('Qc Jc', board);
     String pct(double v) => '${(100 * v).round()}%';
 
-    expect(flush.total, greaterThan(30),
+    expect(flush.total, greaterThan(40),
         reason: '成花这条线的样本要够（${flush.total}）');
+    expect(flush.spr, greaterThan(3.5), reason: '这是深筹码点位（SPR ${flush.spr}）');
     expect(flush.raise, greaterThan(0.7),
         reason: '成花面对加注当然继续加压（加 ${pct(flush.raise)}）');
 
-    // 以前顺子/三条/set/两对全是「怪兽牌」，和成花走一模一样的线：
-    // 领打 2/3 池 + 被加注后再加注，等于不看牌面有没有成花。
+    // 以前顺子/三条/两对全是「怪兽牌」，和成花走一模一样的线：被加注后
+    // 100% 再加注，等于完全不看牌面有没有已经成花。现在它们只比成花
+    // 低一档，被加注后以跟注为主。
     for (final (name, r) in [
       ('顺子', straight),
       ('set', set),
       ('两对', twoPair),
     ]) {
-      expect(r.total, greaterThan(60), reason: '$name 样本要够（${r.total}）');
-      expect(r.raise, lessThan(0.4),
+      expect(r.total, greaterThan(40), reason: '$name 样本要够（${r.total}）');
+      expect(r.raise, lessThan(0.35),
           reason: '$name 在三条同花面上不该再加注（加 ${pct(r.raise)}）');
-      expect(r.call, greaterThan(0.5),
+      expect(r.call, greaterThan(0.55),
           reason: '$name 应该以跟注为主（跟 ${pct(r.call)}）');
-      expect(r.fold, lessThan(0.2),
+      expect(r.fold, lessThan(0.15),
           reason: '$name 也不该一被加就弃（弃 ${pct(r.fold)}）');
     }
     expect(twoPair.raise, lessThan(flush.raise - 0.3),
         reason: '成花和两对必须分档（${pct(flush.raise)} vs ${pct(twoPair.raise)}）');
-    expect(flush.spr, greaterThan(5), reason: '这是深筹码点位（SPR ${flush.spr}）');
+
+    // 弱成牌（这里是第二对）照旧弃牌：分档没被这次改动抹平。
+    expect(secondPair.fold, greaterThan(0.6),
+        reason: '第二对面对三张同花面的加注要弃（弃 ${pct(secondPair.fold)}）');
   });
 
   /// 单挑：英雄（按钮位）开池、AI（大盲）跟注，翻牌 AI 先行动 —— 这就是

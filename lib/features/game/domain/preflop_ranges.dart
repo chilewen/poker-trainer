@@ -68,6 +68,7 @@ class PreflopHand {
 class PreflopRange {
   const PreflopRange({
     this.pair = 0,
+    this.smallPair = 0,
     this.suitedAce = 0,
     this.offsuitAce = 0,
     this.suitedBroadway = 0,
@@ -81,6 +82,12 @@ class PreflopRange {
 
   /// 对子下限（5 = 55+）。
   final int pair;
+
+  /// 小对子上限（8 = 22~88）。深筹码跟注 3bet 这类「买三条」的位置用：
+  /// 真人不会用 77 去跟 3bet 是因为它现在有摊牌价值，而是因为中三条能赢
+  /// 一整个大底池——所以这条范围跟「对子下限」是两回事，不能用同一个门槛
+  /// 表达（pair 只能一路放宽到 22，那等于连 22 都当中等对子打）。
+  final int smallPair;
 
   /// A 带 x 同花 / 非同花的 x 下限。
   final int suitedAce;
@@ -103,7 +110,10 @@ class PreflopRange {
       threshold > 0 && value >= threshold;
 
   bool contains(PreflopHand h) {
-    if (h.isPair) return _ok(h.high, pair);
+    if (h.isPair) {
+      // _ok(smallPair, h.high) = 点数不超过上界（22~smallPair）。
+      return _ok(h.high, pair) || _ok(smallPair, h.high);
+    }
     // 大牌（含 A 带高张）：同花/非同花各看自己的大牌门槛；
     // AQo 这类「A + 大牌」再额外用 A 的门槛兜底，避免被漏掉。
     if (h.isBroadway) {
@@ -135,6 +145,7 @@ class PreflopRange {
   /// 整体收紧（delta > 0）或放宽（delta < 0）。
   PreflopRange shifted(int delta) => PreflopRange(
         pair: _shift(pair, delta),
+        smallPair: _shiftSmall(smallPair, delta),
         suitedAce: _shift(suitedAce, delta),
         offsuitAce: _shift(offsuitAce, delta),
         suitedBroadway: _shift(suitedBroadway, delta),
@@ -149,6 +160,7 @@ class PreflopRange {
   /// 只调整非同花部分（对手越多，被压制的非同花牌越不值钱）。
   PreflopRange shiftedOffsuit(int delta) => PreflopRange(
         pair: pair,
+        smallPair: smallPair,
         suitedAce: suitedAce,
         offsuitAce: _shift(offsuitAce, delta),
         suitedBroadway: suitedBroadway,
@@ -163,6 +175,7 @@ class PreflopRange {
   /// 只调整投机牌（对子、同花连张）：筹码越深越值钱，短筹码可以不要。
   PreflopRange shiftedSpeculative(int delta) => PreflopRange(
         pair: _shift(pair, delta),
+        smallPair: _shiftSmall(smallPair, delta),
         suitedAce: suitedAce,
         offsuitAce: offsuitAce,
         suitedBroadway: suitedBroadway,
@@ -176,6 +189,7 @@ class PreflopRange {
 
   /// 去掉买三条/买同花这类需要隐含赔率的牌。
   PreflopRange withoutSpeculative() => PreflopRange(
+        smallPair: 0, // 买三条属于投机牌，这一档直接去掉
         suitedAce: suitedAce,
         offsuitAce: offsuitAce,
         suitedBroadway: suitedBroadway,
@@ -184,8 +198,30 @@ class PreflopRange {
         offsuitAny: offsuitAny,
       );
 
+  /// 只去掉「买三条」那一档（22~88），其它牌型原样保留。
+  ///
+  /// 3bet 底池的 SPR 只有三到五，100bb 深度中一次三条也赢不回 3bet 的
+  /// 价钱，真人这时拿小对子要么直接弃、要么当 4bet 诈唬；只有筹码极深、
+  /// 后手足够多的局才值得跟进去买。所以这个版本给「不够深」的场合用。
+  PreflopRange withoutSmallPairs() => PreflopRange(
+        pair: pair,
+        suitedAce: suitedAce,
+        offsuitAce: offsuitAce,
+        suitedBroadway: suitedBroadway,
+        offsuitBroadway: offsuitBroadway,
+        suitedConnector: suitedConnector,
+        suitedGapper: suitedGapper,
+        suitedAny: suitedAny,
+        offsuitConnector: offsuitConnector,
+        offsuitAny: offsuitAny,
+      );
+
   static int _shift(int value, int delta) =>
       value == 0 ? 0 : (value + delta).clamp(2, 14);
+
+  /// 上界型门槛（小对子）：收紧（delta > 0）= 上限往下走，只能打更小的对子。
+  static int _shiftSmall(int value, int delta) =>
+      value == 0 ? 0 : (value - delta).clamp(2, 14);
 }
 
 /// 面对开池加注时的三档结论。
@@ -463,10 +499,32 @@ class PreflopRanges {
   );
 
   /// 跟 3bet 的范围（位置好、筹码深才有）。
+  ///
+  /// [suitedBroadway] 这一档必须显式写：范围表的「大牌」分支是短路的——
+  /// 同花大牌只查 suitedBroadway，查不到就直接判「不在范围内」，不会掉到
+  /// 下面的同花连张/隔张档去。以前这里只有 suitedAce + suitedConnector，
+  /// 结果 KQs/KJs/QJs 这些标准的跟注牌被当成垃圾弃掉，反倒是 87s 一路跟
+  /// ——跟注范围长成了「有 A 的同花 + 小连张」，真人根本不是这么防守的。
+  /// 同花连张这一档只留 T9s/98s：以前是 65s+，等于 76s/87s 面对 3bet 也
+  /// 100% 跟注——这些牌在 3bet 底池里很难实现胜率（翻牌中一对都不够打），
+  /// 真人拿它们基本是直接弃或者 4bet 诈唬，不会老实跟注。
   static const PreflopRange callThreeBet = PreflopRange(
     pair: 9,
+    smallPair: 8, // 22~88：深筹码有位置时买三条，真人最爱这一手
     suitedAce: 11,
-    suitedConnector: 6,
+    suitedBroadway: 10, // KQs / KJs / QJs / JTs（同花大牌）
+    suitedConnector: 8, // T9s / 98s
+    offsuitBroadway: 12, // AQo / KQo
+  );
+
+  /// [callThreeBet] 里「有摊牌价值」的那一半（99+、ATs+、KQs~JTs、AQo/KQo）。
+  /// 另一半（小对子、同花连张）是纯投机的，真人不会每次都跟——边缘的跟注
+  /// 本来就是混着打的，跟得太满等于把跟注范围撑宽到对手随便开一枪就收走。
+  static const PreflopRange callThreeBetCore = PreflopRange(
+    pair: 9,
+    suitedAce: 11,
+    suitedBroadway: 10,
+    offsuitBroadway: 12,
   );
 
   // 有位置防守：对子买三条 + 同花牌 + 高张，非同花杂牌不跟。
@@ -523,6 +581,16 @@ class PreflopRanges {
     }
     return !h.suited && h.high == 13 && h.low == 12; // KQo
   }
+
+  /// 面对 3bet 可以拿来「轻 4bet」的牌：基本只有 A5s~A2s。
+  ///
+  /// 这些牌在 3bet 底池里翻后几乎没有摊牌价值（顶对都站不住），跟注等于
+  /// 把筹码交给对手的强范围；它们的价值在于挡住 AA/AK（对手的 4bet/5bet
+  /// 组合少掉一大半）加上翻牌还有坚果花和顺子潜力。真人这时是压回去，
+  /// 不是跟注——以前这里没有这一档，A5s/A2s 面对 3bet 是 100% 弃牌，
+  /// 对手可以毫无压力地拿任意两张牌 3bet 我们。
+  static bool isLightFourBetHand(PreflopHand h) =>
+      h.suited && h.isAce && h.low <= 5;
 
   /// 冷跟开池的范围（翻后给对手范围建模用）。
   static PreflopRange coldCallRange({

@@ -62,8 +62,15 @@ List<Card> _boardAt(List<Card> board, Street s) => switch (s) {
       _ => board.take(5).toList(),
     };
 
-void main() {
-  final rnd = Random(42);
+/// 用法：dart tool/ai_sim.dart [手数] [随机种子]
+///
+/// 种子可换是关键：整个模拟共用一条随机流，任何一处多掷一次随机数都会
+/// 把后面所有决策重新洗一遍。只跑一个种子的话，「改前改后」的差别里
+/// 分不清哪些是策略变化、哪些只是随机重排，所以要比就多换几个种子看均值。
+void main(List<String> args) {
+  final total = args.isEmpty ? 800 : int.tryParse(args[0]) ?? 800;
+  final seed = args.length > 1 ? int.tryParse(args[1]) ?? 42 : 42;
+  final rnd = Random(seed);
   final g = GameEngine(random: rnd);
   final ais = <String, AiPlayer>{};
   final styles = <String, AiStyle>{};
@@ -80,7 +87,6 @@ void main() {
     styles[id] = style;
   }
 
-  const total = 800;
   final st = _Stats();
   var showdowns = 0;
   var potSum = 0;

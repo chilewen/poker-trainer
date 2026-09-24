@@ -550,11 +550,34 @@ class AiPlayer {
         }
         return const AiDecision(ActionType.call);
       }
+      // 轻 4bet：A5s~A2s 面对 3bet 是压回去而不是跟注
+      // （见 PreflopRanges.isLightFourBetHand）。频率比轻 3bet 高一档：
+      // 这些牌在 3bet 底池里翻后没有摊牌价值，「跟注」是纯亏的打法，
+      // 压回去才换得到弃牌率 + 阻断牌的价值（紧凶约三成、松凶约五成）。
+      if (_p.lightThreeBet > 0 &&
+          toCall < me.stack * 0.4 &&
+          PreflopRanges.isLightFourBetHand(hand) &&
+          _roll(_p.lightThreeBet * 2.5 * _bluffiness)) {
+        return AiDecision(ActionType.raise,
+            amountTo: _fourBetSize(game, spot, me));
+      }
+      // 22~88 那一档（买三条）只在极深的筹码里跟：3bet 底池的 SPR 低到
+      // 100bb 深度中三条也赢不回 3bet 的价钱，真人这时要么弃、要么拿去
+      // 4bet 诈唬，跟注是最差的选择。
+      final callRange = stackBb >= 200
+          ? PreflopRanges.callThreeBet
+          : PreflopRanges.callThreeBet.withoutSmallPairs();
+      final shifted = callRange.shifted(w);
+      // 投机的那一半（小对子 / 同花连张）混着跟：真人对这些边缘牌不是
+      // 每次都跟，一部分直接弃，跟注范围才不会宽到对手一开火就收走。
+      // 松的性格跟得多一点（_looseness 0.9~1.15）。
+      final specFreq = (0.45 + (_looseness - 0.9) * 2.0).clamp(0.3, 0.8);
       final deepCall = !shortStack &&
           stackBb >= 80 &&
           spot.inPosition &&
           toCall <= me.stack / 3 &&
-          PreflopRanges.callThreeBet.shifted(w).contains(hand);
+          shifted.contains(hand) &&
+          (PreflopRanges.callThreeBetCore.contains(hand) || _roll(specFreq));
       if (deepCall) return const AiDecision(ActionType.call);
       return const AiDecision(ActionType.fold);
     }
