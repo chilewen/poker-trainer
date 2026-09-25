@@ -10,9 +10,10 @@ A new Flutter project.
   zsh tool/regression.sh
   ```
 
-  约 6 秒。用例默认走 `tool/sharded_test.sh`：先编译一次，再按用例拆 5 片并行跑。
-  `flutter test` 只按**文件**并行，`test/engine_test.dart` 里那 75 条用例它拆不开，
-  裸跑要 18 秒上下；而且源码没动时这里连编译都省掉，再跑一遍 5 秒以内。
+  约 7 秒（源码没动，dill 缓存直接命中）；改过 `lib/` 要重编那一遍，约 9 秒。
+  用例默认走 `tool/sharded_test.sh`：先编译一次，再按用例拆 8 片并行跑。
+  `flutter test` 只按**文件**并行，`test/engine_test.dart` 里那 96 条用例它拆不开，
+  裸跑要 18 秒上下。
 
 - 只想确认「有没有跑不起来 / 结构性错」：
 
@@ -33,7 +34,19 @@ A new Flutter project.
   在门禁之外再跑 6 个诊断探针（`tool/ai_*_probe.dart`），它们只打印比例、从不
   让回归失败：加注战、多人池、听牌、翻前 3bet、再加注，以及
   `tool/ai_river_defense_probe.dart`（河牌被连开三枪时的弃牌率 vs MDF 保本线，
-  另外带一张「翻牌/转牌各自筛掉多少弱牌」的沿街表）。约 12 秒。
+  另外带一张「翻牌/转牌各自筛掉多少弱牌」的沿街表）。约 20 秒（探针合计约 120 秒
+  CPU，门禁把每条拆成进程/格子并行跑，10 核机器上摊成 20 秒墙钟）。
+
+- 改完一处 AI、只想看相关那一节的数字（比全量探针快一个数量级）：
+
+  ```bash
+  PROBE_ONLY=ai_probe AI_PROBE_SECTION=强牌的加注率 zsh tool/regression.sh --probes
+  ```
+
+  `PROBE_ONLY` 只跑名字含这个子串的探针文件；`AI_PROBE_SECTION` 让
+  `tool/ai_probe.dart` 只跑标题含这个子串的段落（其余段落**连模拟都不跑**，
+  不是只把打印关掉）——用例门禁照跑，整条命令从 20 秒变 9 秒，其中探针那一段
+  从 42 秒变 1 秒（门禁那 7 秒照跑，省不掉）。关键字没命中任何段落时会提示。
 
 - 改哪条就试哪条（编辑循环里最省时间；它只证明这一条过得去，不是回归门禁）：
 

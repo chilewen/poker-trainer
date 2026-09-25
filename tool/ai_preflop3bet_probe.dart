@@ -27,6 +27,7 @@ List<Card> cs(String s) => s.split(' ').map(Card.parse).toList();
   AiStyle style = AiStyle.tightAggressive,
   int stack = 10000,
   int seeds = 300,
+  int callers = 0, // 英雄 3bet 之后，小盲/大盲里有几家先冷跟进来
 }) {
   final facing = <String, int>{};
   final openSizes = <int>[];
@@ -69,6 +70,7 @@ List<Card> cs(String s) => s.split(' ').map(Card.parse).toList();
     var guard = 0;
     var opened = false;
     var done = false;
+    var coldUsed = 0;
     while (!g.handOver && guard++ < 300) {
       final p = g.pendingAction();
       final legal = p.actions;
@@ -103,6 +105,18 @@ List<Card> cs(String s) => s.split(' ').map(Card.parse).toList();
         if (done) break;
         continue;
       }
+      // 小盲/大盲按 [callers] 冷跟 3bet：这样开池的人就是「关着门、池里
+      // 还有别人陪着」——用来量「多路底池该不该跟得比单挑宽」。
+      final isBlind = p.player.id == ids[0] || p.player.id == ids[1];
+      if (isBlind &&
+          coldUsed < callers &&
+          facingBet &&
+          g.street == Street.preflop &&
+          legal.any((a) => a.type == ActionType.call)) {
+        coldUsed++;
+        g.apply(p.player.id, ActionType.call);
+        continue;
+      }
       // 其余 AI 一律弃牌，把局面干净地喂到英雄/目标面前。
       g.apply(p.player.id,
           legal.any((a) => a.type == ActionType.fold)
@@ -129,5 +143,39 @@ void main() {
       print('  ${hole.padRight(8)} 开池 ${avg.toString().padLeft(4)}  3bet ${(sb / 100).toStringAsFixed(1)}bb  n=${r.n.toString().padLeft(3)}  $parts');
     }
     print('');
+  }
+
+  // 第二节：同一个 3bet 尺度下，池里几家先冷跟进来对开池方的跟注率有什么影响。
+  // 真人被 3bet 之后，只要池里有人陪着进池（关门、价格便宜、隐含赔率好），
+  // 投机牌跟得明显比单挑宽；以前这一档完全不看人数，两种情况逐格相同。
+  print('== 池里几家冷跟，对「面对 3bet 跟不跟」的影响（${seatLabel[rel]}开池，英雄按钮位 3bet 到 9bb）==');
+  for (final hole in ['2h 2d', '5h 5d', '7h 7d', '9h 8h', 'Ah Qd', 'Kh Qh']) {
+    final parts = <String>[];
+    for (final cc in [0, 1, 2]) {
+      final r = probe(hole: hole, rel: rel, threeBet: 900, callers: cc);
+      final f = r.facing['弃牌'] ?? 0;
+      final c = r.facing['跟注'] ?? 0;
+      final ra = r.facing['加注'] ?? 0;
+      parts.add('冷跟$cc: 弃${_pct(f, r.n)} 跟${_pct(c, r.n)} 加${_pct(ra, r.n)}');
+    }
+    print('  ${hole.padRight(8)} ${parts.join('   ')}');
+  }
+
+  // 第三节：「便宜 3bet」那道门槛附近的坡度。
+  //
+  // 便宜档（任何对子都买三条、同花 A / 同花连张全上、KQo 也跟）和正常档
+  // （99+/ATs+/AQo）之间的跟注率差得很远，所以原来把边界写成
+  // `<=5.5bb 或者 <=2.2 倍开池` 的硬条件。可开池尺度本身是混合的，同一个
+  // 3bet 到 620 撞上不同开池就是 1.6~2.6 倍——边界两边于是成了两个世界：
+  // 同一手 KQo 对着 620 跟 82%、对着 640 跟 37%，只差 20 个筹码。
+  // 这一节就是盯这条坡度：边界附近每一步都该在动，没有哪一步掉几十个点。
+  print('== 「便宜 3bet」边界附近的跟注率（${seatLabel[rel]}开池）==');
+  for (final sb in [470, 560, 620, 660, 700, 800]) {
+    final parts = <String>[];
+    for (final hole in ['Kh Qs', 'Jh 10h', '9h 8h']) {
+      final r = probe(hole: hole, rel: rel, threeBet: sb, seeds: 400);
+      parts.add('${hole.replaceAll(' ', '')} 跟${_pct(r.facing['跟注'] ?? 0, r.n)}');
+    }
+    print('  3bet ${(sb / 100).toStringAsFixed(1)}bb   ${parts.join('   ')}');
   }
 }

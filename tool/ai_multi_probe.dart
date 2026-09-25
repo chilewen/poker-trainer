@@ -9,6 +9,10 @@
 //      下多大。以前强牌档的四条过牌档全挂着 !multiway，翻牌被过牌到在
 //      2/3/4/5 人池里都是 100% 下注，尺度还随人数往上抬——这一格就是用来
 //      盯「过牌到我 = 一定下注」这种机器味的。
+//   C. 河牌大注：英雄按倍数下注、中间的人全跟，看 AI 收不收着弃。下注尺度
+//      要是按「我们决策时的池」算，中间那几家的跟注钱会把同一个 1.5 倍池
+//      的重注摊薄成小注（三人池只剩 0.375 倍池），河牌挑着弃那一档整条失效
+//      ——改之前顶对顶踢在三人池只弃 4%、还反过来加注。
 // ignore_for_file: avoid_print
 import 'dart:math';
 
@@ -125,6 +129,21 @@ List<Card> cs(String s) => s.split(' ').map(Card.parse).toList();
       final legal = p.actions;
       final facing = g.currentBet > p.player.streetBet;
       if (p.player.id == 'ai') {
+        // 翻前只让 AI 补齐，不让它自己决定。
+        //
+        // 这一节要量的是「翻后没人下注时 AI 怎么打」，可 AI 在按钮面对
+        // 溜入者时会把不少牌直接扔掉（实测 5 人池拿 87o 弃 100%、4 人池
+        // 弃 79%），于是 4 人池那一格只剩 64 手、5 人池直接 0 手——打出来
+        // 的「下注 0%」根本没有样本，是探针自己在骗人。翻前补不补齐不是
+        // 这一节的问题（那是翻前范围那一节的事），所以这里统一按跟注走，
+        // 保证每个格子都是同一个翻后场景：所有人过牌到按钮。
+        if (g.street == Street.preflop) {
+          g.apply('ai',
+              legal.any((a) => a.type == ActionType.call)
+                  ? ActionType.call
+                  : ActionType.check);
+          continue;
+        }
         final d = ai.decide(g, p.player);
         if (g.street == street && !facing) {
           n++;
@@ -156,6 +175,82 @@ List<Card> cs(String s) => s.split(' ').map(Card.parse).toList();
   );
 }
 
+/// 河牌大注：hero 按 [frac] 倍池先下注、中间的人全跟，记录 AI 的应对。
+///
+/// 专门盯「下注尺度要看**对手出手那一刻的池**」这条：分母里不扣掉中间那几家
+/// 跟注的钱，同一个 1.5 倍池的重注会被摊薄成小注，靠尺度说话的那几档（河牌
+/// 挑着弃、不拿一对反加）整条失效。
+({double raise, double call, double fold, int n}) probeRiverFacing({
+  required String hole,
+  required String board,
+  required int callers,
+  required double frac,
+  AiStyle style = AiStyle.tightAggressive,
+  int seeds = 300,
+}) {
+  var raise = 0, call = 0, fold = 0, n = 0;
+  for (var seed = 0; seed < probeSeeds(seeds); seed++) {
+    final rnd = Random(seed);
+    final g = GameEngine(random: rnd)..addPlayer('ai', 'AI');
+    final ai = AiPlayer(style, random: rnd);
+    g.addPlayer('hero', '我');
+    for (var i = 0; i < callers; i++) {
+      g.addPlayer('c$i', 'C$i');
+    }
+    g.startHand(
+      holeOverride: {'ai': cs(hole), 'hero': cs('3h 2c')},
+      boardOverride: cs(board),
+    );
+    var guard = 0;
+    while (!g.handOver && guard++ < 300) {
+      final p = g.pendingAction();
+      final legal = p.actions;
+      final facing = g.currentBet > p.player.streetBet;
+      if (p.player.id == 'ai') {
+        // 前面的街一律过牌：把河牌做成「前面没人开火、这条街突然砸出来」
+        // 那条线（也是这些档最容易被误读的地方）。
+        if (g.street != Street.river) {
+          g.apply('ai', legal.any((a) => a.type == ActionType.check)
+              ? ActionType.check
+              : ActionType.call);
+          continue;
+        }
+        final d = ai.decide(g, p.player);
+        if (!facing) break; // 英雄没下注的手不算样本
+        n++;
+        if (d.type == ActionType.raise) {
+          raise++;
+        } else if (d.type == ActionType.call) {
+          call++;
+        } else {
+          fold++;
+        }
+        break;
+      }
+      if (p.player.id == 'hero' &&
+          g.street == Street.river &&
+          !facing &&
+          legal.any((a) => a.type == ActionType.bet)) {
+        final la = legal.firstWhere((a) => a.type == ActionType.bet);
+        g.apply(
+            'hero',
+            ActionType.bet,
+            amount: (p.player.streetBet + (g.potTotal() * frac).round())
+                .clamp(la.minAmount, la.maxAmount));
+        continue;
+      }
+      final want = facing ? ActionType.call : ActionType.check;
+      g.apply(p.player.id, legal.any((a) => a.type == want) ? want : legal.first.type);
+    }
+  }
+  return (
+    raise: n == 0 ? 0 : raise / n,
+    call: n == 0 ? 0 : call / n,
+    fold: n == 0 ? 0 : fold / n,
+    n: n,
+  );
+}
+
 String pct(double v) => '${(100 * v).round()}%';
 
 void main() {
@@ -177,6 +272,9 @@ void main() {
 
   print('');
   print('== B. 所有人都过牌到 AI（AI 在按钮）==');
+  // 翻前一律让 AI 补齐（见 [probeCheckedTo] 里的说明），量的是「所有人都
+  // 过牌到按钮，AI 下不下注」；每格都打样本数 n，n 太小的时候别照数字下结论。
+  //
   // 牌面写成完整五张：转牌/河牌那两行要按 take(3)/take(4) 截，只写三张的话
   // 后面两条街会从牌堆里随机发，量出来的就不是同一张牌面了。
   final checkHands = <({String name, String hole, String board})>[
@@ -194,9 +292,34 @@ void main() {
         final r = probeCheckedTo(
             hole: h.hole, board: h.board, callers: callers, street: street);
         parts.add('${callers + 2}人 下注 ${pct(r.bet)}'
-            '(~${r.avgFrac.toStringAsFixed(2)}池)');
+            '(~${r.avgFrac.toStringAsFixed(2)}池) n=${r.n}');
       }
       print('${h.name.padRight(24)} ${parts.join('  |  ')}');
+    }
+  }
+
+  print('');
+  print('== C. 河牌重注：人越多越不该拿一对接 ==');
+  // 牌面写成完整五张：截到河牌才是同一张牌面。
+  final riverHands = <({String name, String hole, String board})>[
+    (name: '顶对顶踢 AQ on Q7259', hole: 'Ah Qd', board: 'Qh 7d 2c 5h 9s'),
+    (name: '第二对 87 on K8359', hole: '8h 7s', board: 'Kh 8d 3c 5h 9s'),
+  ];
+  for (final frac in [1.0, 1.5]) {
+    for (final h in riverHands) {
+      final parts = <String>[];
+      for (final callers in [0, 1, 2]) {
+        final r = probeRiverFacing(
+            hole: h.hole, board: h.board, callers: callers, frac: frac);
+        if (r.n == 0) {
+          parts.add('${callers + 2}人 n=0');
+          continue;
+        }
+        parts.add('${callers + 2}人 弃 ${pct(r.fold).padLeft(3)}'
+            '  跟 ${pct(r.call).padLeft(3)}  加 ${pct(r.raise).padLeft(3)}');
+      }
+      print('下注 ${frac.toStringAsFixed(1)} 池  ${h.name.padRight(20)} '
+          '${parts.join('  |  ')}');
     }
   }
 }

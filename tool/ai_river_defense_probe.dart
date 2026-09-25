@@ -9,6 +9,15 @@
 // b/(p+b)，他拿任意两张牌开火就是赚的。所以把整体弃牌率和这条保本线并排
 // 放出来——高出来的那部分，就是能被「任意两张」直接兑现的漏洞。
 //
+// 「保本弃牌率」和「跟注需要的胜率」是两个数，别搞混（差得还不少）：
+//   * 保本弃牌率 b/(p+b)：他押 b 去赢 p，我们弃得比这个多他就靠诈唬白赚。
+//     0.5 倍池 = 0.5/1.5 = 33%，1 倍池 = 50%——**这才是判据**；
+//   * 跟注需要的胜率 b/(p+2b)：我们花 b 去赢 p+2b 的最终底池，也就是
+//     底池赔率。0.5 倍池 = 25%，1 倍池 = 33%。
+// 这段代码一度把后者当成判据印出来（`toCall/(pot+toCall)`，而 pot 是**含**
+// 对手那一注的池），等于把标准放宽了 8~17 个点：拿任意两张开火到底赚不赚，
+// 要看的是前者。下面的 `保本线` 现在就是前者。
+//
 // 但保本线不是硬指标，它默认对手是个「只要没人下注就一定开火」的疯子。
 // 真人不会这么打，我们对真人的范围也是按「连开三枪 = 真东西更多」收窄的，
 // 所以下面三种情况刻意让开、Star 不用管：
@@ -22,7 +31,11 @@
 // 这张表用来看「是哪一条街把弱牌放进了河牌」——只有小注那档被白抢，才值得
 // 去动前两条街；如果弱牌在前两条街已经被筛得很干净，那问题就不在范围构造上。
 // ignore_for_file: avoid_print
+import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
+
+import 'probe_scale.dart';
 
 import 'package:poker_trainer/engine/card.dart';
 import 'package:poker_trainer/engine/game.dart';
@@ -36,6 +49,7 @@ bool _facing(GameEngine g, PlayerState p) => g.currentBet > p.streetBet;
 
 class _Stats {
   int fold = 0, call = 0, raised = 0, total = 0, potSum = 0;
+  /// 保本弃牌率之和（见文件头：b/(p+b)，b = 他这一注，p = 含他这一注的池）。
   double needSum = 0, fracSum = 0;
   final Map<String, int> tierAll = {};
   final Map<String, int> tierFold = {};
@@ -90,7 +104,10 @@ _Stats _run(String board, double riverFrac, int seeds) {
           final d = ai.decide(g, p.player);
           st.total++;
           st.potSum += pot;
-          st.needSum += toCall / (pot + toCall);
+          // 保本弃牌率 = 他押的这一注 / 他赢得到的那个池（含他这一注）。
+          // 分母用 pot（含注）而不是 pot - toCall：他诈唬成功赢的是
+          // 「下注前的池 + 我们弃掉的那一份认输」，也就是 pot。
+          st.needSum += toCall / pot;
           st.fracSum += toCall / (pot - toCall);
           switch (d.type) {
             case ActionType.fold:
@@ -156,20 +173,45 @@ _Stats _run(String board, double riverFrac, int seeds) {
   return st;
 }
 
-void main(List<String> args) {
-  final seeds = args.isNotEmpty ? int.parse(args[0]) : 600;
+Future<void> main(List<String> args) async {
+  // 默认手数必须够出结论：这条线（翻牌跟一枪 + 转牌再跟一枪 + 河牌面对
+  // 开火）只占所有牌局的 0.7% 上下，600 手只剩 n=5 个样本，那一栏的百分数
+  // 是纯噪声——「★可被任意两张白抢」这个判据以前从来没真正生效过。6000 手
+  // 每格的 n 在 20~43 上下（干燥/湿润两面刚过 40 的门槛，配对面还差一点）。
+  // 要更稳的数字再加参数跑：
+  //   dart tool/ai_river_defense_probe.dart 20000
+  final seeds = probeSeeds(args.isNotEmpty ? int.parse(args[0]) : 6000);
   final scenarios = <String, String>{
     '干燥 Kd8c3h5s9d': 'Kd 8c 3h 5s 9d',
     '湿润 QhJh4c9h2d': 'Qh Jh 4c 9h 2d',
     '配对面 Ah8h8c2d7s': 'Ah 8h 8c 2d 7s',
   };
-  const fracs = [0.5, 0.66, 1.0, 1.5];
+  // 尺度只列「判据管得着」的那几档：文档里明确放过的（3/4 池往上、
+  // 一个满池、超池）不出结论，1.5 池那一栏以前就是拿来看「松到什么程度」
+  // 的参考值，去掉换来的是小注档（1/4 池）能进表——那一档才是这套判据
+  // 真正盯的东西。
+  const fracs = [0.25, 0.5, 0.66, 1.0];
   const funnelFrac = 0.66; // 「沿街筛选」那张表用哪个尺度看
+
+  // 12 个格子（3 牌面 × 4 尺度）各跑各的随机序列、互不影响，所以可以并行：
+  // 省不了账面 CPU，但墙钟从 20 秒压到 5 秒上下。默认 4 个 worker——门禁里
+  // 这一条是跟 ai_probe 的 4 片一起跑的，开多了只是互相抢核。单独调这一条
+  // 想要更快可以设 AI_RIVER_WORKERS=8（10 核机器上实测 6 秒 → 3 秒）。
+  final workers =
+      int.tryParse(Platform.environment['AI_RIVER_WORKERS'] ?? '') ??
+          min(4, Platform.numberOfProcessors);
+  final cells = <(String, double)>[
+    for (final sc in scenarios.entries)
+      for (final frac in fracs) (sc.value, frac),
+  ];
+  final stats = await _runCells(cells, seeds, workers);
+
+  var next = 0;
   for (final sc in scenarios.entries) {
     print('== ${sc.key} ==');
     _Stats? funnel;
     for (final frac in fracs) {
-      final st = _run(sc.value, frac, seeds);
+      final st = stats[next++];
       if (frac == funnelFrac) funnel = st;
       if (st.total == 0) {
         print('  ${frac.toStringAsFixed(2)} 池  （无样本）');
@@ -202,6 +244,28 @@ void main(List<String> args) {
     if (funnel != null) _printFunnel(funnel);
     print('');
   }
+}
+
+/// 把 [cells] 里的格子按 [workers] 个并发跑完，返回值跟串行逐格跑**逐字**一样
+/// （每个格子自己的种子序列固定，只是换了个线程跑）。
+///
+/// 用 Isolate.run 而不是 Fork：每个格子的工作是一个纯函数 + 一个可发送的
+/// 结果对象，没有共享状态，不需要长期存活的 isolate。
+Future<List<_Stats>> _runCells(
+    List<(String, double)> cells, int seeds, int workers) async {
+  final out = List<_Stats?>.filled(cells.length, null);
+  var next = 0;
+  Future<void> worker() async {
+    while (true) {
+      final i = next++;
+      if (i >= cells.length) return;
+      final cell = cells[i];
+      out[i] = await Isolate.run(() => _run(cell.$1, cell.$2, seeds));
+    }
+  }
+
+  await Future.wait([for (var i = 0; i < workers; i++) worker()]);
+  return [for (final st in out) st!];
 }
 
 /// 把「翻牌 → 转牌 → 河牌」这条线上 AI 手里的档位构成和被筛掉的数量打出来。

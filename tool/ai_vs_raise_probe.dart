@@ -146,6 +146,25 @@ void main() {
     print('');
   }
 
+  // 加注幅度扫描：`facingRaise` 那条「加注惩罚」以前写成一个布尔
+  // （`betSizeRel <= 0.6 ? 1.65 : 1.85`，见 AiPlayer 弱成牌那一档），
+  // 而 2.2 倍 / 3.5 倍两档正好骑在这道门槛两侧——探针只采这两点，
+  // 中间有没有悬崖看不出来。这一节把幅度从最小加注一路扫到 4 倍，
+  // 跟别的节一样盯「中间没有几十个点的跳变」。
+  print('== 加注幅度扫描：从最小加注到 4 倍，中间不许有悬崖 ==');
+  for (final h in <({String name, String hole, String board})>[
+    (name: '第二对 87', hole: '8h 7s', board: 'Kh 8d 3c'),
+    (name: '顶对弱踢 A8', hole: 'Ah 8d', board: 'As 7c 2d'),
+  ]) {
+    for (final mult in [1.8, 2.0, 2.2, 2.4, 2.6, 2.8, 3.0, 3.2, 3.5, 4.0]) {
+      final r = vsRaise(h.hole, h.board, mult);
+      print('${'${h.name} 加注到 ${mult}x'.padRight(26)}'
+          '弃 ${(100 * r.fold).round()}%  跟 ${(100 * r.call).round()}%  '
+          '再加 ${(100 * r.raise).round()}%');
+    }
+    print('');
+  }
+
   print('== 风格对照（翻牌，加注到 2.2 倍）==');
   for (final style in AiStyle.values) {
     final strong = vsRaise('Ah Kd', 'As 7c 2d', 2.2, style: style);

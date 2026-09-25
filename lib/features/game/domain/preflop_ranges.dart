@@ -579,6 +579,28 @@ class PreflopRanges {
     offsuitAce: 12, // AQo（KQo 留给有位置）
   );
 
+  /// 多路底池里跟 3bet 的范围：加注之外，已经有别家先跟注进了池。
+  ///
+  /// 这时候我们是**关着门**看翻牌（后面只剩盲注位），价格便宜、池里还有
+  /// 别人陪着进池——投机牌（小对子买三条、同花连张）的隐含赔率比单挑好
+  /// 一大截，真人跟得明显比单挑宽。以前这一档完全不看人数：探针实测
+  /// 22~88、98s 在单挑和四路底池里一模一样（都是弃 100%），开池方被 3bet
+  /// 之后池里几家跟进完全不影响它的决定。
+  ///
+  /// 只放投机的那一半：99+/ATs+/AQo 这些有摊牌价值的本来就在 [callThreeBetOop]
+  /// 里，不该因为人多就再放宽（多人池里它们反而更容易被支配）。
+  static const PreflopRange callThreeBetMultiway = PreflopRange(
+    pair: 9, // 99+
+    // 22~88 全收：上界写成 6 会在 66/77 之间留一个洞——66 跟、77 弃，
+    // 越好的对子反而越不敢跟，正好跟「关门买三条」的直觉反着来。
+    smallPair: 8,
+    suitedAce: 11, // ATs+
+    suitedBroadway: 11, // KQs / QJs / KJs
+    offsuitBroadway: 13, // AKo
+    offsuitAce: 12, // AQo
+    suitedConnector: 9, // T9s / 98s：多路池里能便宜兑现
+  );
+
   /// 面对「小 3bet」（最小加注到 4~5bb 那种）的跟注范围，有位置版本。
   ///
   /// 小 3bet 给的价格好到离谱：开 3bb 被最小加注到 4.5bb 时，跟 1.5bb 就能

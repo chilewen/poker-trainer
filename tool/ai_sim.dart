@@ -37,6 +37,16 @@ class _Stats {
   final Map<AiStyle, int> faceOopCall = {};
   final Map<AiStyle, int> faceIpFold = {};
   final Map<AiStyle, int> faceOopFold = {};
+  // 上面那四格把「面对下注」和「面对加注」混在一起，看不出跟注站最标志性的
+  // 那一面：一手小对陪你三条街的黏是**对着下注**的，对面加注出来连他们也会
+  // 收手（见 ai_player 里 callSlack 的说明）。所以再拆出一档：对面这条街已经
+  // 有人加注过的那些决策。剩下的（faceIp/faceOop 减去这档）就是纯面对下注。
+  final Map<AiStyle, int> faceIpRaise = {};
+  final Map<AiStyle, int> faceOopRaise = {};
+  final Map<AiStyle, int> faceIpRaiseCall = {};
+  final Map<AiStyle, int> faceOopRaiseCall = {};
+  final Map<AiStyle, int> faceIpRaiseFold = {};
+  final Map<AiStyle, int> faceOopRaiseFold = {};
 
   void bump(Map<AiStyle, int> m, AiStyle s) => m[s] = (m[s] ?? 0) + 1;
 
@@ -115,6 +125,7 @@ void main(List<String> args) {
   var biggestPot = 0;
   var raiseWars = 0;
   var sawFlopSum = 0;
+  var flopDealt = 0; // 真发到翻牌的牌局数
   var allInHands = 0;
   final endStreet = <Street, int>{};
   final samples = <String>[];
@@ -127,21 +138,32 @@ void main(List<String> args) {
     }
     g.startHand();
     var guard = 0;
+    // 这条街到现在为止有没有人加过注（用来把「面对下注」和「面对加注」分开）。
+    final raiseSeen = <Street, bool>{};
     while (!g.handOver && guard++ < 600) {
       final p = g.pendingAction();
       final facingBet =
           g.street != Street.preflop && g.currentBet > p.player.streetBet;
+      final vsRaise = facingBet && (raiseSeen[g.street] ?? false);
       final styleNow = styles[p.player.id]!;
       final ip = facingBet ? _inPosition(g, p.player) : false;
       final d = ais[p.player.id]!.decide(g, p.player);
       if (facingBet) {
         st.bump(ip ? st.faceIp : st.faceOop, styleNow);
+        if (vsRaise) st.bump(ip ? st.faceIpRaise : st.faceOopRaise, styleNow);
         if (d.type == ActionType.call) {
           st.bump(ip ? st.faceIpCall : st.faceOopCall, styleNow);
+          if (vsRaise) {
+            st.bump(ip ? st.faceIpRaiseCall : st.faceOopRaiseCall, styleNow);
+          }
         } else if (d.type == ActionType.fold) {
           st.bump(ip ? st.faceIpFold : st.faceOopFold, styleNow);
+          if (vsRaise) {
+            st.bump(ip ? st.faceIpRaiseFold : st.faceOopRaiseFold, styleNow);
+          }
         }
       }
+      if (d.type == ActionType.raise) raiseSeen[g.street] = true;
       g.apply(p.player.id, d.type, amount: d.amountTo);
     }
     final hand = g.lastHand!;
@@ -153,12 +175,20 @@ void main(List<String> args) {
     if (g.players.any((p) => p.allIn)) allInHands++;
 
     // 看翻牌人数：翻前结束还没弃牌的人数。
+    //
+    // 翻前就结束的牌局（所有人弃到盲注）**没有翻牌可看**，不能算成「1 个人
+    // 看了翻牌」——以前直接拿 `人数 - 翻前弃牌数` 平均，这些牌局各自贡献一个
+    // 1，把平均值从 2.6 压到 2.2，读起来像是牌桌偏紧。分开报：一个「只看
+    // 真发到翻牌的那些牌局」的平均（玩家在牌桌上实际感受到的「几个人看
+    // 翻牌」），另一个是「所有牌局摊下来」的口径（跟线上统计的 Saw Flop
+    // 对齐，翻前结束的牌局记 0）。
     final foldedPre = <String>{};
     for (final a in hand.actions) {
       if (a.street != Street.preflop) break;
       if (a.type == ActionType.fold) foldedPre.add(a.actorId);
     }
-    final flopPlayers = g.players.length - foldedPre.length;
+    final flopPlayers =
+        hand.board.isEmpty ? 0 : g.players.length - foldedPre.length;
 
     // ---- 回看这手牌：统计每个动作背后的牌力 ----
     var preflopAggressor = '';
@@ -230,6 +260,7 @@ void main(List<String> args) {
       }
     }
     sawFlopSum += flopPlayers;
+    if (hand.board.isNotEmpty) flopDealt++;
     for (final e in raiseCount.entries) {
       if (e.value >= 3) raiseWars++;
     }
@@ -270,7 +301,10 @@ void main(List<String> args) {
   }
 
   print('=== 电脑玩家 $total 手（9 人桌，50/100） ===');
-  print('平均看翻牌人数: ${(sawFlopSum / total).toStringAsFixed(2)}');
+  final perFlop = flopDealt == 0 ? 0.0 : sawFlopSum / flopDealt;
+  print('平均看翻牌人数: ${(sawFlopSum / total).toStringAsFixed(2)}'
+      '（全部牌局摊平）  |  发到翻牌的牌局 ${(100 * flopDealt / total).round()}%，'
+      '其中平均 ${perFlop.toStringAsFixed(2)} 人看翻牌');
   print('打到摊牌: $showdowns (${(100 * showdowns / total).toStringAsFixed(0)}%)');
   print('有人全下的牌局: $allInHands');
   print('平均底池: ${potSum ~/ total}  最大底池: $biggestPot');
@@ -291,6 +325,20 @@ void main(List<String> args) {
   print(st.countLine('面对注(没位置)', st.faceOop));
   print(st.pctLine('  其中 跟注', st.faceOopCall, st.faceOop));
   print(st.pctLine('  其中 弃牌', st.faceOopFold, st.faceOop));
+  // 拆出「对面这条街已经加过注」那一档：faceXxx 减去它就是纯面对下注。
+  Map<AiStyle, int> minus(Map<AiStyle, int> a, Map<AiStyle, int> b) =>
+      {for (final s in AiStyle.values) s: (a[s] ?? 0) - (b[s] ?? 0)};
+  void faceSplit(String label, Map<AiStyle, int> total, Map<AiStyle, int> raiseN,
+      Map<AiStyle, int> foldN, Map<AiStyle, int> raiseFoldN) {
+    print(st.pctLine('面对下注$label 弃牌', minus(foldN, raiseFoldN),
+        minus(total, raiseN)));
+    print(st.pctLine('面对加注$label 弃牌', raiseFoldN, raiseN));
+  }
+
+  faceSplit('(有位置)', st.faceIp, st.faceIpRaise, st.faceIpFold,
+      st.faceIpRaiseFold);
+  faceSplit('(没位置)', st.faceOop, st.faceOopRaise, st.faceOopFold,
+      st.faceOopRaiseFold);
   print(st.pctLine('翻牌 c-bet 率', st.cbets, st.cbetChances));
   print(st.countLine('翻牌听牌次数', st.flopDraws));
   print(st.pctLine('翻牌 听牌开火率', st.flopDrawAggro, st.flopDraws));

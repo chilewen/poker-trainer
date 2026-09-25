@@ -21,7 +21,8 @@ int probeSeeds(int seeds) => probeSeedScale >= 1
 /// 「这一格谁来跑」，不改任何一格的结果：几片各自的输出按顺序拼起来，和整跑
 /// 逐例一致，只是顺序按分片重排。
 ///
-/// tool/regression.sh 用它把最重的 ai_probe 拆成 4 个进程并行（19s → 6s）。
+/// tool/regression.sh 用它把最重的 ai_probe 拆成 4 个进程并行
+/// （整跑 42s → 墙钟 16s 上下，切口那一片决定实际墙钟）。
 /// 默认不设 = 整跑，行为跟以前完全一样。
 final String _probeShard = Platform.environment['PROBE_SHARD'] ?? '';
 
