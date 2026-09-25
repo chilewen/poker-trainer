@@ -11,7 +11,7 @@ A new Flutter project.
   ```
 
   约 6 秒。用例默认走 `tool/sharded_test.sh`：先编译一次，再按用例拆 5 片并行跑。
-  `flutter test` 只按**文件**并行，`test/engine_test.dart` 里那 67 条用例它拆不开，
+  `flutter test` 只按**文件**并行，`test/engine_test.dart` 里那 75 条用例它拆不开，
   裸跑要 18 秒上下；而且源码没动时这里连编译都省掉，再跑一遍 5 秒以内。
 
 - 只想确认「有没有跑不起来 / 结构性错」：
@@ -30,11 +30,19 @@ A new Flutter project.
   zsh tool/regression.sh --probes
   ```
 
-- 想跑单条线：
+  在门禁之外再跑 6 个诊断探针（`tool/ai_*_probe.dart`），它们只打印比例、从不
+  让回归失败：加注战、多人池、听牌、翻前 3bet、再加注，以及
+  `tool/ai_river_defense_probe.dart`（河牌被连开三枪时的弃牌率 vs MDF 保本线，
+  另外带一张「翻牌/转牌各自筛掉多少弱牌」的沿街表）。约 12 秒。
+
+- 改哪条就试哪条（编辑循环里最省时间；它只证明这一条过得去，不是回归门禁）：
 
   ```bash
-  flutter test test/engine_test.dart --plain-name 河牌
+  TEST_ONLY=转牌重注 zsh tool/sharded_test.sh test/engine_test.dart
   ```
+
+  只跑名字里含这个子串的用例。全量回归的墙钟下限是「编译 2.5 秒 + 重放 5 秒」，
+  单条基本只花编译那 2.5 秒；源码没动再跑一遍是 1 秒以内。改完记得跑全量那遍。
 
 ## iOS 打包 / 装到自己手机上
 

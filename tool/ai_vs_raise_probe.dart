@@ -102,6 +102,11 @@ Row vsRaise(
 }
 
 void main() {
+  const streetName = {
+    Street.flop: '翻牌',
+    Street.turn: '转牌',
+    Street.river: '河牌',
+  };
   final hands = <({String name, String hole, String board})>[
     (name: '三条 99 on 9s6h2d', hole: '9h 9d', board: '9s 6h 2d'),
     (name: '超对 99 on 7s4c2d', hole: '9h 9d', board: '7s 4c 2d'),
@@ -113,12 +118,25 @@ void main() {
     (name: '卡顺 76 on 9d5c2s', hole: '7h 6h', board: '9d 5c 2s'),
     (name: '空气 87 on AsKdQc', hole: '8h 7h', board: 'As Kd Qc'),
   ];
+  // 河牌是「我下注被他加注」最该收手的地方：加注是最后一条街最实的信号，
+  // 一对牌被抬起来还一路跟到底，等于对手随便两张牌加一下就能白拿底池。
+  // 同一个牌力的名字沿用上面的，只是把牌面补满五张。
+  final riverHands = <({String name, String hole, String board})>[
+    (name: '三条 99 on 9s6h2d3s', hole: '9h 9d', board: '9s 6h 2d 8c 3s'),
+    (name: '超对 99 on 7s4h2d5h3c', hole: '9h 9d', board: '7s 4h 2d 5h 3c'),
+    (name: '顶对顶踢 AK on As7c2d5h9s', hole: 'Ah Kd', board: 'As 7c 2d 5h 9s'),
+    (name: '顶对弱踢 A8 on As7c2d5h9s', hole: 'Ah 8d', board: 'As 7c 2d 5h 9s'),
+    (name: '第二对 87 on Kh8d3c5h9s', hole: '8h 7s', board: 'Kh 8d 3c 5h 9s'),
+    (name: '底对 43 on Ks7d3c5h9s', hole: '4h 3h', board: 'Ks 7d 3c 5h 9s'),
+    (name: 'miss 花 AKs on Qd7d2c5h9s', hole: 'Ad Kd', board: 'Qd 7d 2c 5h 9s'),
+    (name: '空气 87 on AsKdQc5h9s', hole: '8h 7h', board: 'As Kd Qc 5h 9s'),
+  ];
 
-  for (final street in [Street.flop, Street.turn]) {
-    print('== ${street == Street.flop ? '翻牌' : '转牌'}圈：AI 下注 → 英雄加注 ==');
+  for (final street in [Street.flop, Street.turn, Street.river]) {
+    print('== ${streetName[street]}圈：AI 下注 → 英雄加注 ==');
     for (final mult in [2.2, 3.5]) {
       print('-- 加注到 $mult 倍 --');
-      for (final h in hands) {
+      for (final h in street == Street.river ? riverHands : hands) {
         final r = vsRaise(h.hole, h.board, mult, street: street);
         print('${h.name.padRight(24)} n=${r.n.toString().padLeft(3)}  '
             '弃 ${(100 * r.fold).round()}%  跟 ${(100 * r.call).round()}%  '

@@ -4,10 +4,10 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// 用例分片开关：`TEST_SHARD=k/n` 时本进程只跑「第 k 片」的用例。
 ///
-/// 给单体用例文件用的：`engine_test.dart` 有 67 条用例、其中 35 条要重放几百手
+/// 给单体用例文件用的：`engine_test.dart` 有 75 条用例、其中 35 条要重放几百手
 /// AI 牌局，占掉整套回归一半以上的墙钟，而 flutter test 只按**文件**并行、拆不开
 /// 它。用例之间没有任何共享状态（各自建引擎、各自的随机种子），所以分片只是换个
-/// 「谁来跑哪条」：跑到的用例跟整跑逐条一致（对拍过 67 条，无丢失无重复），任意
+/// 「谁来跑哪条」：跑到的用例跟整跑逐条一致（对拍过 75 条，无丢失无重复），任意
 /// 一片失败整体就失败。不设这个变量 = 整跑，行为跟以前完全一样。
 ///
 /// 想分片的用例文件：`import 'support/test_shard.dart';`，然后把 `test(` 换成
@@ -33,12 +33,21 @@ var _testIndex = 0;
 /// 一定真的跑过，跳过的会明确报成 skipped（输出里的 `~N`）。
 final bool _fast = Platform.environment['TEST_FAST'] == '1';
 
+/// 单条过滤：`TEST_ONLY=河牌` 时只注册名字里含这个子串的用例。
+///
+/// 用途是「改哪条就试哪条」：全量回归的墙钟下限是「编译 2.5 秒 + 重放 5 秒」，
+/// 而单条用例通常 1 秒内就出结果。设了它就不再分片（分片是为了摊全量），
+/// 只跑命中的那几条——所以它跟 TEST_FAST 一样，**不是**回归门禁，
+/// 只能用来确认「我改的这条是活的」，别拿它当「全部没坏」。
+final String _only = Platform.environment['TEST_ONLY'] ?? '';
+
 /// `test()` 的分片版本：不属于本片的用例直接不注册；不设 TEST_SHARD 时等价于
 /// `test()`。[fast] 标记「这条在快速档里也跑」——只有不需要重放牌局的结构性
 /// 用例（发牌、牌型评估、存档、标题）才该标它。
 void t(String name, dynamic Function() body, {bool fast = false}) {
   final index = _testIndex++;
-  final (shard, total) = _shard;
+  if (_only.isNotEmpty && !name.contains(_only)) return;
+  final (shard, total) = _only.isEmpty ? _shard : (-1, 1);
   if (_fast && !fast) {
     test(name, body, skip: '--fast 档只跑结构性冒烟用例');
     return;

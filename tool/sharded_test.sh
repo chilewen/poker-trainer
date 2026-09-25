@@ -4,9 +4,11 @@
 #   zsh tool/sharded_test.sh                        # 跑 test/*.dart
 #   zsh tool/sharded_test.sh test/engine_test.dart  # 只跑一个文件
 #   TEST_SHARDS=8 zsh tool/sharded_test.sh          # 拆几片（默认 5，1 = 不分片）
+#   TEST_ONLY=河牌 zsh tool/sharded_test.sh        # 只跑名字含「河牌」的用例（改哪条试哪条；
+#                                                 # 不分片，也不代表回归通过，只是这一条过得去）
 #   zsh tool/sharded_test.sh --verbose              # 连每片的完整输出一起打
 #
-# 为什么不直接用 flutter test：它只按**文件**并行。test/engine_test.dart 把 67 条
+# 为什么不直接用 flutter test：它只按**文件**并行。test/engine_test.dart 把 75 条
 # 用例塞在一个文件里，其中 30 多条要重放几百手完整的 AI 牌局，占掉整套回归一半以
 # 上的墙钟，而 flutter test 对这个文件完全用不上并行。这里改用 Flutter SDK 自带的
 # frontend_server + flutter_tester 直接跑：
@@ -15,7 +17,7 @@
 #      多个测试文件也会复用同一份缓存，所以「没改代码再跑一遍」几乎零成本）；
 #   2. 按用例拆片（靠 test/support/test_shard.dart 里的 TEST_SHARD=k/n）。用例之间
 #      没有任何共享状态，分片只换「谁跑哪条」，跑到的用例跟整跑逐条一致（对拍过
-#      67 条：无丢失无重复），任意一片失败整体就失败；
+#      75 条：无丢失无重复），任意一片失败整体就失败；
 #   3. 结果以「All tests passed!」汇总行为准——flutter_tester 有用例失败时自己也
 #      返回 0，照抄它的退出码等于把门禁废掉。
 #
@@ -94,6 +96,16 @@ compile_one() {   # compile_one <源文件> <dill>
     --output-dill $2 $1 > $2.compile.log 2>&1
 }
 
+# TEST_ONLY 打错字时别白等一次编译：先在源码里搜一遍这个子串。
+if [[ -n ${TEST_ONLY:-} ]]; then
+  hit=0
+  for f in $FILES; do grep -qF -- "$TEST_ONLY" $f && hit=1; done
+  if (( ! hit )); then
+    print -u2 "TEST_ONLY=「$TEST_ONLY」在这些文件里根本找不到——检查一下关键字（用例名是中文全角标点）。"
+    exit 1
+  fi
+fi
+
 mkdir -p $CACHE
 RUN=$CACHE/run.$$
 mkdir -p $RUN
@@ -154,6 +166,8 @@ for f in $FILES; do
   # 文件没有实现 TEST_SHARD，拆片只会让几片把同一批用例各跑一遍。
   n=$SHARDS
   grep -q "support/test_shard.dart" $f || n=1
+  # TEST_ONLY 已经把用例筛到个位数了，再拆片就是几片把同样那几条各跑一遍。
+  [[ -n ${TEST_ONLY:-} ]] && n=1
   if (( n <= 1 )); then
     tag=$name
     TAGS+=($tag); TAG_SRC[$tag]=$f; TAG_LOG[$tag]=$RUN/$tag.log
@@ -197,6 +211,10 @@ for tag in $TAGS; do
   sk=$(grep -aoE "~[0-9]+" $TAG_LOG[$tag] 2>/dev/null | tail -1 | tr -d "~")
   (( ${sk:-0} > skipped )) && skipped=${sk:-0}
 done
+if (( total == 0 )); then
+  print -u2 "注意：一条用例都没跑到（TEST_ONLY=${TEST_ONLY:-} 没命中任何用例名）——这不算回归通过。"
+  exit 1
+fi
 if (( skipped )); then
   print "全部通过（${#TAGS} 片，共 $total 条用例，跳过 $skipped 条，用时 ${SECONDS}s）"
 else

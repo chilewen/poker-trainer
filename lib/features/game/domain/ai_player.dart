@@ -919,6 +919,30 @@ class AiPlayer {
       return const AiDecision(ActionType.check);
     }
     if (read.tier == HandTier.strong) {
+      // 多人池里的控池档。
+      //
+      // 上面四条过牌档（翻牌没位置、转牌非空白牌、河牌、河牌超池）全都挂着
+      // !multiway，于是三人池以上强牌是「过牌到我 = 100% 下注」——探针实测
+      // 翻牌被过牌到，顶对顶踢/超对在 2/3/4/5 人池里都是 100% 下注，而且
+      // 尺度还随人数往上抬（0.63 → 0.78 倍池）。真人在五人湿面上拿一对不会
+      // 每手都开火：后面还坐着三家，两对/三条/听牌都在，被加注就得弃；
+      // 更要命的是我们的过牌范围从此清一色是没牌，一过牌对手拿任意两张牌
+      // 都能收走底池，而过牌-加注这条线永远轮不到我们。
+      //
+      // 收的频率跟着「人越多、牌面越湿、越靠后」走；底池已经很大（SPR ≤ 3）
+      // 或者对手爱弃牌时少收——那时候筹码该往里放。
+      if (multiway) {
+        var multiCheck = 0.10 * (spot.opponents - 1).clamp(0, 4) *
+            (0.55 + 1.1 * texture.wetness);
+        multiCheck *= switch (game.street) {
+          Street.flop => 1.0,
+          Street.turn => 0.65,
+          _ => 0.5,
+        };
+        if (spot.spr <= 3) multiCheck *= 0.5;
+        if (_villainFoldsALot(game, me)) multiCheck *= 0.6;
+        if (_roll(multiCheck)) return const AiDecision(ActionType.check);
+      }
       // 转牌发出的牌帮到跟注方时（高张 / 第三张同花 / 公对面，也就是
       // [_isBlankCard] 判不出空白牌的那些），真人会有一部分在这儿收手
       // 控池：顶对/超对再开一枪，被加注就得弃；过牌看河牌还能抓到对手
@@ -929,6 +953,20 @@ class AiPlayer {
           !multiway &&
           !_isBlankCard(game) &&
           _roll(spot.inPosition ? 0.35 : 0.22)) {
+        return const AiDecision(ActionType.check);
+      }
+      // 河牌也要留一档过牌。翻牌（没位置的强牌）和转牌（非空白牌）都已经
+      // 有这一档，只有河牌是漏的：探针实测「河牌顶对（无人下注）」下注
+      // 100%、过牌 0%。对手看到我们河牌一过牌就知道手里没东西，随便一枪
+      // 就能把底池收走；我们的强牌也永远只有「下注 → 被跟注」这一种结局，
+      // 对手的诈唬和薄价值没有机会自己送上门，过牌范围更是清一色空气。
+      // 发出来的牌越像帮到跟注方（第三张同花 / 公对面 / 高张，也就是
+      // [_isBlankCard] 判不出的那些），越该收手——那正是对手会过牌-加注
+      // 我们的地方。
+      if (river &&
+          !multiway &&
+          !_villainFoldsALot(game, me) &&
+          _roll(_isBlankCard(game) ? 0.12 : 0.26)) {
         return const AiDecision(ActionType.check);
       }
       // 河牌把「强牌」也混一点进超池里：以前超池清一色是怪兽牌，对手看到
@@ -1232,6 +1270,20 @@ class AiPlayer {
     final potOdds = Odds.potOdds(pot: spot.pot, toCall: spot.toCall);
     final bigBet = spot.betSizeRel >= 0.7;
     final smallBet = spot.betSizeRel <= 0.35;
+    // 河牌面对大注、手里还有筹码可加：这里不该加。这一档的强牌（顶对顶踢、
+    // 超对、同花面上的顺子/三条）在河牌是**抓诈唬**的牌，加注只会把对手的
+    // 诈唬打走、把能打败我们的牌请进来——探针里「连开三枪 + 超池」那一格
+    // 有一半牌局是这样推出去的。筹码真套进去（SPR ≤ 1）就不算加注了，那
+    // 时候加跟跟已经是一回事，照旧推。
+    //
+    // 转牌的超池同理（探针「连开两枪超池」那一格有 21% 是推出去的）：后面
+    // 只剩一条街，把筹码压进一条两极的线一样是「把诈唬吓跑、只留下更好的
+    // 牌」。只是尺度门槛要高一点——转牌 3/4 池左右的重注还能是价值注，
+    // 1.2 倍池往上才是真正的超池。
+    final noRaiseVsBigBet = bigBet &&
+        spot.spr > 1.0 &&
+        (game.street == Street.river ||
+            (game.street == Street.turn && spot.betSizeRel >= 1.2));
     final canRaise = spot.canRaise && spot.toCall < me.stack;
     // 我这条街先过了牌 → 现在的加注就是过牌-加注，频率要明显提上去。
     final checkRaise = spot.checkedThisStreet && canRaise;
@@ -1260,32 +1312,67 @@ class AiPlayer {
     // 本身就说明范围强得多），再叠一层会把「最小加注也不该交牌」那条线
     // 又打回去。
     final streetCost = (!facingRaise && game.street == Street.turn) ? 1.2 : 1.0;
-    // 河牌「最低防守」：拿的是一手真成牌（中等牌档）、面对的是一注（不是
-    // 加注）时，不许把它接近 100% 扔掉，按尺度给一个混合跟注下限——真人的
-    // 「算了，看一眼」就是这个东西。
+    // 河牌「最低防守」：手里有真成牌、面对的是一注（不是加注）时，不许把它
+    // 接近 100% 扔掉，按尺度给一个混合跟注下限——真人的「算了，看一眼」
+    // 就是这个东西。
     //
-    // 为什么必须有：tool/ai_river_defense_probe.dart 让对手拿**任意两张**
-    // 连开三枪，量 AI 在河牌第三枪上的弃牌率。改之前 AI 走到河牌的范围几乎
-    // 全是一对牌，而它对这一整片范围弃 87~100%，保本线（b/(p+b)，对手拿空气
-    // 开火不亏不赚的弃牌率）只有 25~38%——对手随便两张牌一路抡能白赢
-    // 40~70 个点。真人拿中等成牌在这种地方总要抽一部分来看，不会齐刷刷交牌。
+    // 为什么必须有：tool/ai_river_defense_probe.dart 让对手拿**任意两张**连开
+    // 三枪，量 AI 在河牌第三枪上的弃牌率。改之前 AI 弃 87~100%，保本线
+    // （b/(p+b)，对手拿空气开火不亏不赚的弃牌率）只有 25~38%——对手随便两张
+    // 牌一路抡能白赢 40~70 个点。真人拿成牌在这种地方总要抽一部分来看。
     //
-    // 只给**中等牌档**兜底，不给弱成牌（底对/第二对/顶对弱踢）兜底：
-    // 弱成牌是「抓诈唬」的主力，但它对面值多少是要读线的——对手连开三枪的
-    // 大注、或者一个满池，本来就是该让开的线（见「河牌底对：小注要按赔率跟，
-    // 大注照弃」「抓诈唬：对手前面都过牌后砸出来的大注，第二对也敢接」两条
-    // 用例）。给弱成牌也发一个固定下限，等于把「注越大越该尊重」这条线整个
-    // 抹平：探针里底对面对一个满池会从弃 90% 掉到 70%，面对超池反而不弃了。
-    // 中等牌档不一样，它上面本来就压着顶对/两对/三条，是这条街上靠后的
-    // 防守厚度，弃光它才是真的把底池白送。
-    //
-    // 下限随尺度递减：注越大越可能是真牌（也不能把「注越大抓得越少」压平），
-    // 所以 1/2 池抽四成、满池三成、超池两成不到。
+    // 下限的斜率是这套东西的关键，不能随便写死：
+    //   * 掉得太慢（比如 (0.55 - 0.22b) 那种）会把「注越大抓得越少」整条
+    //     抹平——探针里底对面对一个满池从弃 90% 掉到 70%、面对超池反倒不弃
+    //     了，而且打红两条既有用例（底对面对满池要照弃、第二对面对连开三枪
+    //     要尊重）；
+    //   * 掉得太快（比如 0.7 倍池直接归零）等于只在极小注上兜底，2/3 池那一
+    //     档还是齐刷刷交牌。
+    // 现在这条曲线（弱成牌）在 1/2 池抽四成、2/3 池两成出头、3/4 池一成、
+    // 满池只剩个尾巴（真人也不会拿一对去接一个满池的三枪）；中等牌档在每
+    // 一档上都更高一截——它上面还压着顶对/两对/三条，是这条街靠后的防守
+    // 厚度，弃光它才是真的把底池白送。
+    final floorTop = read.tier == HandTier.medium ? 0.75 : 1.02;
+    final floorSlope = read.tier == HandTier.medium ? 0.9 : 1.2;
     final riverDefendFloor = (game.street == Street.river &&
             !facingRaise &&
-            read.tier == HandTier.medium)
-        ? (0.55 - 0.24 * spot.betSizeRel).clamp(0.12, 0.55)
+            (read.tier == HandTier.medium || read.tier == HandTier.weak))
+        ? (floorTop - floorSlope * spot.betSizeRel).clamp(0.03, 0.6)
         : 0.0;
+
+    // 河牌面对重注：顶对（这一档含顶对顶踢、超对、同花面上的顺子/三条）
+    // 是抓诈唬的牌，不能像以前那样面对满池/超池一路跟到底。探针实测改
+    // 之前：顶对面对 1 倍池跟 100%、面对 1.5 倍池跟 99%——对手拿任意两张
+    // 牌在河牌抡个大注就能把我们的跟注范围压成「只有他打不赢的牌才跟」，
+    // 我们的强牌也永远只有「跟注 → 被更好的牌收走」这一种结局。真人拿顶对
+    // 在河牌面对重注是要挑着弃的（超池那条线本来就是坚果或空气），只是不能
+    // 弃成一堵墙——留下的那部分正是用来抓对手诈唬的。
+    //
+    // 弃多少由三项一起决定：
+    //   * 尺度：0.75 倍池以下不弃（那是正常价值注/薄价值，按赔率也该跟），
+    //     往上线性抬——1 倍池约一成半、1.5 倍池约四成。
+    //   * 对手的线：前面几条街一路开火（priorAgg）说明范围实，多弃；
+    //     「前面全过牌、这条街突然砸出来」是两极化的线，诈唬占比高，
+    //     打个对折（少弃）——这条线和弱成牌档的判断保持一致。
+    //   * 牌面：湿面上能打败顶对的成牌更多，多弃一点。
+    //
+    // 转牌是同一条线，但同一条曲线要打个折：后面还有一条街、也还有补牌，
+    // 真人在这儿收得比河牌晚（探针里转牌 1.5 倍池弃两成上下、河牌四成半）。
+    // 翻牌不参与：那儿的顶对还远没到「抓诈唬」那一步，老规矩（湿面 +
+    // 对手线很实，偶尔放手）就够。
+    final strongFoldStreet = game.street == Street.river
+        ? 1.0
+        : (game.street == Street.turn ? 0.5 : 0.0);
+    final strongFoldVsBigBet =
+        (strongFoldStreet > 0 && bigBet && spot.spr > 1.0 && !facingManiac)
+            ? (((spot.betSizeRel - 0.75) *
+                            (spot.polarizedBet ? 0.55 : 1.0) *
+                            (read.texture.wetness > 0.6 ? 1.25 : 1.0) +
+                        0.08 * spot.priorAgg +
+                        (spot.villainStrength > 0.85 ? 0.10 : 0.0)) *
+                    strongFoldStreet)
+                .clamp(0.0, 0.6)
+            : 0.0;
 
     // 1) 怪兽牌：价值加注；加注战里已经打太多就转为跟注。
     //    底池相对筹码已经很大时，加注就是全下。
@@ -1308,7 +1395,19 @@ class AiPlayer {
     //    越得先跟注控池（筹码反正也跑不掉，后面再推进去）。
     final jamSpr =
         spot.opponents >= 3 ? 0.85 : (spot.opponents == 2 ? 1.15 : 1.5);
-    if (read.tier == HandTier.strong && spot.spr <= jamSpr) {
+    // 「低 SPR 就把筹码推出去」这条只对着**下注**成立。对手已经**加注**回来
+    // 了，那一下本身就说明他的范围强得多；这时候再加，只是把我们的诈唬全都
+    // 打走、留下能打败我们的牌。河牌尤其不能推——后面没有牌了，一对牌被
+    // 加注之后再加等于把自己变成诈唬。探针实测：AI 在河牌用顶对顶踢下注、
+    // 被过牌-加注之后，有 94% 的牌局又推了回去（下注-被加注这条线 SPR 掉到
+    // 1.2 上下、正好踩中「低 SPR 自动推」），对手拿任意两张牌加一下就白拿。
+    // 筹码真套进去（能加的只剩一点点）不用管：那时候 canRaise 已经是 false，
+    // 这里本来就走不到。
+    final riverFacingRaise = facingRaise && game.street == Street.river;
+    if (read.tier == HandTier.strong &&
+        spot.spr <= jamSpr &&
+        !noRaiseVsBigBet &&
+        !riverFacingRaise) {
       if (canRaise) return _jam(me);
       return const AiDecision(ActionType.call);
     }
@@ -1318,11 +1417,18 @@ class AiPlayer {
     if (read.tier == HandTier.strong) {
       if (bigBet || spot.villainStrength > 0.8) {
         // 疯子的大注不能当真的听：拿强牌被他吓跑是最亏的。
-        if (!facingManiac &&
-            bigBet &&
-            spot.villainStrength > 0.85 &&
-            read.texture.wetness > 0.6 &&
-            _roll(0.25)) {
+        //
+        // 转牌/河牌用上面那条跟尺度挂钩的档（以前河牌是「100% 跟」、转牌
+        // 只有「湿面 + 对手线很实」这一档）；翻牌沿用老的那一档。
+        final foldChance = strongFoldVsBigBet > 0
+            ? strongFoldVsBigBet
+            : (!facingManiac &&
+                    bigBet &&
+                    spot.villainStrength > 0.85 &&
+                    read.texture.wetness > 0.6
+                ? 0.25
+                : 0.0);
+        if (foldChance > 0 && _roll(foldChance)) {
           return const AiDecision(ActionType.fold);
         }
         return const AiDecision(ActionType.call);

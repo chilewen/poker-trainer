@@ -693,7 +693,7 @@ void main() {
   /// 一枪，河牌按 [frac] 池下注；量 AI 面对这一注的应对（弃/跟/加）。
   ({double fold, double call, double raise, int total}) aiVsRiverBet(
       String hole, String board, double frac,
-      {bool barrel = false, int seeds = 200}) {
+      {bool barrel = false, int preflopRaiseTo = 0, int seeds = 200}) {
     var fold = 0, call = 0, raise = 0, total = 0;
     for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
@@ -735,7 +735,18 @@ void main() {
           break;
         }
         if (g.street == Street.preflop) {
-          g.apply('hero', facing ? ActionType.call : ActionType.check);
+          // 默认翻前谁都不加，底池很小；[preflopRaiseTo] 让英雄开一枪，
+          // 用来复现「翻前造大池 → 河牌超池把 SPR 压到极低」那种牌局。
+          final raise =
+              legal.where((a) => a.type == ActionType.raise).firstOrNull;
+          if (preflopRaiseTo > 0 &&
+              raise != null &&
+              g.currentBet < preflopRaiseTo) {
+            g.apply('hero', ActionType.raise,
+                amount: min(preflopRaiseTo, raise.maxAmount));
+          } else {
+            g.apply('hero', facing ? ActionType.call : ActionType.check);
+          }
           continue;
         }
         if (facing) {
@@ -763,7 +774,10 @@ void main() {
   /// 下注，统计 AI 在转牌面对下注的应对（就是「听牌面对第二枪」那条线）。
   ({double fold, double call, double raise, int n}) aiVsTurnBet(
       String hole, String board, double frac,
-      {AiStyle style = AiStyle.tightAggressive, int seeds = 200}) {
+      {AiStyle style = AiStyle.tightAggressive,
+      int preflopRaiseTo = 0,
+      bool barrel = false,
+      int seeds = 200}) {
     var fold = 0, call = 0, raise = 0, n = 0;
     for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
@@ -779,7 +793,18 @@ void main() {
         holeOverride: {'ai': _cs(hole), 'hero': _cs('3s 2s')},
         boardOverride: _cs(board),
       );
-      g.apply('ai', ActionType.raise, amount: 250);
+      // 默认开 250（约 3bb）；[preflopRaiseTo] 用来把翻前底池造大，复现
+      // 「转牌超池把 SPR 压到 1.5 上下」那种牌局——低 SPR 下强牌档以前
+      // 会直接推全下。
+      final openTo = preflopRaiseTo > 0 ? preflopRaiseTo : 250;
+      final la = g
+          .pendingAction()
+          .actions
+          .where((a) => a.type == ActionType.raise)
+          .firstOrNull;
+      g.apply('ai', ActionType.raise,
+          amount:
+              la == null ? openTo : openTo.clamp(la.minAmount, la.maxAmount));
       g.apply('hero', ActionType.call);
       var guard = 0;
       var asked = false;
@@ -806,19 +831,22 @@ void main() {
           g.apply('ai', d.type, amount: d.amountTo);
           continue;
         }
-        // 英雄：转牌拿到说话权就按 [frac] 池下注（第二枪），其余过牌/跟注。
-        if (g.street == Street.turn &&
-            !facing &&
-            !heroBet &&
-            legal.any((a) => a.type == ActionType.bet)) {
-          heroBet = true;
+        // 英雄：翻牌按 [barrel] 决定要不要先开一枪，转牌拿到说话权就按
+        // [frac] 池下注（第二枪），其余过牌/跟注。
+        final wantsBet = !facing &&
+            legal.any((a) => a.type == ActionType.bet) &&
+            (g.street == Street.turn
+                ? !heroBet
+                : (barrel && g.street == Street.flop));
+        if (wantsBet) {
+          if (g.street == Street.turn) heroBet = true;
           final la = legal.firstWhere((a) => a.type == ActionType.bet);
+          final f = g.street == Street.turn ? frac : 0.6;
           g.apply(
               'hero',
               ActionType.bet,
-              amount: (g.potTotal() * frac)
-                  .round()
-                  .clamp(la.minAmount, la.maxAmount));
+              amount:
+                  (g.potTotal() * f).round().clamp(la.minAmount, la.maxAmount));
           continue;
         }
         final want = facing ? ActionType.call : ActionType.check;
@@ -1439,10 +1467,14 @@ void main() {
         reason: '换档只打散尺寸，平均尺度基本不动（实测 $avg，基准 246）');
   });
 
-  /// 6 人桌：p3 弃 → p4 开 300 → p5 3bet 900 → 轮到按钮位 p0（AI）。
+  /// 6 人桌：p3 弃 → p4 开 300 → p5 3bet [threeBet] → 轮到按钮位 p0（AI）。
+  ///
+  /// 默认 900（3 倍，正常 3bet）；[threeBet] 给 470 就是「最小加注」那条线。
   ({int raise, int call, int fold}) aiFacingThreeBet(String hole,
-      {int seeds = 200, AiStyle style = AiStyle.tightAggressive,
-      int stack = 10000}) {
+      {int seeds = 200,
+      AiStyle style = AiStyle.tightAggressive,
+      int stack = 10000,
+      int threeBet = 900}) {
     var raise = 0, call = 0, fold = 0;
     for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
       final rnd = Random(seed);
@@ -1457,7 +1489,7 @@ void main() {
       g.startHand(holeOverride: {'p0': _cs(hole)});
       g.apply('p3', ActionType.fold);
       g.apply('p4', ActionType.raise, amount: 300);
-      g.apply('p5', ActionType.raise, amount: 900);
+      g.apply('p5', ActionType.raise, amount: threeBet);
       final p = g.pendingAction().player;
       if (p.id != 'p0') fail('轮到的是 ${p.id}，不是 p0');
       final d = AiPlayer(style, random: rnd).decide(g, p);
@@ -1651,6 +1683,44 @@ void main() {
     expect(trash.fold, trash.n, reason: '83o 面对 3bet 还是得弃');
     final sc = aiFacingThreeBetOop('7h 6h', open: 286, threeBet: 470);
     expect(sc.fold, greaterThan(0), reason: '76s 要混着打，不能次次都跟');
+  });
+
+  t('翻前防守 3bet：同花大牌不能比同花连张先扔', () {
+    // 范围表的「大牌」分支是短路的——同花大牌只查 suitedBroadway，查不到就
+    // 直接判「不在范围内」，不会掉到下面的同花连张/隔张档去。最小 3bet 那两
+    // 张表以前写的是 suitedBroadway: 11（低牌要 ≥ J），于是 JTs 被挤出跟注
+    // 范围，而 98s/76s 那种同花连张照样在。探针实测最小加注到 4.7bb：开池的
+    // 人拿 JTs 弃 79%，拿 98s 跟 68%、76s 跟 68%、55 跟 68%——更好的牌反而
+    // 先扔，是牌桌上最好读的一类破绽。
+    PreflopHand h(String s) => PreflopHand.of(_cs(s));
+    expect(PreflopRanges.callThreeBetSmall.contains(h('Jh 10h')), isTrue,
+        reason: 'JTs 有位置跟小 3bet 是标准打法');
+    expect(PreflopRanges.callThreeBetSmallOop.contains(h('Jh 10h')), isTrue,
+        reason: 'JTs 没位置也该在最小 3bet 的跟注范围里');
+
+    // 有位置：最小加注给的价格最好（跟 1.85bb 抢一个 9bb 的底池），JTs 该跟。
+    final ipJts = aiFacingThreeBet('Jh 10h', threeBet: 470);
+    final ip98s = aiFacingThreeBet('9h 8h', threeBet: 470);
+    expect(ipJts.call / 200, greaterThan(0.9),
+        reason: '有位置 JTs 跟最小 3bet（跟 ${ipJts.call}/200）');
+    expect(ipJts.call, greaterThanOrEqualTo(ip98s.call),
+        reason: 'JTs 不能比 98s 先扔（JTs ${ipJts.call} vs 98s ${ip98s.call}）');
+
+    // 没位置：价格一样的便宜，JTs 照样是跟注那一半。
+    final oopJts = aiFacingThreeBetOop('Jh 10h', open: 286, threeBet: 470);
+    final oop98s = aiFacingThreeBetOop('9h 8h', open: 286, threeBet: 470);
+    expect(oopJts.call / oopJts.n, greaterThan(0.9),
+        reason: '没位置 JTs 也跟最小 3bet（跟 ${oopJts.call}/${oopJts.n}）');
+    expect(oopJts.call * oop98s.n, greaterThanOrEqualTo(oop98s.call * oopJts.n),
+        reason: 'JTs 不能比 98s 先扔'
+            '（JTs ${oopJts.call}/${oopJts.n} vs 98s ${oop98s.call}/${oop98s.n}）');
+
+    // 收住：这只是「小 3bet 价格好」那一档。要价真的大到 3 倍以上时，JTs
+    // 没位置还是得扔（避免把这条修成了「什么 3bet 都跟」）。
+    final oopJtsBig = aiFacingThreeBetOop('Jh 10h');
+    expect(oopJtsBig.fold / oopJtsBig.n, greaterThan(0.5),
+        reason: 'JTs 面对 3 倍 3bet 没位置还是弃多跟少'
+            '（弃 ${oopJtsBig.fold}/${oopJtsBig.n}）');
   });
 
   t('翻前防守 3bet：跟注站不看位置也不看深度，不是全场最紧的人', () {
@@ -2790,6 +2860,48 @@ void main() {
         reason: '底对面对一个底池的大注照样弃（弃 ${pct(big.fold)}）');
   });
 
+  t('河牌尺度：对手打越大，一对牌弃得越多，曲线不许翻回来', () {
+    // 这一条锁的是「弃牌率随下注尺度单调递增」这个不变量。
+    //
+    // 以前跟注门槛里有一档「SPR 很低就别想了，自动跟」——对手把筹码
+    // 打进来反而会把我的 SPR 压到 1.2 以下、正好踩中它。结果同一个中等
+    // 牌档面对 1 倍池弃六成、面对 1.5 倍池一个都不弃：下注尺度这个变量
+    // 在河牌被整个翻了过来，对手打多大都没区别、打得更狠反而更容易被跟。
+    // 真人不会因为对手打得更重就跟得更多，这条曲线必须是单调的。
+    String pct(double v) => '${(100 * v).round()}%';
+    const board = '9d 5c 2h 8d Jd';
+    // (1) 连开三枪这条线（对手翻牌/转牌都在开火），手里是第二对（弱成牌）：
+    //     弃牌率必须随尺度往上走，而且小注那端不能一路弃到八成以上——对手
+    //     拿任意两张牌打个半池就能把第二对清出去，等于白送。
+    final half = aiVsRiverBet('Kc 8h', board, 0.5, barrel: true);
+    final twoThird = aiVsRiverBet('Kc 8h', board, 0.66, barrel: true);
+    final pot = aiVsRiverBet('Kc 8h', board, 1.0, barrel: true);
+    for (final r in [half, twoThird, pot]) {
+      expect(r.total, greaterThan(_trialSeeds(40)), reason: '样本要够');
+    }
+    expect(twoThird.fold, greaterThan(half.fold + 0.1),
+        reason: '2/3 池要比 1/2 池弃得多（弃 ${pct(twoThird.fold)} vs '
+            '${pct(half.fold)}）');
+    expect(pot.fold, greaterThan(twoThird.fold + 0.05),
+        reason: '满池要比 2/3 池弃得多（弃 ${pct(pot.fold)} vs '
+            '${pct(twoThird.fold)}）');
+    expect(half.fold, lessThan(0.8),
+        reason: '1/2 池这条线上第二对要留一部分来看（弃 ${pct(half.fold)}）');
+
+    // (2) 翻前造了个大池之后，河牌的超池会把 SPR 压到 1 以下——那一档
+    //     「自动跟」当年就是在这里翻车的：中等牌（顶对）面对一个满池弃
+    //     97%，面对 1.5 倍池反而一个都不弃。超池是两极化的线，不硬接。
+    final big = aiVsRiverBet('Ac 9h', board, 1.0,
+        barrel: true, preflopRaiseTo: 300);
+    final over = aiVsRiverBet('Ac 9h', board, 1.5,
+        barrel: true, preflopRaiseTo: 300);
+    expect(big.total, greaterThan(_trialSeeds(40)), reason: '样本要够');
+    expect(over.total, greaterThan(_trialSeeds(40)), reason: '样本要够');
+    expect(over.fold, greaterThanOrEqualTo(big.fold - 0.02),
+        reason: '超池不该比满池更容易被跟（超池弃 ${pct(over.fold)} vs '
+            '满池弃 ${pct(big.fold)}）');
+  });
+
   t('转牌防守范围比翻牌窄，没位置收得更紧', () {
     // 翻牌跟注之后还有两张牌可看、对手也还可能收手；转牌跟完就只剩一条
     // 街、对手多半还会再开一枪——同样 2/3 池的开火线，翻牌该跟的牌到了
@@ -2954,6 +3066,100 @@ void main() {
         reason: '多人池主体是跟注看牌，不是加注（跟 ${pct(five.call)}）');
   });
 
+  /// 多人池：AI 在按钮（最后说话），前面所有人过牌到它，量它在 [street] 圈
+  /// 的选择——下注率 / 过牌率 / 平均尺度（下注额 ÷ 下注前底池）。
+  ({double bet, double check, double avgFrac, int n}) aiCheckedToMultiway(
+      String hole, String board,
+      {int callers = 0, Street street = Street.flop, int seeds = 200}) {
+    var bet = 0, check = 0, n = 0;
+    var fracSum = 0.0;
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
+      final rnd = Random(seed);
+      final g = GameEngine(
+        config: const GameConfig(
+            startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      )
+        ..addPlayer('ai', 'AI')
+        ..addPlayer('hero', '我');
+      for (var i = 0; i < callers; i++) {
+        g.addPlayer('c$i', 'C$i');
+      }
+      final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
+      g.startHand(
+        holeOverride: {'ai': _cs(hole), 'hero': _cs('3c 2c')},
+        boardOverride: _cs(board)
+            .take(street == Street.flop ? 3 : 4)
+            .toList(),
+      );
+      var guard = 0;
+      while (!g.handOver && guard++ < 300) {
+        final pa = g.pendingAction();
+        final p = pa.player;
+        final legal = pa.actions;
+        final facing = legal.any((a) => a.type == ActionType.call);
+        final canCheck = legal.any((a) => a.type == ActionType.check);
+        if (p.id == 'ai') {
+          final d = ai.decide(g, p);
+          if (g.street == street && !facing) {
+            n++;
+            if (d.type == ActionType.bet) {
+              bet++;
+              fracSum += (d.amountTo ?? 0) / max(1, g.potTotal());
+            } else {
+              check++;
+            }
+            break;
+          }
+          g.apply('ai', d.type, amount: d.amountTo);
+          continue;
+        }
+        g.apply(p.id,
+            facing ? ActionType.call : (canCheck ? ActionType.check : legal.first.type));
+      }
+    }
+    double r(int v) => n == 0 ? 0 : v / n;
+    return (bet: r(bet), check: r(check), avgFrac: bet == 0 ? 0 : fracSum / bet, n: n);
+  }
+
+  t('多人池：被过牌到不再一定下注，人数越多越收着', () {
+    // 强牌档原来的四条过牌档（翻牌没位置 / 转牌非空白牌 / 河牌 / 河牌超池）
+    // 全都挂着 !multiway，于是三人池以上是「过牌到我 = 一定下注」：探针实测
+    // 翻牌被过牌到，顶对顶踢和超对在 2/3/4/5 人池里都是 100% 下注，尺度还
+    // 随人数往上抬（0.63 → 0.78 倍池）。真人拿一对在五人湿面上不会每手都
+    // 开火——后面还坐着三家，两对/三条/听牌都在，被加注就得弃；更要命的是
+    // 我们的过牌范围从此清一色是没牌，一过牌对手拿任意两张牌就能收走底池。
+    String pct(double v) => '${(100 * v).round()}%';
+    const board = '8h 5s 4s'; // 顶对顶踢 + 两张同花 + 顺子可能，湿面
+
+    final heads = aiCheckedToMultiway('Ah 8d', board);
+    final three = aiCheckedToMultiway('Ah 8d', board, callers: 1);
+    final five = aiCheckedToMultiway('Ah 8d', board, callers: 3);
+    for (final r in [heads, three, five]) {
+      expect(r.n, greaterThan(_trialSeeds(100)), reason: '样本要够');
+    }
+    // 单挑还是照打：位置好、后面只剩一家，顶对顶踢就是价值注。
+    expect(heads.bet, greaterThan(0.95),
+        reason: '单挑被过牌到还是该打（下注 ${pct(heads.bet)}）');
+    // 三人池开始收着，五人池收得更多——而且要单调，不能又变成拍脑袋的常数。
+    expect(three.bet, lessThan(0.97),
+        reason: '三人池不该还是 100% 下注（下注 ${pct(three.bet)}）');
+    expect(five.bet, lessThan(three.bet - 0.08),
+        reason: '五人池要比三人池收得更明显'
+            '（五人 ${pct(five.bet)} vs 三人 ${pct(three.bet)}）');
+    expect(five.bet, lessThan(0.85),
+        reason: '五人湿面上拿一对不能每手都开火（下注 ${pct(five.bet)}）');
+    expect(five.check, greaterThan(0.15),
+        reason: '至少要留一部分过牌回去（过牌 ${pct(five.check)}）');
+
+    // 对照：干面上强牌该打得更勤（湿面才有那么多能反超我们的牌），
+    // 别把这条修成「人一多就不敢下注」。
+    final dryFive = aiCheckedToMultiway('9h 9d', '8c 5d 2h', callers: 3);
+    expect(dryFive.bet, greaterThan(five.bet),
+        reason: '干面上该比湿面打得多'
+            '（干 ${pct(dryFive.bet)} vs 湿 ${pct(five.bet)}）');
+  });
+
   t('低 SPR：单挑可以推全下，池里人多就只跟注', () {
     // 跟注/全下的分界看 SPR（筹码 ÷ 底池），以前这条线对所有人数都是
     // 1.5：五人池里人人跟一注底池就涨到 SPR≈1.3，A8 这种顶对顶踢于是
@@ -3066,6 +3272,166 @@ void main() {
         reason: '没位置的三条偶尔过牌钓一次（过牌 ${pct(oopSet.check)}）');
     expect(set.check, lessThan(0.05),
         reason: '有位置该收价值就收（过牌 ${pct(set.check)}）');
+  });
+
+  t('河牌顶对：不会 100% 下注，留一档过牌护住自己的过牌范围', () {
+    // 翻牌（没位置的强牌）和转牌（非空白牌）都有「拿强牌过牌控池」这一档，
+    // 只有河牌是漏的：探针实测「河牌顶对（无人下注）」下注 100%、过牌 0%。
+    // 对手看到我们河牌一过牌就知道手里没东西，随便一枪就能把底池收走；
+    // 我们的强牌也永远只有「下注 → 被跟注」这一种结局，对手的诈唬和薄
+    // 价值没有机会自己送上门——一手牌的三条街必须是同一套逻辑。
+    String pct(double v) => '${(100 * v).round()}%';
+    // 9s 既没配对面的公对，也没凑出第三张同花：标准的空白河牌。
+    final blank = aiRiverCheckedTo('Ah Qd', 'Qh 7d 2c 5h 9s');
+    // 9h 凑出第三张同花，对手的过牌-加注就藏在这张牌后面。
+    final flushed = aiRiverCheckedTo('Ah Qd', 'Qh 7d 2c 5h 9h');
+    expect(blank.n, greaterThan(_trialSeeds(100)), reason: '样本要够');
+    expect(flushed.n, greaterThan(_trialSeeds(100)), reason: '样本要够');
+    expect(blank.check, greaterThan(0.08),
+        reason: '顶对在河牌要抽一部分过牌（过牌 ${pct(blank.check)}）');
+    expect(blank.bet, greaterThan(0.6),
+        reason: '但主体还是价值下注，别把顶对打过成抓诈唬牌'
+            '（下注 ${pct(blank.bet)}）');
+    expect(flushed.check, greaterThan(blank.check - 0.05),
+        reason: '牌面凑出第三张同花时收手不能更少'
+            '（过牌 ${pct(flushed.check)} vs 空白牌 ${pct(blank.check)}）');
+  });
+
+  t('河牌重注：顶对要挑着弃，两对照旧以加为主', () {
+    // 强牌档以前是「面对大注一律跟」：探针实测顶对面对 1 倍池跟 100%、
+    // 面对 1.5 倍池跟 99%，而「连开三枪 + 超池」那条线上有一半牌局是直接
+    // 推出去的。顶对在河牌是**抓诈唬**的牌：对手抡大注要么是坚果要么是
+    // 空气，全跟等于把自己整个跟注范围压成「只有他打不赢的牌才跟」；再加
+    // 就更亏——把对手的诈唬打走、只留下能打败我们的牌。
+    // 现在按尺度挑着弃，但留够抓诈唬的那部分；两对（怪兽档）不受影响。
+    String pct(double v) => '${(100 * v).round()}%';
+    const board = 'Qh 7d 2c 5h 9s';
+    final half = aiVsRiverBet('Ah Qd', board, 0.5);
+    final pot = aiVsRiverBet('Ah Qd', board, 1.0);
+    final over = aiVsRiverBet('Ah Qd', board, 1.5);
+    final barrel = aiVsRiverBet('Ah Qd', board, 1.5, barrel: true);
+    for (final r in [half, pot, over, barrel]) {
+      expect(r.total, greaterThan(_trialSeeds(40)), reason: '样本要够');
+    }
+    // 半池是正常价值注/薄价值，按赔率就该跟，没有弃的道理。
+    expect(half.fold, lessThan(0.05),
+        reason: '半池不该弃（弃 ${pct(half.fold)}）');
+    // 满池开始挑着弃，但主体还是跟——留下的那部分才是抓诈唬的。
+    expect(pot.fold, greaterThan(0.04),
+        reason: '满池要挑着弃（弃 ${pct(pot.fold)}）');
+    expect(pot.fold, lessThan(0.35),
+        reason: '满池不能弃成弃牌机器（弃 ${pct(pot.fold)}）');
+    // 尺度越大弃得越多，而且要看得出来。
+    expect(over.fold, greaterThan(pot.fold + 0.15),
+        reason: '超池要比满池弃得多（超池弃 ${pct(over.fold)} vs '
+            '满池弃 ${pct(pot.fold)}）');
+    expect(over.call, greaterThan(0.35),
+        reason: '超池也得留一部分抓诈唬（跟 ${pct(over.call)}）');
+    // 加注在这儿是错的：等于把对手的诈唬打走、把能打败我们的牌请进来。
+    expect(over.raise, lessThan(0.1),
+        reason: '面对超池不该再加（加 ${pct(over.raise)}）');
+    // 对手连开三枪之后的超池，范围比「前面全过牌再抡」实得多，弃牌率不该掉回去。
+    expect(barrel.fold, greaterThan(0.25),
+        reason: '连开三枪的超池更该弃（弃 ${pct(barrel.fold)}）');
+
+    // 筹码快套进去时（翻前造个大池、河牌超池把 SPR 压到 1 出头）也是同一个
+    // 道理，而且更极端：这一格改之前是 100% 推全下——拿顶对把剩下整叠筹码
+    // 推给一条两极的线，对手的诈唬会跑掉、能打败我们的牌全跟进来。
+    final shallow =
+        aiVsRiverBet('Ah Qd', board, 1.5, preflopRaiseTo: 1200);
+    expect(shallow.total, greaterThan(_trialSeeds(40)), reason: '样本要够');
+    expect(shallow.raise, lessThan(0.1),
+        reason: '河牌超池不该把顶对推出去（加 ${pct(shallow.raise)}）');
+    expect(shallow.fold, greaterThan(0.15),
+        reason: 'SPR 压到 1 出头也还该挑着弃（弃 ${pct(shallow.fold)}）');
+
+    // 对照：两对是真正的价值牌，同一个超池照旧以加为主——别一刀切把所有
+    // 「强牌」都打成弃牌。
+    final twoPair = aiVsRiverBet('9h 7d', 'Qh 9d 7c 5h 2s', 1.5);
+    expect(twoPair.total, greaterThan(_trialSeeds(40)), reason: '样本要够');
+    expect(twoPair.raise, greaterThan(0.5),
+        reason: '两对照旧以加为主（加 ${pct(twoPair.raise)}）');
+    expect(twoPair.fold, lessThan(0.05),
+        reason: '两对不该弃（弃 ${pct(twoPair.fold)}）');
+  });
+
+  t('转牌重注：顶对也要挑着弃，但收得比河牌晚', () {
+    // 河牌那条「重注要挑着弃」的档现在也管转牌，只是打个折：后面还有一条
+    // 街、还有补牌，真人在这儿收得比河牌晚。改之前探针实测转牌顶对面对
+    // 1 倍池 / 1.5 倍池都是 100% 跟，「连开两枪超池」那条线还有两成是把
+    // 筹码直接推出去的——和河牌是同一个毛病，只少了一条街。
+    String pct(double v) => '${(100 * v).round()}%';
+    const board = 'Qh 7d 2c 5s';
+    final half = aiVsTurnBet('Ah Qd', board, 0.5);
+    final pot = aiVsTurnBet('Ah Qd', board, 1.0);
+    final over = aiVsTurnBet('Ah Qd', board, 1.5);
+    final barrels = aiVsTurnBet('Ah Qd', board, 1.5, barrel: true);
+    for (final r in [half, pot, over, barrels]) {
+      expect(r.n, greaterThan(_trialSeeds(40)), reason: '样本要够');
+    }
+    // 半池是正常价值注，按赔率就该跟，没有让它掉一半的道理。
+    expect(half.fold, lessThan(0.05),
+        reason: '转牌半池不该弃（弃 ${pct(half.fold)}）');
+    // 满池开始挑着弃，超池弃得更多；但转牌整体上还是以跟为主。
+    expect(pot.fold, greaterThan(0.02),
+        reason: '转牌满池要挑着弃（弃 ${pct(pot.fold)}）');
+    expect(over.fold, greaterThan(pot.fold + 0.08),
+        reason: '同一个牌力，超池比满池弃得多'
+            '（超池弃 ${pct(over.fold)} vs 满池弃 ${pct(pot.fold)}）');
+    expect(over.raise, lessThan(0.05),
+        reason: '转牌超池不该再加（加 ${pct(over.raise)}）');
+    // 连开两枪的超池：对手的范围更实，弃得更多；而且不该往上推（改之前
+    // 这条线上有 26% 是把顶对推出去的）。
+    expect(barrels.fold, greaterThan(over.fold + 0.08),
+        reason: '连开两枪的超池更该弃'
+            '（弃 ${pct(barrels.fold)} vs 单枪超池弃 ${pct(over.fold)}）');
+    expect(barrels.raise, lessThan(0.05),
+        reason: '连开两枪的转牌超池不该再加（加 ${pct(barrels.raise)}）');
+
+    // 对照：同一手牌、同一个尺度，河牌要比转牌收得更紧——转牌的顶对还留着
+    // 补牌和摊牌价值，河牌已经没有下一条街了。
+    final riverPot = aiVsRiverBet('Ah Qd', 'Qh 7d 2c 5h 9s', 1.0);
+    final riverOver = aiVsRiverBet('Ah Qd', 'Qh 7d 2c 5h 9s', 1.5);
+    expect(riverPot.fold, greaterThan(pot.fold),
+        reason: '满池：河牌弃得比转牌多'
+            '（河牌弃 ${pct(riverPot.fold)} vs 转牌弃 ${pct(pot.fold)}）');
+    expect(riverOver.fold, greaterThan(over.fold + 0.15),
+        reason: '超池：河牌弃得比转牌多'
+            '（河牌弃 ${pct(riverOver.fold)} vs 转牌弃 ${pct(over.fold)}）');
+  });
+
+  t('河牌下注被加注：顶对不再推回去，只跟', () {
+    // 「AI 自己下注 → 被对手过牌-加注」这条线。改之前强牌档会踩中
+    // 「SPR ≤ 1.5 就把筹码推出去」那一档：河牌下注-被加注之后 SPR 正好掉到
+    // 1.2 上下，于是顶对顶踢有 94% 的牌局又 3-bet 回去。河边加注是最后一个
+    // 信号，一对牌被抬起来还往上推，等于对手拿任意两张牌加一下就白拿——
+    // 我们只留下能打败我们的牌，把他所有诈唬打走。
+    String pct(double v) => '${(100 * v).round()}%';
+    const board = 'As 7c 2d 5h 9s';
+    for (final mult in [2.2, 3.5]) {
+      final top = aiVsBetThenRaise('Ah Kd', board, mult, street: Street.river);
+      final over = aiVsBetThenRaise('9h 9d', '7s 4h 2d 5h 3c', mult,
+          street: Street.river);
+      expect(top.total, greaterThan(_trialSeeds(40)), reason: '样本要够');
+      expect(over.total, greaterThan(_trialSeeds(40)), reason: '样本要够');
+      expect(top.raise, lessThan(0.25),
+          reason: '河牌被加到 $mult 倍，顶对顶踢不该 3-bet'
+              '（再加 ${pct(top.raise)}）');
+      expect(top.call, greaterThan(0.6),
+          reason: '河牌被加到 $mult 倍，顶对顶踢该以跟为主'
+              '（跟 ${pct(top.call)}）');
+      expect(over.raise, lessThan(0.25),
+          reason: '河牌被加到 $mult 倍，超对不该 3-bet'
+              '（再加 ${pct(over.raise)}）');
+    }
+    // 对照：同一条「下注-被加注」的线在翻牌还得能加回去。翻牌的顶对还远没到
+    // 抓诈唬那一步，被抬一手就只会跟，对手拿听牌随便加一下就能把我们的强牌
+    // 变成纯跟注站（那时候我们前面那条加注战闸门才刚修好）。
+    final flop =
+        aiVsBetThenRaise('Ah Kd', 'As 7c 2d', 2.2, street: Street.flop);
+    expect(flop.total, greaterThan(_trialSeeds(40)));
+    expect(flop.raise, greaterThan(0.25),
+        reason: '翻牌该留 3-bet，别把整条线一起收没了（再加 ${pct(flop.raise)}）');
   });
 
   t('位置差异：浮牌是位置的特权，没位置不拿空气乱跟', () {
@@ -3476,6 +3842,15 @@ void main() {
       if (first.heroToAct) first.heroAct(ActionType.call);
       await Future<void>.delayed(const Duration(milliseconds: 5));
     }
+    // 等牌桌安静下来再读状态。英雄动作之后 AI 还会异步接一手（下注轮打完就
+    // 翻牌/转牌），在它行进中间读出来的 `engine.board` 是「半截」的，而这一刻
+    // 盘上的存档还停在上一个动作——两边对不上，用例就假失败。连续几拍都轮到
+    // 英雄行动 = 没人还在思考，此时引擎和存档才停在同一个点上。
+    var quiet = 0;
+    while (quiet < 3 && !first.engine.handOver) {
+      quiet = first.heroToAct ? quiet + 1 : 0;
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
     expect(first.engine.handOver, isFalse, reason: '用例要在手牌中途退出');
 
     final handId = first.engine.lastHand!.id;
@@ -3490,9 +3865,13 @@ void main() {
     ];
 
     // 每个动作之后都会自动落盘 —— 不用等 App 正常退出，被杀也留得下。
-    // 自动落盘是异步的，这里等「带半截手牌的那一版」真的写进文件为止。
-    final raw = await _readSessionWhen(file, (j) => j['hand'] != null);
-    expect(raw, isNotNull, reason: '打到一半也要落盘（文件一直没出现）');
+    // 自动落盘是异步的，这里等「**跟当前牌桌完全一致**的那一版」写进文件为止：
+    // 光等 `hand != null` 可能抓到更早一次动作的旧快照，后面逐项比对就会假失败。
+    final live = first.engine.toSnapshotJson();
+    final raw = await _readSessionWhen(
+        file, (j) => jsonEncode(j['hand']) == jsonEncode(live));
+    expect(raw, isNotNull,
+        reason: '打到一半也要落盘（文件里没有与当前牌桌一致的快照）');
     expect(raw!['hand'] != null, isTrue, reason: '打到一半也要落盘');
 
     // 模拟 App 被杀：内存全丢，只剩磁盘上的存档。

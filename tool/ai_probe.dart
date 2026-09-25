@@ -270,6 +270,18 @@ void main() {
   show('超对 99 面对方 1/2 池',
       _sample(hole: '9h 9d', heroHole: '3c 2h', board: '7s 4c 2d', target: Street.flop,
           heroFirst: {Street.flop: (type: ActionType.bet, frac: 0.5)}));
+  // 翻牌的尺度扫描：转牌/河牌都量过「注越大弃得越多」，翻牌这一档还没有
+  // 对过——翻牌只有一个「街道成本」系数（转牌 ×1.2、翻牌 ×1.0），跟注门槛
+  // 里没有任何一项跟着下注尺度走（除了大注那个 ×1.35 的粗档）。
+  for (final frac in [0.33, 0.5, 0.66, 1.0, 1.5]) {
+    final pct = '${(100 * frac).round()}%';
+    show('第二对（翻牌 $pct 池）',
+        _sample(hole: '8h 7s', heroHole: '4c 6d', board: 'Kh 8d 3c', target: Street.flop,
+            heroFirst: {Street.flop: (type: ActionType.bet, frac: frac)}));
+    show('底对（翻牌 $pct 池）',
+        _sample(hole: 'Ah 2h', heroHole: '4c 6d', board: 'Qc 7d 2s', target: Street.flop,
+            heroFirst: {Street.flop: (type: ActionType.bet, frac: frac)}));
+  }
 
   show('第二对（转牌 面对 1/3 池）',
       _sample(hole: '8h 7s', heroHole: '3c 4h', board: 'Kh 8d 3c 5s', target: Street.turn,
@@ -277,6 +289,23 @@ void main() {
   show('底对（转牌 面对 1/3 池）',
       _sample(hole: 'Ah 2h', heroHole: '3c 4h', board: 'Qc 7d 2s 5h', target: Street.turn,
           heroFirst: {Street.turn: (type: ActionType.bet, frac: 0.33)}));
+  // 转牌的尺度扫描：河牌那条「按尺度递减的跟注下限」是河牌专属，转牌只有
+  // 一个固定的街道成本系数（×1.2）。这几格看的是同一条规律在转牌成不成立。
+  for (final frac in [0.5, 0.66, 1.0, 1.5]) {
+    final pct = '${(100 * frac).round()}%';
+    show('第二对（转牌 $pct 池）',
+        _sample(hole: '8h 7s', heroHole: '4c 6d', board: 'Kh 8d 3c 5s', target: Street.turn,
+            heroFirst: {Street.turn: (type: ActionType.bet, frac: frac)}));
+    show('底对（转牌 $pct 池）',
+        _sample(hole: 'Ah 2h', heroHole: '4c 6d', board: 'Qc 7d 2s 5h', target: Street.turn,
+            heroFirst: {Street.turn: (type: ActionType.bet, frac: frac)}));
+  }
+  show('第二对（转牌 连开两枪超池）',
+      _sample(hole: '8h 7s', heroHole: '4c 6d', board: 'Kh 8d 3c 5s', target: Street.turn,
+          heroFirst: {
+            Street.flop: (type: ActionType.bet, frac: 0.66),
+            Street.turn: (type: ActionType.bet, frac: 1.5),
+          }));
 
   sec('');
   sec('== 转牌圈（听牌未成，对手一直过牌）== ');
@@ -288,6 +317,27 @@ void main() {
   show('听花转牌（面对 1.2 池 bet）',
       _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c 5h', target: Street.turn,
           heroFirst: {Street.turn: (type: ActionType.bet, frac: 1.2)}));
+  // 强牌档在**转牌**面对大注的应对：河牌那一档（重注要挑着弃）现在没有
+  // 对转牌生效，这两格是量「同一条线在转牌上是什么样」的。转牌后面还有
+  // 一条街，按理比河牌更该跟，但也不该像以前那样大注小注一个样。
+  show('转牌顶对（面对 1/2 池 bet）',
+      _sample(hole: 'Ah Qd', heroHole: '3c 2h', board: 'Qh 7d 2c 5s', target: Street.turn,
+          heroFirst: {Street.turn: (type: ActionType.bet, frac: 0.5)}));
+  show('转牌顶对（面对 1 池 bet）',
+      _sample(hole: 'Ah Qd', heroHole: '3c 2h', board: 'Qh 7d 2c 5s', target: Street.turn,
+          heroFirst: {Street.turn: (type: ActionType.bet, frac: 1.0)}));
+  show('转牌顶对（面对 1.5 池 bet）',
+      _sample(hole: 'Ah Qd', heroHole: '3c 2h', board: 'Qh 7d 2c 5s', target: Street.turn,
+          heroFirst: {Street.turn: (type: ActionType.bet, frac: 1.5)}));
+  show('转牌顶对（对手连开两枪超池）',
+      _sample(hole: 'Ah Qd', heroHole: '3c 2h', board: 'Qh 7d 2c 5s', target: Street.turn,
+          heroFirst: {
+            Street.flop: (type: ActionType.bet, frac: 0.66),
+            Street.turn: (type: ActionType.bet, frac: 1.5),
+          }));
+  show('转牌两对（面对 1.5 池 bet）',
+      _sample(hole: '9h 7d', heroHole: '3c 2h', board: 'Qh 9d 7c 5s 2s', target: Street.turn,
+          heroFirst: {Street.turn: (type: ActionType.bet, frac: 1.5)}));
 
   sec('');
   sec('== 翻牌 vs 转牌：同一个牌力的防守范围该不该收窄 == ');
@@ -369,6 +419,24 @@ void main() {
   show('河牌顶对（面对 1/2 池 bet）',
       _sample(hole: 'Ah Qd', heroHole: '3c 2h', board: 'Qh 7d 2c 5h 9s', target: Street.river,
           heroFirst: {Street.river: (type: ActionType.bet, frac: 0.5)}));
+  // 顶对是「抓诈唬」牌：对手敢在河牌砸一个超池，范围是两级的（坚果或空气），
+  // 顶对必须有一部分让开——不能像面对 1/2 池那样一路跟到底。
+  show('河牌顶对（面对 1 池 bet）',
+      _sample(hole: 'Ah Qd', heroHole: '3c 2h', board: 'Qh 7d 2c 5h 9s', target: Street.river,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 1.0)}));
+  show('河牌顶对（面对 1.5 池 bet）',
+      _sample(hole: 'Ah Qd', heroHole: '3c 2h', board: 'Qh 7d 2c 5h 9s', target: Street.river,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 1.5)}));
+  // 对照：两对面对同一个超池，还是得跟（它已经打赢了顶对/超对那条线）。
+  show('河牌两对（面对 1.5 池 bet）',
+      _sample(hole: '9h 7d', heroHole: '3c 2h', board: 'Qh 9d 7c 5h 2s', target: Street.river,
+          heroFirst: {Street.river: (type: ActionType.bet, frac: 1.5)}));
+  show('河牌顶对（对手连开三枪超池）',
+      _sample(hole: 'Ah Qd', heroHole: '3c 2h', board: 'Qh 7d 2c 5h 9s', target: Street.river,
+          heroFirst: {
+            Street.flop: (type: ActionType.bet, frac: 0.66),
+            Street.turn: (type: ActionType.bet, frac: 0.66),
+            Street.river: (type: ActionType.bet, frac: 1.5)}));
   show('河牌两对（面对 1/2 池 bet）',
       _sample(hole: '9h 7d', heroHole: '3c 2h', board: 'Qh 9d 7c 5h 2s', target: Street.river,
           heroFirst: {Street.river: (type: ActionType.bet, frac: 0.5)}));

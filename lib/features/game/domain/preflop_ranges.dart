@@ -574,7 +574,7 @@ class PreflopRanges {
   static const PreflopRange callThreeBetOop = PreflopRange(
     pair: 9, // 99+
     suitedAce: 11, // ATs+
-    suitedBroadway: 11, // KQs / QJs / AJs / KJs（ATs / JTs 留在混着打的边缘）
+    suitedBroadway: 11, // KQs / QJs / AJs / KJs（ATs / JTs 只在价格好的小 3bet 里跟）
     offsuitBroadway: 13, // AKo
     offsuitAce: 12, // AQo（KQo 留给有位置）
   );
@@ -592,7 +592,7 @@ class PreflopRanges {
   static const callThreeBetSmall = PreflopRange(
     pair: 2, // 任何对子：185 去博一个 905 的底池，中三条就够本
     suitedAce: 2,
-    suitedBroadway: 11,
+    suitedBroadway: 10, // 全部同花大牌，含 JTs
     offsuitBroadway: 12, // AQo / KQo 也便宜到值得跟
     suitedConnector: 5,
     suitedGapper: 7,
@@ -600,10 +600,17 @@ class PreflopRanges {
 
   /// 小 3bet 的没位置版本：少玩要靠位置才能实现的同花杂牌，
   /// 但中等对子（99/88 这类有摊牌价值又买得起三条的）照样跟。
+  ///
+  /// 同花大牌这一档两张小表都写 10（全部同花大牌），不能写 11：
+  /// 范围表的「大牌」分支是短路的——同花大牌只查 suitedBroadway，查不到就
+  /// 直接判「不在范围内」，不会掉到同花连张/隔张档去。写 11 的时候 JTs 被
+  /// 挤出跟注范围，而 98s/76s 那种同花连张照样在——探针实测最小加注到
+  /// 4.7bb 时，开池的人拿 JTs 弃 82%，拿 98s 反而跟 65%。「更好的牌先扔」
+  /// 是牌桌上最容易被看穿的一类破绽，所以这两档必须是 10。
   static const callThreeBetSmallOop = PreflopRange(
     pair: 2,
     suitedAce: 3,
-    suitedBroadway: 11,
+    suitedBroadway: 10, // 全部同花大牌，含 JTs
     offsuitBroadway: 12,
     suitedConnector: 6,
     suitedGapper: 9,
