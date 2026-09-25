@@ -2,6 +2,40 @@
 
 A new Flutter project.
 
+## 跑测试
+
+- 全量回归门禁（静态分析 + 引擎用例 + 引擎校验）：
+
+  ```bash
+  zsh tool/regression.sh
+  ```
+
+  约 6 秒。用例默认走 `tool/sharded_test.sh`：先编译一次，再按用例拆 5 片并行跑。
+  `flutter test` 只按**文件**并行，`test/engine_test.dart` 里那 67 条用例它拆不开，
+  裸跑要 18 秒上下；而且源码没动时这里连编译都省掉，再跑一遍 5 秒以内。
+
+- 只想确认「有没有跑不起来 / 结构性错」：
+
+  ```bash
+  zsh tool/regression.sh --fast
+  ```
+
+  约 3 秒：只跑发牌 / 牌型评估 / 存档 / 标题这类结构性冒烟用例，要重放牌局的 AI
+  用例整条跳过（输出里报成 skipped）。**AI 行为有没有被改坏它看不出来**，那种改动
+  必须跑全量。
+
+- 改完 AI 想看行为数字（弃牌率、加注率这些比例）：
+
+  ```bash
+  zsh tool/regression.sh --probes
+  ```
+
+- 想跑单条线：
+
+  ```bash
+  flutter test test/engine_test.dart --plain-name 河牌
+  ```
+
 ## iOS 打包 / 装到自己手机上
 
 1. 包名与签名（已配好）：`ios/Runner.xcodeproj` 里 `PRODUCT_BUNDLE_IDENTIFIER = com.tcgroup.bewt`、

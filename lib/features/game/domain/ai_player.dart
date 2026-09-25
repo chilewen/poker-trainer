@@ -260,10 +260,6 @@ class _VillainRead {
 ///    （[HandReading.blockerScore]：坚果花阻断 / 补顺的牌 / A 阻断），
 ///    拿什么都没挡到的牌就老实过牌——真人和按钮精灵最大的区别就在这。
 class AiPlayer {
-
-  // TEMPDEBUG 临时探针钩子（测完就删）
-  static void Function(String tag, double equity, double need, String street,
-      double betSizeRel, bool facingRaise)? debugCall;
   AiPlayer(this.style, {Random? random}) : _random = random ?? Random() {
     // 同一风格的每个 AI 也有自己的性格，避免所有人打成一模一样。
     _aggression = 0.85 + _random.nextDouble() * 0.3;
@@ -1264,6 +1260,32 @@ class AiPlayer {
     // 本身就说明范围强得多），再叠一层会把「最小加注也不该交牌」那条线
     // 又打回去。
     final streetCost = (!facingRaise && game.street == Street.turn) ? 1.2 : 1.0;
+    // 河牌「最低防守」：拿的是一手真成牌（中等牌档）、面对的是一注（不是
+    // 加注）时，不许把它接近 100% 扔掉，按尺度给一个混合跟注下限——真人的
+    // 「算了，看一眼」就是这个东西。
+    //
+    // 为什么必须有：tool/ai_river_defense_probe.dart 让对手拿**任意两张**
+    // 连开三枪，量 AI 在河牌第三枪上的弃牌率。改之前 AI 走到河牌的范围几乎
+    // 全是一对牌，而它对这一整片范围弃 87~100%，保本线（b/(p+b)，对手拿空气
+    // 开火不亏不赚的弃牌率）只有 25~38%——对手随便两张牌一路抡能白赢
+    // 40~70 个点。真人拿中等成牌在这种地方总要抽一部分来看，不会齐刷刷交牌。
+    //
+    // 只给**中等牌档**兜底，不给弱成牌（底对/第二对/顶对弱踢）兜底：
+    // 弱成牌是「抓诈唬」的主力，但它对面值多少是要读线的——对手连开三枪的
+    // 大注、或者一个满池，本来就是该让开的线（见「河牌底对：小注要按赔率跟，
+    // 大注照弃」「抓诈唬：对手前面都过牌后砸出来的大注，第二对也敢接」两条
+    // 用例）。给弱成牌也发一个固定下限，等于把「注越大越该尊重」这条线整个
+    // 抹平：探针里底对面对一个满池会从弃 90% 掉到 70%，面对超池反而不弃了。
+    // 中等牌档不一样，它上面本来就压着顶对/两对/三条，是这条街上靠后的
+    // 防守厚度，弃光它才是真的把底池白送。
+    //
+    // 下限随尺度递减：注越大越可能是真牌（也不能把「注越大抓得越少」压平），
+    // 所以 1/2 池抽四成、满池三成、超池两成不到。
+    final riverDefendFloor = (game.street == Street.river &&
+            !facingRaise &&
+            read.tier == HandTier.medium)
+        ? (0.55 - 0.24 * spot.betSizeRel).clamp(0.12, 0.55)
+        : 0.0;
 
     // 1) 怪兽牌：价值加注；加注战里已经打太多就转为跟注。
     //    底池相对筹码已经很大时，加注就是全下。
@@ -1363,7 +1385,12 @@ class AiPlayer {
     }
     // 3) 听牌：半诈唬加注 or 按（隐含）赔率跟注 or 放弃。
     if (read.hasDraw) {
-      if (canRaise && _roll(_semiBluffRaiseChance(read, spot, barrel))) {
+      // 听牌可以主动做 3-bet（对面下注、我加注，这是半诈唬的主力），但对面
+      // 再加回来就不该拿一把听牌去 4-bet——那是把筹码压在「他弃牌」上，而
+      // 加注战里没人会弃。所以闸门放到 2，跟怪兽/强牌的刻度对齐。
+      if (canRaise &&
+          spot.raisesThisStreet <= 2 &&
+          _roll(_semiBluffRaiseChance(read, spot, barrel))) {
         _registerFire(game.street, _PlanKind.semiBluff);
         return _raise(game, me, 0.75);
       }
@@ -1371,7 +1398,14 @@ class AiPlayer {
     }
     // 4) 中等牌：按赔率跟注，面对大注/强线弃牌；小注时偶尔反击。
     if (read.tier == HandTier.medium) {
-      if (spot.spr <= 1.2) return const AiDecision(ActionType.call);
+      // SPR 很低时人已经套进去了，中等牌愿意跟到底——但「套进去」不等于
+      // 「什么价格都跟」。一个 1.5 倍池的重注要 37% 胜率，中等牌对着连开
+      // 三枪的范围凑不出来；以前这里不看价格一律跟，探针里同一个中等牌档
+      // 面对 1 倍池弃六成、面对 1.5 倍池反而一个都不弃——下注尺度这个变量
+      // 在河牌被整个翻了过来。「超池是两极的」这条线不自动跟。
+      if (spot.spr <= 1.2 && spot.betSizeRel < 1.15) {
+        return const AiDecision(ActionType.call);
+      }
       var need = potOdds * (spot.villainStrength > 0.7 ? 1.3 : 1.1);
       // 跟注站的「黏」是对着下注的（一手小对陪你三条街），不是对着加注的：
       // 对面已经加注出来，中间牌力再跟就是在给价值下注付钱——风格再松也
@@ -1401,16 +1435,17 @@ class AiPlayer {
           _roll(_valueRaiseChance(game, me, spot, read))) {
         return _raise(game, me, 0.75);
       }
-      debugCall?.call('medium', equity(), need, game.street.name, spot.betSizeRel, facingRaise);
       if (!scary && _callMix(equity(), need)) {
         return const AiDecision(ActionType.call);
       }
       if (canRaise &&
           smallBet &&
           spot.opponents == 1 &&
+          spot.raisesThisStreet <= 1 &&
           _roll(0.15 * _aggression * _p.aggressionScale)) {
         return _raise(game, me, 0.7); // 对手像是在打阻挡注
       }
+      if (_roll(riverDefendFloor)) return const AiDecision(ActionType.call);
       return const AiDecision(ActionType.fold);
     }
     // 5) 弱成牌（一对但被压制：底对、第二对弱踢、顶对弱踢、被盖过的口袋对）：
@@ -1465,10 +1500,26 @@ class AiPlayer {
       // 对手打多大我们都一样跟，他拿任意两张牌打个满池就能白拿底池。
       // 改成「小注封得低、大注封得高」之后，2/3 池保持原来的五成上下，
       // 满池掉到两成多，跟注率重新随尺度递减。
-      if (game.street == Street.river &&
-          !facingRaise &&
-          spot.betSizeRel < 1.15) {
-        need = min(need, 0.34 + 0.12 * spot.betSizeRel);
+      // 翻牌/转牌同样要有个顶：上面那些余量是「胜率兑现率」的粗模型，而
+      // 兑现率本身有物理上限——一对牌再差也在 0.7 上下，折成门槛就是赔率的
+      // 1.4 倍左右，没位置再高一档。没有这个顶，各项相乘会把门槛顶到赔率的
+      // 1.8~2.8 倍：探针实测翻牌面对一个满池，弱成牌门槛中位 0.61，同一批牌
+      // 对着范围算出的胜率中位是 0.41（赔率只要 0.33），只有 6% 过门槛——
+      // 等于拿到正确价格还把自己的牌扔掉，对手拿任意两张牌满池一抡就白拿。
+      // 顶是「赔率的倍数」而不是定值，所以注越大门槛越高的方向不变。
+      // 封顶必须跟门槛一起按风格缩：跟注站「赔率上该弃也跟」靠的是把门槛
+      // 整体打折（1 - callSlack），封顶写成死数就等于在大注面前把三种风格
+      // 压成同一个数——探针实测底对面对翻牌一个满池，紧凶/松被动/松凶的
+      // 弃牌率都是 35%，牌桌上最黏的那类人跟谁都不差一格，风格标签就白贴了。
+      final styleSlack = 1 - _p.callSlack;
+      final realizationCap = potOdds *
+          (spot.inPosition ? 1.3 : 1.6) *
+          (game.street == Street.turn ? 1.1 : 1.0) *
+          styleSlack;
+      if (!facingRaise && spot.betSizeRel < 1.15) {
+        need = game.street == Street.river
+            ? min(need, (0.34 + 0.12 * spot.betSizeRel) * styleSlack)
+            : min(need, realizationCap);
       }
 
       // 底对、第二对也能拿来反击：频率比中等牌低，但只要有这个频率，
@@ -1478,14 +1529,17 @@ class AiPlayer {
           _roll(_valueRaiseChance(game, me, spot, read))) {
         return _raise(game, me, 0.75);
       }
-      debugCall?.call('weak', equity(), need, game.street.name, spot.betSizeRel, facingRaise);
       if (_callMix(equity(), need)) return const AiDecision(ActionType.call);
       // 一对牌是拿来抓诈唬的，赔率不够就老实弃——拿它去加注诈唬等于
       // 把更差的牌打走、被更好的牌跟注（「有摊牌价值的牌不诈唬」）。
-      if (canRaise && read.blockerScore >= 0.5 && _roll(0.04)) {
+      if (canRaise &&
+          spot.raisesThisStreet <= 1 &&
+          read.blockerScore >= 0.5 &&
+          _roll(0.04)) {
         _registerFire(game.street, _PlanKind.pureBluff);
         return _raise(game, me, 0.8);
       }
+      if (_roll(riverDefendFloor)) return const AiDecision(ActionType.call);
       return const AiDecision(ActionType.fold);
     }
     // 6) 空气：弃牌为主。但翻牌圈的「后门花 + 两张高张」（A 高、K 高这种）
@@ -1512,11 +1566,15 @@ class AiPlayer {
         !facingRaise &&
         spot.opponents == 1 &&
         read.overcards >= 1 &&
-        (() { debugCall?.call('air', equity(), potOdds * 0.7, game.street.name, spot.betSizeRel, facingRaise); return _callMix(equity(), potOdds * 0.7); })()) {
+        _callMix(equity(), potOdds * 0.7)) {
       return const AiDecision(ActionType.call);
     }
-    // 极少数情况诈唬加注。
-    if (canRaise && _roll(_bluffRaiseChance(game, me, spot, read))) {
+    // 极少数情况诈唬加注。空气只在下注面前诈唬（<=1，也就是一次加注都不
+    // 还没发生）；已经有人加过注还拿空气往上顶，就是纯送——真人拿空气做
+    // 3-bet 只挑阻断牌很硬的场合，频率远低于这里能放出来的量。
+    if (canRaise &&
+        spot.raisesThisStreet <= 1 &&
+        _roll(_bluffRaiseChance(game, me, spot, read))) {
       _registerFire(game.street, _PlanKind.pureBluff);
       return _raise(game, me, 0.8);
     }
@@ -1541,7 +1599,9 @@ class AiPlayer {
     if (spot.toCall <= 0) return const AiDecision(ActionType.check);
     // 河牌听牌已死：不再跟注买牌，改为小频率诈唬（有阻断牌时更合理）。
     if (game.street == Street.river) {
-      if (spot.canRaise && _roll(_bluffRaiseChance(game, me, spot, read))) {
+      if (spot.canRaise &&
+          spot.raisesThisStreet <= 1 &&
+          _roll(_bluffRaiseChance(game, me, spot, read))) {
         _registerFire(game.street, _PlanKind.pureBluff);
         return _raise(game, me, 0.75);
       }

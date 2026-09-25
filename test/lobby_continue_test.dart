@@ -33,6 +33,11 @@ void main() {
       if (live.heroToAct) live.heroAct(ActionType.call);
       await Future<void>.delayed(const Duration(milliseconds: 5));
     }
+    // 落盘是故意做成「不阻塞 UI」的（每次动作都 unawaited 地写一次），所以
+    // 这里必须显式等它写完：不等的话，机器一忙（回归里十几个进程并行）这次
+    // 写就可能还没落，下面 coldStart 读出 null，`savedSession!` 直接抛空——
+    // 这条用例曾经因此偶发失败，看着像回归红了，其实是被自己的时序坑了。
+    await live.persistSession();
     return live;
   }
 
