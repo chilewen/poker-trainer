@@ -1,7 +1,7 @@
 name: poker_trainer
 description: 德州扑克训练器：对局、复盘、错局重玩、概率计算
 publish_to: "none"
-version: 0.1.0+4
+version: 0.1.0+6
 
 environment:
   sdk: ^3.12.0

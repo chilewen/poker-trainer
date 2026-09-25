@@ -8,7 +8,7 @@
 #                                                 # 不分片，也不代表回归通过，只是这一条过得去）
 #   zsh tool/sharded_test.sh --verbose              # 连每片的完整输出一起打
 #
-# 为什么不直接用 flutter test：它只按**文件**并行。test/engine_test.dart 把 96 条
+# 为什么不直接用 flutter test：它只按**文件**并行。test/engine_test.dart 把 121 条
 # 用例塞在一个文件里，其中 30 多条要重放几百手完整的 AI 牌局，占掉整套回归一半以
 # 上的墙钟，而 flutter test 对这个文件完全用不上并行。这里改用 Flutter SDK 自带的
 # frontend_server + flutter_tester 直接跑：
@@ -17,7 +17,7 @@
 #      多个测试文件也会复用同一份缓存，所以「没改代码再跑一遍」几乎零成本）；
 #   2. 按用例拆片（靠 test/support/test_shard.dart 里的 TEST_SHARD=k/n）。用例之间
 #      没有任何共享状态，分片只换「谁跑哪条」，跑到的用例跟整跑逐条一致（对拍过
-#      96 条：无丢失无重复），任意一片失败整体就失败；
+#      121 条：无丢失无重复），任意一片失败整体就失败；
 #   3. 结果以「All tests passed!」汇总行为准——flutter_tester 有用例失败时自己也
 #      返回 0，照抄它的退出码等于把门禁废掉。
 #

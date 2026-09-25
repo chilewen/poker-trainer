@@ -394,6 +394,54 @@ class HandReading {
     return s.clamp(0.0, 1.0);
   }
 
+  /// 强牌档（[HandTier.strong]）里「不该跟顶对走同一条弃牌线」的牌，该按
+  /// 顶对那条线打几折（1 = 就是普通强牌，原样走）。
+  ///
+  /// 强牌这一档装的东西差得很远，而 AI 的强牌分支在河牌挂了一条「面对重注
+  /// 要挑着弃」的线（`strongFoldVsBigBet`），那条线是照顶对写的：
+  ///   · **超对**：它打赢顶对——对手拿顶对就是被我们盖住。可 [overPair]
+  ///     这个字段算出来了却一直没人读，探针实测同一块 Q♥7♦2♣5♥9♠ 上面对 1.5
+  ///     倍池，A♥Q♦（顶对顶踢）和 K♥K♠（超对）的读数**逐字相同**（弃
+  ///     46%），等于拿超对跟顶对一起弃超池。
+  ///   · **三张同花面上被降档的顺子/三条/两对**（见 [_tierOf]）：降档是为了
+  ///     「别无脑打光」，不是「跟顶对一起弃」——探针实测三张方片牌面上面对
+  ///     1.5 倍池，顺子弃 56%、三条弃 57%、两对弃 52%，跟顶对顶踢的 58%
+  ///     几乎一样，[_tierOf] 里「以跟注为主」的意图根本没落地。
+  /// 这些牌都打赢对手范围里的两对/三条/顶对，成色越硬越该跟。
+  double get strongFoldScale {
+    if (tier != HandTier.strong) return 1.0;
+    if (overPair) return 0.4;
+    if (texture.maxSuitCount < 3) return 1.0;
+    return switch (category) {
+      HandCategory.straight => 0.45,
+      HandCategory.trips => 0.55,
+      HandCategory.twoPair => 0.7,
+      _ => 1.0,
+    };
+  }
+
+  /// 怪兽档（[HandTier.monster]）内部的成色，0~1。
+  ///
+  /// [HandTier] 只有五档，两对、三条、顺子、同花、葫芦全挤在「怪兽牌」这一档
+  /// 里；可真人拿两对和拿顺子面对同一个超池，愿意放进去的钱差得远——前者是
+  /// 抓诈唬的牌，后者才是把筹码推进去的那一手。AI 的怪兽分支要用它把「加注收
+  /// 价值」和「跟注留住诈唬」的比例分开：以前这一档只看 tier，探针实测河牌拿
+  /// 99（三条）和拿 97（两对）对着 1.5 倍池的读数逐字相同（跟 62% / 加 38%），
+  /// 对手从「他加不加」里读不出我们拿着哪一档。
+  ///
+  /// 取值只对落在怪兽档里的牌有意义：三条这一档进到 monster 的一定是口袋对中
+  /// 的三条（set），底牌配公共对那种「明三条」在 [_tierOf] 里已经被降到强牌。
+  double get monsterGrade => switch (category) {
+        HandCategory.straightFlush => 1.0,
+        HandCategory.quads => 1.0,
+        HandCategory.fullHouse => 1.0,
+        HandCategory.flush => 0.85,
+        HandCategory.straight => 0.8,
+        HandCategory.trips => 0.6, // 只有 set 能走到这里
+        HandCategory.twoPair => 0.3,
+        _ => 0.5,
+      };
+
   bool get hasFlushDraw => flushOuts > 0;
   bool get hasStraightDraw => straightOuts > 0;
   bool get hasDraw => drawOuts >= 4;

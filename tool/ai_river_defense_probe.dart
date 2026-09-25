@@ -26,6 +26,14 @@
 //   * 超池——两极化的线，不硬接。
 // 这三条都有 engine_test 的用例钉着，这里量的是「小注有没有被白抢」。
 //
+// 对面的 AI 是**一个实例连着打完整格的手牌**，跟真桌一样（TableController 里
+// 每个座位只在开局建一次 AiPlayer），所以读牌档案是跨手累积的：一个连开三枪
+// 开了两三手的对手，进攻率会顶到 1.0，AI 会把他读成「逮到机会就往里砸」的那种
+// （实测每一格 heroAggro = 1.000）。以前这里是每手新建一个 AiPlayer，读牌引擎
+// 等于被关掉了——量出来的弃牌率里混着一整块「读人根本没生效」的假象：同一个
+// 对手连开三枪几手之后，AI 翻牌/转牌的跟注量本该翻倍（每格样本 47 → 100），
+// 而那时道具里一个点都不动。
+//
 // 每个牌面还会多打一张「沿街筛选」表：AI 在翻牌、转牌面对开火时手里是什么
 // 档、弃掉多少。河牌的防守范围不是凭空来的，它是前两条街一路筛出来的结果；
 // 这张表用来看「是哪一条街把弱牌放进了河牌」——只有小注那档被白抢，才值得
@@ -63,16 +71,27 @@ class _Stats {
 
 _Stats _run(String board, double riverFrac, int seeds) {
   final st = _Stats();
+  // 一个 AI 实例连着打完整格的所有手牌——真桌就是这么干的（TableController
+  // 里每个座位只在开局建一次 AiPlayer），而读牌是**跨手累积**的：一个对手
+  // 连开三枪开了两三手，aggroRate 就该顶到 1.0，AI 该把他读成「逮到机会
+  // 就往里砸」的那种，然后跟宽一点。
+  //
+  // 以前这里是每手新建一个 AiPlayer（`_reads` 空、aggroRate 停在样本不足的
+  // 中性 0.33）：这个道具量的是「对手拿任意两张连开三枪能不能白抢」，可它
+  // 自己让 AI 永远读不出对面就是那个疯子——量出来的弃牌率里混着一整块
+  // 「读人根本没生效」的假象。跨手状态不是问题：decide() 靠 handId 判断换
+  // 手、会把诈唬计划清掉（见 AiPlayer.decide）。
+  final ai =
+      AiPlayer(AiStyle.tightAggressive, random: Random(20250925));
   for (var seed = 0; seed < seeds; seed++) {
     final rnd = Random(seed);
     final g = GameEngine(
-      config:
-          const GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100),
-      random: rnd,
-    )
+        config:
+            const GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      )
       ..addPlayer('ai', 'AI')
       ..addPlayer('hero', 'Hero');
-    final ai = AiPlayer(AiStyle.tightAggressive, random: rnd);
     g.buttonIndex = 0; // startHand 里 +1 → 英雄坐按钮，AI 守大盲
     g.startHand(boardOverride: cs(board));
 
@@ -225,11 +244,18 @@ Future<void> main(List<String> args) async {
       // 档位构成，不判「能不能被白抢」。要看准数字就给脚本传手数：
       //   dart tool/ai_river_defense_probe.dart 12000
       final enough = st.total >= 40;
-      final verdict = !enough
-          ? '~样本少'
-          : (foldPct > needPct + 5
-              ? '★可被任意两张白抢 +${(foldPct - needPct).toStringAsFixed(0)}pt'
-              : 'OK');
+      // 文件头上「刻意让开、Star 不用管」的那几档（3/4 池往上，含满池和超池）
+      // 不出结论：那几条线另有 engine_test 的用例钉着（「第二对面对连开三枪
+      // 要尊重」「底对面对一个底池的大注照样弃」），这里印出来是给人看斜率
+      // 的——以前 1.0 池那一行照旧标 ★，等于让道具自己打自己的文档。
+      final exempt = frac >= 0.75;
+      final verdict = exempt
+          ? '~判据不管（3/4 池往上）'
+          : (!enough
+              ? '~样本少'
+              : (foldPct > needPct + 5
+                  ? '★可被任意两张白抢 +${(foldPct - needPct).toStringAsFixed(0)}pt'
+                  : 'OK'));
       print('  ${frac.toStringAsFixed(2).padLeft(4)} 池 '
           '（实际 ${(st.fracSum / st.total * 100).toStringAsFixed(0)}%）  '
           '弃 ${foldPct.toStringAsFixed(0).padLeft(3)}%  '

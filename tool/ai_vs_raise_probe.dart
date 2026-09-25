@@ -118,6 +118,35 @@ void main() {
     (name: '卡顺 76 on 9d5c2s', hole: '7h 6h', board: '9d 5c 2s'),
     (name: '空气 87 on AsKdQc', hole: '8h 7h', board: 'As Kd Qc'),
   ];
+  // 转牌的牌面**也要钉住**，不然引擎会自己发一张转牌：标签写着「卡顺」，
+  // 那手牌在发到 4 或 8 之后就变成了两头顺（8 outs）、发到 8 还直接成顺，
+  // 一行数字是好几手牌混出来的，跟标签对不上。上面 [hands] 的 3 张牌面配
+  // `street: Street.turn` 时就是这么跑的——探针实测那一行「卡顺 76」在转牌
+  // 被加注的 3-bet 率是 26%，看着跟坚果花听的 28% 一样高，其实那 26% 里
+  // 一大半样本已经变成两头顺了。发牌都钉死之后才读得出手牌强度和尺度之间
+  // 的真实关系。选牌原则：每张转牌都不许把这一手的牌力改档（三条还是三条、
+  // 卡顺还是 4 张出路、空气还是空气），见各行的注释。
+  final turnHands = <({String name, String hole, String board})>[
+    // 9♠6♥2♦ + 2♣：三条 99 不变（公共对 2 只是多一对废牌）。
+    (name: '三条 99 on 9s6h2d2c', hole: '9h 9d', board: '9s 6h 2d 2c'),
+    // 7♠4♣2♦ + 5♥：超对 99 不变。
+    (name: '超对 99 on 7s4c2d5h', hole: '9h 9d', board: '7s 4c 2d 5h'),
+    // A♠7♣2♦ + 5♥：顶对顶踢 A，A/K/7/5/2 没有顺听。
+    (name: '顶对顶踢 AK on As7c2d5h', hole: 'Ah Kd', board: 'As 7c 2d 5h'),
+    // A♠7♣2♦ + 5♥：顶对弱踢 A8，同样没有顺听。
+    (name: '顶对弱踢 A8 on As7c2d5h', hole: 'Ah 8d', board: 'As 7c 2d 5h'),
+    // K♥8♦3♣ + 5♥：第二对 87（5 跟 7/8 连不上四张）。
+    (name: '第二对 87 on Kh8d3c5h', hole: '8h 7s', board: 'Kh 8d 3c 5h'),
+    // K♠7♦3♣ + 2♣：底对 43（用 2♣ 而不是 5♥——5 会让它多一个卡顺）。
+    (name: '底对 43 on Ks7d3c2c', hole: '4h 3h', board: 'Ks 7d 3c 2c'),
+    // Q♦7♦2♣ + 5♥：坚果花听 9 张（就是别处一直在量的那块牌面）。
+    (name: '花听 AKs on Qd7d2c5h', hole: 'Ad Kd', board: 'Qd 7d 2c 5h'),
+    // 9♦5♣2♠ + 10♣：卡顺 76 还是 4 张（要 8）——4 会变两头顺、8 直接成顺，
+    // 所以转牌特意挑 10。
+    (name: '卡顺 76 on 9d5c2s10c', hole: '7h 6h', board: '9d 5c 2s 10c'),
+    // A♠K♦Q♣ + 2♣：纯空气 87（要 2♣ 而不是 5♥——5 会送来一个卡顺）。
+    (name: '空气 87 on AsKdQc2c', hole: '8h 7h', board: 'As Kd Qc 2c'),
+  ];
   // 河牌是「我下注被他加注」最该收手的地方：加注是最后一条街最实的信号，
   // 一对牌被抬起来还一路跟到底，等于对手随便两张牌加一下就能白拿底池。
   // 同一个牌力的名字沿用上面的，只是把牌面补满五张。
@@ -136,7 +165,12 @@ void main() {
     print('== ${streetName[street]}圈：AI 下注 → 英雄加注 ==');
     for (final mult in [2.2, 3.5]) {
       print('-- 加注到 $mult 倍 --');
-      for (final h in street == Street.river ? riverHands : hands) {
+      final list = switch (street) {
+        Street.turn => turnHands,
+        Street.river => riverHands,
+        _ => hands,
+      };
+      for (final h in list) {
         final r = vsRaise(h.hole, h.board, mult, street: street);
         print('${h.name.padRight(24)} n=${r.n.toString().padLeft(3)}  '
             '弃 ${(100 * r.fold).round()}%  跟 ${(100 * r.call).round()}%  '

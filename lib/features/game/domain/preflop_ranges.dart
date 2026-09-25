@@ -266,10 +266,18 @@ class PreflopRanges {
             offsuitBroadway: 12,
             suitedConnector: 8,
           ), // ~15%
-        // 33+ / A7s+ / 全部同花大牌 / 76s+ / 75s+ / ATo+ / KJo+ / QJo
+        // 33+ / 任意同花 A / 全部同花大牌 / 76s+ / 75s+ / ATo+ / KJo+ / QJo
         Seat.mp => const PreflopRange(
             pair: 3,
-            suitedAce: 7,
+            // 「任意同花 A」而不是 A7s+：中位本来就开 76s / 75s / 33，
+            // 却把 A5s 这种标准的开池 + 3bet 诈唬牌扔掉，是一张自相矛盾的
+            // 表——探针 tool/ai_preflop3bet_probe.dart 实测中位拿 A5s 的
+            // 开池率是 0/300，而 22、98s、76s 都在开。轮子 A（A5s~A2s）
+            // 的真实价值（坚果花 + 轮子顺 + 阻断牌）在真人的中位开池表里
+            // 从不缺席；后位的 CO / BTN 本来也是「任意同花 A」，这里跟它们
+            // 对齐。宽度只多 5 个组合（约 +0.4%），中位依旧比 CO 紧一档
+            // （同花连张 7 vs 5、对子 3 vs 2、非同花大牌 11 vs 10）。
+            suitedAce: 2,
             offsuitAce: 10,
             suitedBroadway: 10,
             offsuitBroadway: 11,
@@ -369,6 +377,55 @@ class PreflopRanges {
             offsuitBroadway: 12,
           ),
         _ => const PreflopRange(),
+      };
+
+  /// 溜入的人多起来之后的「中间档」溜入范围。
+  ///
+  /// [limp] 只玩同花牌、对子、A 高张。可面对两家以上的溜入，真人还会用
+  /// 便宜价格补上看翻牌的非同花牌：87o+ 这种连张、A9o+/AJo+/KQo 这种大牌
+  /// ——底池赔率好、位置在后，买一个翻牌就够本。这批牌既不该整档放开
+  /// （[limpLoose] 是跟注站的范围，对紧凶太松），也不能一直留在标准表外面
+  /// （那就成了「1 家溜入和 4 家溜入同一个动作」）。
+  ///
+  /// 所以单列一档：在标准表上多开非同花连张 / 非同花大牌 / 弱 A。进不进还
+  /// 要按比例（见 AiPlayer 里的 midMix），这张表只划边界。
+  ///
+  /// 门槛写得比标准表低，是因为它还会吃到风格的 `limpShift + w`（0~2 档，
+  /// 见 AiPlayer._preflop）——紧凶偏移完落在 87o+ / ATo+ / A8o+ 这一层，
+  /// 松凶偏移更大、落在 98o+ / AJo+，本来就该更少用补齐进池（它加注更多）。
+  ///
+  /// 副作用记一笔（改完对拍过全部 7 个探针）：ai_preflop3bet_probe 第五节按
+  /// 预期全变（87o 紧凶补齐 12/42/57/69%），ai_reraise_probe 也跟着动（9 人桌
+  /// 1200 手自走：翻后加注 264 → 268、单街 2+ 次加注 60 → 59，其中「一对」的
+  /// 3-bet 从 12 手掉到 7 手、占 3-bet 的比例 24% → 16%，第 3+ 次加注里怪兽牌
+  /// 仍占八成），ai_probe / ai_multi_probe / ai_vs_raise / ai_draw /
+  /// ai_river_defense 逐字不动。翻前多一批牌跟着进池，后面的手牌分布本来就
+  /// 会变，这里记的是方向：把关的「别拿一对反加」那条线是往好的方向走的。
+  static PreflopRange limpMid(Seat seat) => switch (seat) {
+        // 大盲不用补钱，走不到这条线（见 AiPlayer._preflop 里 toCall == 0 那段）。
+        Seat.bb => const PreflopRange(),
+        Seat.sb => const PreflopRange(
+            pair: 2,
+            suitedAce: 2,
+            suitedBroadway: 10,
+            suitedConnector: 5,
+            suitedGapper: 5,
+            suitedAny: 5,
+            offsuitAce: 7,
+            offsuitBroadway: 9,
+            offsuitConnector: 5,
+          ),
+        _ => const PreflopRange(
+            pair: 2,
+            suitedAce: 3,
+            suitedBroadway: 10,
+            suitedConnector: 5,
+            suitedGapper: 6,
+            suitedAny: 8,
+            offsuitAce: 7,
+            offsuitBroadway: 9,
+            offsuitConnector: 5,
+          ),
       };
 
   /// 跟注站的溜入范围：标准溜入范围只玩「同花牌 + 对子 + A 高张」，

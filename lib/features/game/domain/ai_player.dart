@@ -418,6 +418,21 @@ class AiPlayer {
     return reads.length == 1 && reads.first.aggroRate >= 0.45;
   }
 
+  /// 「对手有多疯」的连续量：0 = 闷不吭声/正常，1 = 逮到机会就往里砸。
+  ///
+  /// 跟 [_facingManiac] 共用 0.45 那条线（我们的松凶自己才 0.40，能过线的
+  /// 就是真疯子），只是把布尔换成斜坡：河牌防守下限要跟着它连续回调，不能
+  /// 在某一个进攻率上换一整套打法——真人对付不同脾气的人是渐变的。
+  double _maniacWiden(GameEngine game, PlayerState me) {
+    final reads = _readsOf(game, me);
+    if (reads.isEmpty) return 0.0;
+    var sum = 0.0;
+    for (final r in reads) {
+      sum += ((r.aggroRate - 0.45) / 0.15).clamp(0.0, 1.0);
+    }
+    return sum / reads.length;
+  }
+
   /// 价值因子：对手爱跟注（跟注站）就打得更大、更粘。
   double _exploitValueFactor(GameEngine game, PlayerState me) {
     final reads = _readsOf(game, me);
@@ -514,9 +529,16 @@ class AiPlayer {
             : const AiDecision(ActionType.check);
       }
       var openRange = PreflopRanges.open(seat).shifted(_p.openShift + w);
-      // 前面已经有人溜入：非同花牌容易被后面压制，收紧一点。
+      // 前面已经有人溜入：非同花牌容易被后面压制，溜进来的人越多收得越紧。
+      //
+      // 以前这里是一个布尔台阶（`>= 2 ? 2 : 1`）：1 家溜入收一档，2 家以上
+      // 一刀两档，而且 2/3/4/5 家**全是同一个数**——对手把溜入人数从 2 加到 5，
+      // 我们的开池范围一个字都不动。探针实测（tool/ai_preflop3bet_probe.dart
+      // 第五节：8 人桌、AI 钉在按钮、桌子大小和座位固定，只让已溜入家数变）
+      // 就是这个读数。现在按人数一档一档收，4 档封顶（再往后这些非同花牌
+      // 本来也早出范围了）。
       if (spot.limpers > 0) {
-        openRange = openRange.shiftedOffsuit(spot.limpers >= 2 ? 2 : 1);
+        openRange = openRange.shiftedOffsuit(min(4, spot.limpers));
       }
       final openable = openRange.contains(hand);
       if (toCall == 0) {
@@ -558,13 +580,28 @@ class AiPlayer {
       // （见 [PreflopRanges.limpOpen]）。本来就爱溜入的松被动照旧走宽范围。
       final cheap = toCall <= bb;
       final openLimp = spot.limpers == 0 && !_p.limpsAnyPrice;
-      final limpBase = openLimp
-          ? PreflopRanges.limpOpen(seat)
+      final standard = PreflopRanges.limp(seat).shifted(_p.limpShift + w);
+      final midLimp = PreflopRanges.limpMid(seat).shifted(_p.limpShift + w);
+      // 两家以上溜入、又不是跟注站：走「中间档」——标准表之外再把非同花
+      // 连张 / 非同花大牌 / 弱 A 捞回来，让它们能用便宜价格补着看翻牌。
+      // 1 家那一档照旧用标准表（锚点不动）。
+      final useMid = !openLimp && !_p.wideLimp && spot.limpers >= 2;
+      final limpRange = openLimp
+          ? PreflopRanges.limpOpen(seat).shifted(_p.limpShift + w)
           : (_p.wideLimp
-              ? PreflopRanges.limpLoose(seat)
-              : PreflopRanges.limp(seat));
-      final limpRange = limpBase.shifted(_p.limpShift + w);
+              ? PreflopRanges.limpLoose(seat).shifted(_p.limpShift + w)
+              : (useMid ? midLimp : standard));
       if (limpRange.contains(hand) && (cheap || _p.limpsAnyPrice)) {
+        // 中间档独有的那批牌（非同花连张 / 大牌 / 弱 A）只按比例进来：溜入
+        // 的人越多越愿意补，但永远留一部分弃牌。不然它只是从「一律弃」换成
+        // 「一律补」——台阶换了个位置，读起来还是一句话。
+        //
+        // 探针实测（同一节）：改之前这批牌在 2 家往上是一律弃（87o 弃 100%、
+        // A8o/KQo 在 4 家也是弃 100%），而标准表里根本没有它们的位置。
+        if (useMid && !standard.contains(hand)) {
+          final midMix = (0.45 + 0.12 * (spot.limpers - 2)).clamp(0.0, 0.9);
+          if (!_roll(midMix)) return const AiDecision(ActionType.fold);
+        }
         return const AiDecision(ActionType.call);
       }
       return const AiDecision(ActionType.fold);
@@ -575,6 +612,9 @@ class AiPlayer {
     // ---- 面对 3bet 及以上：只打顶端，深筹码+有位置才用跟注范围 ----
     if (raises >= 2) {
       final premium = hand.isPair && hand.high >= Rank.king.value; // AA / KK
+      // 这一次 3bet 要价多少 bb。跟注范围和轻 4bet 两处都要用它看价格，
+      // 提到这里算一次（下面「最小加注还是加三倍」那段用的是同一个值）。
+      final threeBetBb = game.currentBet / bb;
       // 已经是 4bet 及以上的底池（我们 4bet 被 5bet，或者对手直接 4bet
       // 过来）：这里只有 AA/KK 还值得继续。拿 QQ/AK 去跟 4bet 是白送——
       // 对手敢 4bet，范围里已经没有它们能压住的东西了。
@@ -612,10 +652,57 @@ class AiPlayer {
       // （见 PreflopRanges.isLightFourBetHand）。频率比轻 3bet 高一档：
       // 这些牌在 3bet 底池里翻后没有摊牌价值，「跟注」是纯亏的打法，
       // 压回去才换得到弃牌率 + 阻断牌的价值（紧凶约三成、松凶约五成）。
+      //
+      // 但这个频率得跟着价格走。以前它是个常数，探针实测
+      // （tool/ai_preflop3bet_probe.dart）A5s 对着 4.7 / 7.0 / 9.0 / 14.0bb
+      // 一律「加注 28%」——9bb 和 14bb 那两行的弃牌率甚至逐字相同。对手
+      // 只要把 3bet 加到 14bb，就能稳定地拿 AA/KK 从我们身上收下两成八个
+      // 30bb 的 4bet：我们要投的筹码翻了三倍，而敢加到 14bb 的范围本身就实
+      // 得多（弃给我们 4bet 的比例低得多），两头的期望一起往负的走。
+      //
+      // 锚点跟 [priceyShift] 用同一个「10bb 以上才算贵」的门槛：14bb 收到
+      // 基频的两成——不归零是因为 A5s 的阻断牌价值不随价格消失，真人对着
+      // 大 3bet 也会零星空压一把，只是不再是两成八。
+      final lightFourBetPrice =
+          0.2 + 0.8 * ((14.0 - threeBetBb) / 4.0).clamp(0.0, 1.0);
+      // 但贵那侧收完之后，「10bb 以下不动」自己又成了常量区间：探针实测
+      // （tool/ai_preflop3bet_probe.dart 第四节，四个点位逐字相同）A5s 对着
+      // 4.7 / 6.2 / 8.0 / 10.0bb 一律「加注 28%」——三种风格全一样（紧凶
+      // 28%、松凶 55%）。可 4.7bb 那档 4bet 出去只要投十几个 bb，14bb 那档
+      // 要投三十个：上面那条「贵了要收」的理由（投进去的钱跟着价格翻倍）
+      // 在便宜那头是反过来成立的，压回去的成本越低越该压。对手把 3bet 从
+      // 5bb 加到 10bb、看我们的 4bet 频率一动不动，就能白拿到「3bet 更贵
+      // 但还是一样的弃牌率」。
+      //
+      // 补法是「往上限靠」而不是乘系数：松凶实测已经在 55%（比上限还高），
+      // 再乘一个 >1 的系数会把它顶到七八成。所以拿离 45% 上限的余量、
+      // 按便宜程度补四成——紧凶那头 4.7bb 补到约 35%，松凶那头因为余量是
+      // 负的（已经被 clamp 成 0）一个点不动。
+      final lightCheapRamp = ((10.0 - threeBetBb) / 5.5).clamp(0.0, 1.0);
+      final lightFourBetChance =
+          _p.lightThreeBet * 2.5 * _bluffiness * lightFourBetPrice;
+      final cheapHeadroom =
+          (0.45 - lightFourBetChance).clamp(0.0, 1.0) * 0.4 * lightCheapRamp;
+      // 但 14bb 往上又是一段平台：探针实测（tool/ai_preflop3bet_probe.dart
+      // 第四节）A5s 对着 14 / 16 / 18 / 20bb 四行逐字相同的「加注 6%」——
+      // 对手把 3bet 从 14bb 抬到 20bb，我们 4bet 出去要投的筹码从三十个涨到
+      // 五十几个，敢加到 20bb 的范围又硬得多（弃给我们 4bet 的比例低得多），
+      // 两头的期望一起往下走，频率却一个点不动。所以贵那侧接着收：
+      //
+      //   1 / (1 + 0.9 * (threeBetBb - 14) / 8)
+      //
+      // 故意用倒数，而不是「收到某个地板就夹住」：夹住等于在 22bb 又造一段
+      // 平台，可 14bb 往上本来就是因为「越贵越该收」才动的，没理由在某个数
+      // 上停下来。这条曲线一路往零收但收不到零——A5s 的阻断牌价值不随价格
+      // 消失，真人对着再大的 3bet 也会零星空压一把。20bb 收到六成、22bb 收
+      // 到一半、50bb 只剩两成；≤14bb 因子恒为 1，便宜侧那条斜坡和 14bb 这个
+      // 锚点逐点不变。
+      final lightExpensiveRamp =
+          1 / (1 + 0.9 * ((threeBetBb - 14.0) / 8.0).clamp(0.0, 64.0));
       if (_p.lightThreeBet > 0 &&
           toCall < me.stack * 0.4 &&
           PreflopRanges.isLightFourBetHand(hand) &&
-          _roll(_p.lightThreeBet * 2.5 * _bluffiness)) {
+          _roll((lightFourBetChance + cheapHeadroom) * lightExpensiveRamp)) {
         return AiDecision(ActionType.raise,
             amountTo: _fourBetSize(game, spot, me));
       }
@@ -628,7 +715,6 @@ class AiPlayer {
       // 前者跟 1.5bb 就能抢一个 6bb 的底池（约 20% 赔率 + 后面一大截隐含
       // 赔率），后者是真金白银的要价。以前这里一个门槛打天下，英雄最小加注
       // 到 4.7bb 时 99 都有 82% 直接弃牌——对手拿任意两张牌最小加注都是赚的。
-      final threeBetBb = game.currentBet / bb;
       // 「便宜的 3bet」这一档以前写成 `<=5.5bb 或者 <=2.2 倍开池` 两个硬条件
       // 的或，一过界就整档换范围。可开池尺度本身是混合的（同一个 3bet 到
       // 620，撞上 335 的开池只是 1.85 倍、撞上 242 的却是 2.56 倍），于是
@@ -852,24 +938,52 @@ class AiPlayer {
     final street = game.street;
     final tightness = spot.villainTightness;
 
+    // 范围表是按「正常人」排的：位置越靠后越宽，但总有个底。碰上被读成
+    // 疯子的对手（见 [_maniacWiden]）这套卡尺就不适用了——他本来就会用
+    // 任何两张牌开池/加注，范围之外那些牌不该只剩 0.06。这一项塌下去，
+    // 后面 `lineAgg` 那一段把空气收得再松也补不回来：对手的范围里根本
+    // 没有牌可以代表他在诈唬，算出来的胜率自然还是「他一路开火 = 我死」。
+    //
+    // 探针实测（tool/ai_river_defense_probe.dart，同一个 AI 连着打、读牌
+    // 已生效）：光放开 `lineAgg` 之后，湿润面 2/3 池的 ★ 已经消失（弃 41%
+    // vs 保本线 40%），但配对面 2/3 池还挂着 ★ +13pt——那一格 AI 手里是
+    // 「弱成牌」档（42 手弃了 40 手），它们的胜率全是靠翻前范围表算出来的，
+    // 而那张表里根本没有疯子会用 7x、8x 之外的垃圾开三枪这回事。
+    //
+    // 这一项单独跳出来量过，别只信默认的 6000 手（那点数不够，正负十来个点
+    // 就把结论淹了）：`dart tool/ai_river_defense_probe.dart 30000`，河牌
+    // 2/3 池、对手连开三枪，有/无这一项分别是 干燥 22% / 25%、湿润 32% / 42%、
+    // 配对面 40% / 55%（不加这一项配对面就是 ★+16pt）。
+    final maniacWiden = _maniacWiden(game, me);
+
     /// 这手底牌出现在对手翻前范围里的权重（0~1）。
     double preflopWeight(List<Card> hole) {
       final h = PreflopHand.of(hole);
+      final double raw;
       if (spot.preflopRaises >= 2) {
         // 3bet 底池：要么是再加注的顶端牌力，要么是跟注 3bet 的投机牌。
-        if (PreflopRanges.valueThreeBet(raiserSeat).contains(h)) return 1.0;
-        return PreflopRanges.callThreeBet.contains(h) ? 0.3 : 0.06;
-      }
-      if (spot.preflopRaises == 1) {
+        if (PreflopRanges.valueThreeBet(raiserSeat).contains(h)) {
+          raw = 1.0;
+        } else {
+          raw = PreflopRanges.callThreeBet.contains(h) ? 0.3 : 0.06;
+        }
+      } else if (spot.preflopRaises == 1) {
         // 对手是主动开池的人 → 用开池范围；对手是跟注的人 → 用冷跟范围。
         final range = spot.isPreflopAggressor
             ? PreflopRanges.coldCallRange(seat: Seat.bb, inPosition: true)
             : PreflopRanges.open(raiserSeat);
-        if (range.contains(h)) return 1.0;
-        // 范围内侧一点点的牌（轻 3bet / 便宜跟注）还留一点点可能。
-        return PreflopRanges.isLightThreeBetHand(h) ? 0.25 : 0.06;
+        if (range.contains(h)) {
+          raw = 1.0;
+        } else {
+          // 范围内侧一点点的牌（轻 3bet / 便宜跟注）还留一点点可能。
+          raw = PreflopRanges.isLightThreeBetHand(h) ? 0.25 : 0.06;
+        }
+      } else {
+        raw = 0.65; // 溜入底池：范围宽得像个谜，但不是随机牌
       }
-      return 0.65; // 溜入底池：范围宽得像个谜，但不是随机牌
+      // 读牌越强，范围外的牌权重越往 1 靠（顶格时 0.06 → 0.48）。
+      // 正常对手 maniacWiden = 0，逐点不变。
+      return raw + (1.0 - raw) * 0.45 * maniacWiden;
     }
 
     // 读线：对手连着几条街开火，他范围里的「空气 / 弱对」就该大幅缩水——
@@ -882,9 +996,23 @@ class AiPlayer {
     // 超对还在里面，但「跟一张看看」的中小对子、纯空气都得再砍一刀。
     // 不砍的话，第二对会以为自己面对的仍是那条「随便开一枪」的宽范围。
     final facingRaise = spot.villainRaisedThisStreet;
-    final lineAgg = spot.priorAgg +
-        (spot.facingBet ? 0.8 : 0.0) +
-        (facingRaise ? 0.7 : 0.0);
+    // 「连着几条街开火 = 真东西更多」这条读线也有前提：对手是个正常人。
+    // 碰上被读成疯子的对手（见 [_maniacWiden]），他开三枪说明的东西少得多
+    // ——这正是「读人」和「读牌」必须接上的那一处。
+    //
+    // 以前这两条是完全脱钩的：跟注门槛那边早就按 [read] 放宽了
+    // （`_callVsReadFactor`），可胜率估计用的范围还是照「三枪 = 硬货」一路
+    // 收紧。于是 AI 的行为成了「翻牌跟得宽、河牌算出来自己还是垃圾」——
+    // 探针实测同一个对手连开三枪（读牌已生效、每格 heroAggro = 1.000），
+    // 河牌面对 2/3 池照旧弃 53%、配对面 1/2 池照旧弃 50%，而对手拿任意
+    // 两张的保本弃牌率只有 40% / 33%。
+    //
+    // 折扣比例跟 [floorShape] 那条斜率用同一个 0.7：都是「读成疯子之后，
+    // 这条线上的信息量打掉七成」，免得两个地方各拍一个数、以后对不上。
+    final lineAgg = (spot.priorAgg +
+            (spot.facingBet ? 0.8 : 0.0) +
+            (facingRaise ? 0.7 : 0.0)) *
+        (1 - 0.7 * maniacWiden);
     // 下注尺度是单独一维信息，不能只靠「开过几枪」来收范围：真人看到大注
     // 会把对手的弱牌权重整个往下压（一个满池里诈唬的比例远低于 1/4 池），
     // 看到小注则留着那一整片弱范围去抓。以前范围模型完全不吃尺度——同一
@@ -1033,7 +1161,20 @@ class AiPlayer {
           _roll(0.3)) {
         return const AiDecision(ActionType.check);
       }
-      if (river && !multiway && !_villainFoldsALot(game, me) && _roll(0.5)) {
+      // 用不用超池还要看**成色**。超池是「坚果或空气」的尺寸：诈唬那一侧
+      // 只有坚果花阻断 / A 阻断那条线会用（见 [_bluffChance] 后面那段），
+      // 价值这一侧也该只留给三条/顺子这种被跟了也不心疼的牌——真人拿薄
+      // 两对在河牌做的是正常尺寸的价值注，超池是拿它去撞两对以上的范围。
+      // 以前这一档只看 tier，探针实测河牌被过牌到，拿两对、三条、顺子
+      // 的下注分布**逐字相同**（超池桶都占 38%），对手看到超池读不出我们
+      // 是两对还是顺子，我们自己也拿两对乱超池。以三条（0.6）为基准往外
+      // 拉，跟 [HandReading.monsterGrade] 同一套取值。
+      final overbetChance =
+          (0.5 + 0.75 * (read.monsterGrade - 0.6)).clamp(0.15, 0.8);
+      if (river &&
+          !multiway &&
+          !_villainFoldsALot(game, me) &&
+          _roll(overbetChance)) {
         return _bet(game, me, (1.2 * valueFactor).clamp(0.8, 1.5));
       }
       final frac = _valueFrac(spot, read, 0.62,
@@ -1122,7 +1263,8 @@ class AiPlayer {
       }
       final frac = _valueFrac(spot, read, 0.62,
               rangeBet: game.street == Street.flop) *
-          valueFactor;
+          valueFactor *
+          _strongDrawSizeScale(game, spot, read);
       return _bet(game, me, frac.clamp(0.3, 1.1));
     }
     // 3) 干面 + 我是翻前加注者：真人的「范围小注」。
@@ -1338,7 +1480,9 @@ class AiPlayer {
     final strongDraw =
         read.drawOuts >= 8 || read.isComboDraw || read.nutFlushDraw;
     if (spot.opponents >= 3) {
-      base *= strongDraw ? 0.55 : 0.3;
+      // 第三家往后接着摊薄（见 [_manyTail]）：五家、六家池不该跟四家池
+      // 一个频率。
+      base *= (strongDraw ? 0.55 : 0.3) * _manyTail(spot.opponents, 3);
     } else if (spot.opponents == 2) {
       base *= strongDraw ? 0.8 : 0.6;
     }
@@ -1389,7 +1533,21 @@ class AiPlayer {
       _ => read.topPair ? 0.65 : (bottomPair ? 0.30 : 0.42),
     };
     if (river) f *= read.topPair ? 0.8 : 0.7; // 河牌后面没有牌了，收敛一点
-    if (spot.opponents >= 2) f *= 0.55; // 多人底池：薄价值要收着打
+    // 「他一路跟过来」是这条街上最强的一条信息，薄价值却一直没读它：固定牌面
+    // 实测（Qd 7d 2c 5h 9s、翻前我开池、翻牌/转牌我开不开枪由脚本钉死）中对 88
+    // 的河牌下注率是「没跟过 29% / 被跟一条街 30% / 被跟两条街 30%」逐点相同
+    // ——真人在那儿基本就是过牌：中对、底对打出去，更好的牌跟、更差的牌弃，等
+    // 于白送一个底池。诈唬那一侧早就在按 [spot.villainCalls] 收（每跟一条
+    // ×0.8），薄价值这侧接上同一条读数、只是收得更狠——被跟越多越该退成摊牌
+    // 牌。顶对不在此列（见用例「第三枪：…（价值下注不动）」）；超对也进不到
+    // 这一档（它是 HandTier.strong，走上面第 5 档那条成牌主力线）。翻牌街
+    // [villainCalls] 恒为 0（只数翻牌/转牌），所以这一项只在转牌和河牌上动。
+    if (!read.topPair) f *= 1 - 0.30 * spot.villainCalls;
+    // 多人底池：薄价值要收着打，而且人越多越要收（第三家起接着往下走，
+    // 见 [_manyTail]）。
+    if (spot.opponents >= 2) {
+      f *= 0.55 * _manyTail(spot.opponents, 2);
+    }
     if (read.texture.wetness > 0.6) f *= 0.6; // 湿面：先把底池控制住
     f *= _aggression * _p.aggressionScale;
     f *= _exploitValueFactor(game, me);
@@ -1431,7 +1589,7 @@ class AiPlayer {
       base *= floor + (1 - floor) * _backdoorScore(game, read);
     }
     if (spot.opponents >= 3) {
-      base *= 0.35;
+      base *= 0.35 * _manyTail(spot.opponents, 3);
     } else if (spot.opponents == 2) {
       base *= 0.65;
     }
@@ -1512,6 +1670,37 @@ class AiPlayer {
   double _capRelease(_Spot spot) =>
       ((spot.betSizeRel - 1.0) / 1.0).clamp(0.0, 1.0);
 
+  /// 河牌防守下限的「手牌折扣」：下限再乘上这一手牌自己的胜率份额。
+  ///
+  /// 下限（[riverDefendFloor]）存在的理由是 MDF——手里真有成牌就不能把整个
+  /// 范围都扔掉。但它原来是个跟手牌无关的定值：只要胜率掉到门槛以下，整档
+  /// 牌的防守份额就变成同一个常数。探针实测（tool/ai_multi_probe.dart 的 C 节，
+  /// 河牌 4 人池、对手打 1/2 池）第二对 87 / 被盖口袋 66 / 底对 43 三手牌的
+  /// 弃牌率逐字相同（35/35/35、73/73/73、97/97/97），而这三手牌对着同一个
+  /// 范围算出来的胜率是 0.073 / 0.044 / 0.005——差了十几倍，AI 却打成一个数。
+  /// 对手只要把尺度卡在「弱成牌刚好够不到门槛」的位置，就能把我们的整个
+  /// 抓诈唬范围压成一个常数，手里拿的是什么牌再也读不出来。
+  ///
+  /// 折扣按「这手牌的胜率够到自己门槛的几成」给，到饱和点为止：胜率够到门槛
+  /// 六成以上的牌照旧拿满下限（「被连开三枪」那条线的 `need` 里已经含了 1.25
+  /// 的余量，落点基本都在这一段，所以用例钉住的那几个逐点不变），更弱的牌按
+  /// 比例缩。equity 和 need 都是连续量，人数和尺度也都从它们里来，所以这个
+  /// 折扣在尺度轴、人数轴上都跟着连续变，不会在哪一格上跳。
+  ///
+  /// 目前只有弱成牌那一档接了它。中等牌那一档（顶对好踢这类）的手按定义就压在
+  /// 门槛附近、强弱跨度小得多，没量到同款的塌陷，而它那边的下限正被几条 MDF
+  /// 用例钉着，先不动。
+  double _riverFloorHedge(double equity, double need, double smallBetFade) {
+    // 饱和点：胜率够到门槛这个比例的牌照旧拿满下限，见上面说明。
+    const saturation = 0.6;
+    final raw = (equity / (saturation * need)).clamp(0.0, 1.0);
+    // 小注那档不参与打折：1/4~1/3 池的 MDF 是硬指标（对手拿任意两张按那个价
+    // 开火，保本弃牌率只有 20~25%，整档都得守），[smallStabFade] 那几行的
+    // 「小注面前按赔率抓」说的就是这件事。折扣从 1/3 池的零一路放到 0.55 池的
+    // 足额，跟那条曲线同源，不是另拍的一道门。
+    return 1.0 - (1.0 - smallBetFade) * (1.0 - raw);
+  }
+
   // ---------- 面对下注：加注 / 按赔率跟注 / 放弃 ----------
 
   AiDecision _facingBet(GameEngine game, PlayerState me, _Spot spot,
@@ -1538,6 +1727,7 @@ class AiPlayer {
     final checkRaise = spot.checkedThisStreet && canRaise;
     // 转牌/河牌发出来的牌适不适合继续开火。
     final barrel = _barrelFactor(game, read);
+
     // 读人（面对下注这一侧）：对手是疯子就多跟，是岩石就少跟。
     final callFactor = _callVsReadFactor(game, me);
     final facingManiac = _facingManiac(game, me);
@@ -1611,14 +1801,57 @@ class AiPlayer {
     //   1/4 池 0.80、1/2 池 0.67、2/3 池 0.23、3/4 池 0.03、满池 0.03
     // （原来的满池/超池 0.03 逐点不变；中间那条 2.3 的斜率就是「1/2 池的
     // MDF 到 3/4 池的 0.03」这段直线，不是另拍的数）。
+    //
+    // 上面这条曲线管的是「整档的防守份额」，还得再按**这一手牌自己**的胜率
+    // 打个折扣，不然同一档里强弱差十几倍的手会打出同一个数——见
+    // [_riverFloorHedge]。
     final mdfFloor = 1 / (1 + spot.betSizeRel);
+    // 那条 2.3 的斜率有个前提：注越大，他这条线里的价值牌越多——这是**一个
+    // 正常对手**的性质。对手已经被读成「逮到机会就往里砸」（进攻率顶格、
+    // callFactor 掉到 0.8 那道底）时，这个前提不成立：他的重注里一样大半
+    // 是空气，还照「重注 = 真牌」把下限收到 0.03，等于同一个人先用读牌把
+    // 我们翻牌/转牌的跟注范围放宽、再在河牌把多出来的那一整个范围原样扔掉
+    // ——付了三条街的价钱去摊一次牌，最后那一下照旧交出去。
+    //
+    // 探针实测（tool/ai_river_defense_probe.dart）：让同一个 AI 连着打几千手
+    // （真桌就是这么累积读牌的），对手连开三枪那条线上 heroAggro 顶到 1.00、
+    // 疯子读牌生效，翻牌/转牌的跟注量直接翻倍（每格样本 47 → 100）；可河牌
+    // 面对 2/3 池照旧弃 75%、满池弃 89%，按每 6000 手算的**绝对**弃牌数比
+    // 读牌生效前还多了一倍——读牌只放宽了前两条街，河牌那一档原地不动。
+    //
+    // 所以斜率跟着读牌连续回调：对手越疯斜率越小，顶格时收掉七成
+    // （2.3 → 0.69），下限就贴着 MDF 走；正常对手斜率逐点不变。用的是
+    // [_maniacWiden]（跟 [_facingManiac] 同一条 0.45 线的斜坡）而不是再拍
+    // 一个阈值，免得进攻率从 0.44 走到 0.46 就换一整套打法。
+    final floorSlope = 2.3 * (1.0 - 0.7 * _maniacWiden(game, me));
     final floorShape =
-        (mdfFloor - 2.3 * (spot.betSizeRel - 0.5).clamp(0.0, 1.0))
+        (mdfFloor - floorSlope * (spot.betSizeRel - 0.5).clamp(0.0, 1.0))
             .clamp(0.03, 0.8);
+    // 超池段（1.0 倍池往上）连开三枪那条线的下限还得跟着尺度往下走。
+    //
+    // 上面那条 `floorShape` 在 0.73 倍池就被 0.03 那道地板夹住了，中等牌再
+    // 加 0.10，于是从 0.95 倍池一直到 2.5 倍池，这一档的下限是一个**常数**。
+    // 按 0.02 池铺满扫一遍（同一手顶对好踢、同一条连开三枪的线）：0.94 倍池
+    // 弃 86%、1.00 倍池 86%、1.50 倍池 86%、2.50 倍池还是 86%——中间一个点
+    // 都不动。对手拿任意两张牌在河牌抡超池，能拿到的弃牌率跟下 0.95 倍池完全
+    // 一样（他保本只要 71%），我们这一档等于白送；尺度这一维在超池段整个失效，
+    // 正是 [_facingBet] 里反复在修的那种毛病。
+    //
+    // 按超池段线性收掉 72%：1.0 倍池以内不设限（逐点不变，下面那些钉着
+    // 「3/4 池照旧收手」「1/2 池按 MDF 守住」的用例都在这一段），2.5 倍池收到
+    // 剩下的两成八（中等牌 0.13 → 0.036）。弱成牌那一档的下限本来就是 0.03，
+    // 乘完被外面那道地板接住，逐点不变。
+    //
+    // 两极线（过牌-过牌-超池）不用这一项：它已经有 [overbetCap] 在压，而且
+    // 「超池比连开三枪好抓」这条设计差异靠的就是两边的下限分开走。
+    final overbetFloorFade = spot.polarizedBet
+        ? 1.0
+        : 1.0 - 0.72 * ((spot.betSizeRel - 1.0) / 1.5).clamp(0.0, 1.0);
     final riverDefendFloor = (game.street == Street.river &&
             !facingRaise &&
             (read.tier == HandTier.medium || read.tier == HandTier.weak))
-        ? (floorShape + (read.tier == HandTier.medium ? 0.10 : 0.0))
+        ? ((floorShape + (read.tier == HandTier.medium ? 0.10 : 0.0)) *
+                overbetFloorFade)
             .clamp(0.03, 0.85)
         : 0.0;
 
@@ -1772,14 +2005,18 @@ class AiPlayer {
         //
         // 转牌/河牌用上面那条跟尺度挂钩的档（以前河牌是「100% 跟」、转牌
         // 只有「湿面 + 对手线很实」这一档）；翻牌沿用老的那一档。
-        final foldChance = strongFoldVsBigBet > 0
-            ? strongFoldVsBigBet
-            : (!facingManiac &&
-                    bigBet &&
-                    spot.villainStrength > 0.85 &&
-                    read.texture.wetness > 0.6
-                ? 0.25
-                : 0.0);
+        // 超对、以及三张同花面上被降档的顺子/三条/两对，都不该跟顶对走
+        // 同一条弃牌线：它们打赢对手范围里的两对/三条/顶对。见
+        // [HandReading.strongFoldScale] 里那两组实测。
+        final foldChance = (strongFoldVsBigBet > 0
+                ? strongFoldVsBigBet
+                : (!facingManiac &&
+                        bigBet &&
+                        spot.villainStrength > 0.85 &&
+                        read.texture.wetness > 0.6
+                    ? 0.25
+                    : 0.0)) *
+            read.strongFoldScale;
         if (foldChance > 0 && _roll(foldChance)) {
           return const AiDecision(ActionType.fold);
         }
@@ -1787,19 +2024,25 @@ class AiPlayer {
         // 而不是一到 0.7 池就切成 0。为什么要这样，见 [_strongRaiseChance]。
         if (canRaise &&
             spot.raisesThisStreet <= 2 &&
-            _roll(_strongRaiseChance(game, me, spot, read,
-                    checkRaise: checkRaise) *
-                _bigBetRaiseScale(spot) *
-                strengthScale)) {
+            _roll((_strongRaiseChance(game, me, spot, read,
+                        checkRaise: checkRaise) *
+                    _bigBetRaiseScale(spot) *
+                    strengthScale +
+                _overPairFlopRaiseBonus(game, spot, read) +
+                _strongDrawRaiseBonus(game, spot, read))
+                .clamp(0.0, 1.0))) {
           return _raise(game, me, 0.8);
         }
         return const AiDecision(ActionType.call);
       }
       if (canRaise &&
           spot.raisesThisStreet <= 2 &&
-          _roll(_strongRaiseChance(game, me, spot, read,
-                  checkRaise: checkRaise) *
-              strengthScale)) {
+          _roll((_strongRaiseChance(game, me, spot, read,
+                      checkRaise: checkRaise) *
+                  strengthScale +
+              _overPairFlopRaiseBonus(game, spot, read) +
+              _strongDrawRaiseBonus(game, spot, read))
+              .clamp(0.0, 1.0))) {
         return _raise(game, me, 0.8);
       }
       return const AiDecision(ActionType.call);
@@ -1823,11 +2066,23 @@ class AiPlayer {
       // 「什么价格都跟」。一个 1.5 倍池的重注要 37% 胜率，中等牌对着连开
       // 三枪的范围凑不出来；以前这里不看价格一律跟，探针里同一个中等牌档
       // 面对 1 倍池弃六成、面对 1.5 倍池反而一个都不弃——下注尺度这个变量
-      // 在河牌被整个翻了过来。「超池是两极的」这条线不自动跟。
-      if (spot.spr <= 1.2 && spot.betSizeRel < 1.15) {
-        return const AiDecision(ActionType.call);
-      }
-      var need = potOdds * (spot.villainStrength > 0.7 ? 1.3 : 1.1);
+      // 在河牌被整个翻了过来。
+      //
+      // 这一档原来是「`spr <= 1.2` 且注 < 1.15 池就无脑跟」的硬闸门，
+      // 上面那条历史说明的正是它的坏处：闸门只认 spr 不认价格，所以注越大
+      // 反而越敢跟；后加的 `注 < 1.15 池` 只是把翻转挪到 1.15 池那道墙上，
+      // 墙两侧还是两个世界（实测同一手顶对好踢、同一个浅筹码，1.0 池跟
+      // 100%、1.5 池只剩 11%，中间没有任何过渡）。
+      // 现在改成和弱成牌档同一套写法：spr 低就在这里把门槛连续打折，
+      // 「套进去了要跟」留下，尺度这一维仍然由 sizePremium 接着管。
+      // 判定用**下注前**的 spr，不跟这一注的大小挂钩：见弱成牌那一档的
+      // [committed]——随这一注一起涨的折扣项会把价格项抵消掉。
+      final potBeforeBetMed = max(1, spot.pot - spot.toCall);
+      final committedMedium =
+          ((1.8 - me.stack / potBeforeBetMed) / 1.8).clamp(0.0, 1.0);
+      var need = potOdds *
+          (spot.villainStrength > 0.7 ? 1.3 : 1.1) *
+          (1.0 - 0.40 * committedMedium);
       // 跟注站的「黏」是对着下注的（一手小对陪你三条街），不是对着加注的：
       // 对面已经加注出来，中间牌力再跟就是在给价值下注付钱——风格再松也
       // 不该松这一档，不然三条同花面上拿第二对去接加注就变成「标准打法」。
@@ -1854,6 +2109,37 @@ class AiPlayer {
       // 回到 34%（门槛 29%），0.06 时只剩 29% 上下，再小就骑在阈值上了。
       final overbetRamp = ((spot.betSizeRel - 1.0) / 1.5).clamp(0.0, 1.0);
       if (spot.polarizedBet) need *= 1.0 - 0.10 * overbetRamp;
+
+      // 超池段还得给跟注率一个**上限**，光靠门槛管不住这一档。
+      //
+      // 门槛管的是「这手牌够不够」，可对手砸到 2 倍池往上时，我们这一档
+      // （顶对好踢一直到第二对好踢）在他面前**全都只赢诈唬**——彼此之间
+      // 的真实差距只有几个点。范围模型那边读尺度的乘子在 1.2 倍池就饱和
+      // 了，胜率于是逐点相同，门槛又只跟着底池赔率慢慢爬，结果就是探针里
+      // 那条水平线：顶对好踢对「过牌-过牌-超池」在 1.25/1.5/2.0/2.5 倍池
+      // 的跟注率是 100/97/92/91%，而同一张牌面上的第二对只有 34%——两手
+      // 真实差距没那么大的牌，差出 58 个点；对手把最后一枪从 1.25 倍池抬
+      // 到 2.5 倍池，能拿到的弃牌率几乎没变（拿一对接 2.5 倍池本来是这个
+      // 游戏里最典型的送钱方式）。
+      //
+      // 所以超池段直接给这条线一个随尺度下移的上限：1.2 倍池以内不设限
+      // （逐点不变），往上收到「MDF 的 1.3 倍」。为什么以 MDF 为尺：上限
+      // 是给**这一档**的（我们抓诈唬范围的上半截），不能压到整条范围的
+      // MDF 保本线以下——对手下 2.5 倍池时保本弃牌率是 2.5/3.5 = 71%，
+      // 也就是我们至少得跟 29%，上限收到这个量级之上才留着安全余量，
+      // 再往下就是过弃、白送。
+      //
+      // 用上限而不是抬门槛，是因为它只该压住「赢面明显够」的那些牌：
+      // 近门槛的牌（第二对）本来就落在上限下面，一抬门槛就正好把
+      // 「过牌-过牌-超池 比 连开三枪 好抓」那条设计好的线一起压没了
+      // （实测抬门槛到 0.20 时，那条线的差距从 20 个点掉到 2.5 个点；
+      // 换成上限则一点不动）。实测这条线因此变成 1.25/1.5/2.0/2.5 倍池
+      // 99/87/68/48%（含后面那 13% 的地板），单调、不再是一条水平线。
+      final overbetCliff = ((spot.betSizeRel - 1.2) / 1.3).clamp(0.0, 1.0);
+      final overbetCeiling = (1.3 / (1 + spot.betSizeRel)).clamp(0.25, 1.0);
+      final overbetCap = spot.polarizedBet
+          ? 1.0 - (1.0 - overbetCeiling) * overbetCliff
+          : 1.0;
       if (facingRaise) need *= 1.25; // 面对加注：顶对也得收着点
       // 没位置的中等牌很难兑现胜率（后面还有人、也控制不了底池大小）。
       // 探针里同一个局面（同一张牌、同样尺度）有位置和没位置的跟注率
@@ -1882,7 +2168,8 @@ class AiPlayer {
       // 这 0.09 整条穿过去，于是「从跟到弃」在一个采样点里就做完了（改前
       // 0.65 池跟 91%、0.70 池跟 18%）。带宽取 0.10 正好把这 0.09 包住，
       // 弃牌率就摊在 0.6~0.8 池这一整段上（改后 98 / 79 / 51 / 23 / 16%）。
-      if (!scary && _callMix(equity(), need, foldBand: 0.10)) {
+      if (!scary &&
+          _callMix(equity(), need, foldBand: 0.10, cap: overbetCap)) {
         return const AiDecision(ActionType.call);
       }
       if (canRaise &&
@@ -1900,7 +2187,6 @@ class AiPlayer {
     //    见注就弃等于告诉对手「你随便开火我都走」，会被诈到破产。
     //    所以按赔率抓，只是门槛比中等牌高：大注少抓、疯子多抓、岩石不抓。
     if (read.tier == HandTier.weak) {
-      if (spot.spr <= 1.0) return const AiDecision(ActionType.call);
       // 抓诈唬的门槛 = 底池赔率 + 一点余量。对手前面那条街全过牌、这条街
       // 才突然砸出来的大注（[polarizedBet] / [checkedThrough]），范围里
       // 诈唬和半诈唬占了大头，我们的一对牌就是合格的抓牌——这种线只按
@@ -1935,6 +2221,15 @@ class AiPlayer {
       // （≈1 倍池起）才是「一抬就送」。以前不分大小一律乘 1.85，探针里
       // 底对面对最小加注弃 77%、第二对转牌弃 55%——对手随便拿两张牌
       // 最小加注一下就能白拿底池，和真人差得太远。
+      //
+      // 这条布尔留着没改：0.6 池上抬 12%（1.65→1.85）看着像台阶，但实测
+      // 「AI 开一枪、英雄按池的 frac 倍加回来」这条线（frac 就是 betSizeRel，
+      // 见 tool/ai_probe.dart 的「面对加注」那一节，0.54~0.66 每 2% 一格）：
+      // 顶对弱踢 A8 的跟注率是 97/94/88/83/79/73/63/47——0.60→0.61→0.62
+      // 这三步掉 4、6 个点，跟两边的坡度（3~10）连成一条曲线，没有任何一步
+      // 跳出去；第二对在 0.60 两侧都已经 100% 弃。12% 的门槛扰动被赔率本身
+      // 的坡度（约 +0.25 胜率/池）盖掉了，落到决策上不到一个采样格。以后要
+      // 动这个数，先看那一节有没有冒出跳变。
       if (facingRaise) need *= spot.betSizeRel <= 0.6 ? 1.65 : 1.85;
       // 一对牌是「抓诈唬」的牌：没位置抓的人，后面还有一整条街要挨打，
       // 而且河牌拿不到薄价值，门槛本来就该比有位置高一档。
@@ -1944,6 +2239,24 @@ class AiPlayer {
         need *= 1.0 - 0.3 * smallStabFade;
       }
       need *= streetCost * callFactor; // 街道成本 + 抓诈唬牌（越疯越要跟）
+      // 筹码已经套进去（spr 低到「跟注 ≈ 把剩下的推出去」）：门槛随 spr
+      // 连续下移——真人在这儿跟得比平时宽，因为能赢的底池相对要投的钱大。
+      // 以前这里是一道硬闸门 `spr <= 1.0 就无脑跟`，探针里露得很清楚：
+      // 同一个第二对面对连开三枪，200% 池（spr 1.02）弃 97%，250% 池
+      // （spr 0.875，掉进闸门）反而跟 29%——「注越大跟得越多」，而那 52
+      // 手牌按赔率要 42% 胜率、实际只有 15%。对手把尺度从 2 倍池加到 2.5
+      // 倍池，就能把我们的一对牌从「按赔率算」直接买成「无脑跟」。
+      // 改成连续下移之后：下注前的 spr 在 1.5 池以上不动，往下一路收到
+      // 0.55（spr→0），「套进去了要跟」这条真人的直觉留着，但不再盖过价格。
+      // 判定用**下注前**的 spr，不跟这一注的大小挂钩：「注越大跟得越少」
+      // 这条规矩要求门槛里凡随这一注变化的项都是「越贵越收」。用下注后的
+      // spr 会让折扣跟着这一注一起涨，和价格项互相抵消——实测那样写会在
+      // 浅筹码上把 1.5 池→2.0 池的跟注率抬回去 3 个点。改用下注前的 spr
+      // 之后，尺度这一维只剩 potOdds 和 sizePremium 在管，方向一定是收的。
+      final potBeforeBet = max(1, spot.pot - spot.toCall);
+      final committed =
+          ((1.5 - me.stack / potBeforeBet) / 1.5).clamp(0.0, 1.0);
+      need *= 1.0 - 0.45 * committed;
       // 河牌封顶：手里是个真对子，就不能 100% 弃牌。探针实测以前第二对
       // 面对河牌 2/3 池弃 92%、面对 1 池弃 93%（底对更是 100%），等于告诉
       // 对手「你随便两张牌下 2/3 池我都走」——会诈唬的人白拿底池，我们的
@@ -2019,7 +2332,10 @@ class AiPlayer {
         _registerFire(game.street, _PlanKind.pureBluff);
         return _raise(game, me, 0.8);
       }
-      if (_roll(riverDefendFloor)) return const AiDecision(ActionType.call);
+      if (_roll(riverDefendFloor *
+          _riverFloorHedge(equity(), need, smallStabFade))) {
+        return const AiDecision(ActionType.call);
+      }
       return const AiDecision(ActionType.fold);
     }
     // 6) 空气：弃牌为主。但翻牌圈的「后门花 + 两张高张」（A 高、K 高这种）
@@ -2139,20 +2455,33 @@ class AiPlayer {
   /// 牌力的跟注整个关掉。听牌那边把弃牌侧放宽到 0.08，让「从跟到弃」这件
   /// 事摊在一个够宽的尺度区间里做完。
   ///
+  /// [cap] 是跟注概率的上限（默认 1.0，等于不限）：赢面明显过关的牌也只
+  /// 能按这个概率跟。用来表达「对手这条线太强，我们这一档抓诈唬的牌整体
+  /// 只能守到这么多」——只在两极线的超池段用（见 [_facingBet] 的
+  /// overbetCap）。它和抬 [need] 的区别很关键：抬门槛会把近门槛的牌一起
+  /// 压死，上限只削掉「赢面明显够」的那部分，两类牌不互相牵连。
+  ///
   /// 斜坡必须在带宽的边界上正好走到 0 / 1：[h]0.5 + edge / (2 * band)[h]
   /// 就是这条斜坡。以前写成 [h]0.5 + edge / 0.08 * 0.5[h]（分母少乘 2），
   /// 结果边界上还剩 0.25 的跟注率，被上面那两句 if 直接切成 0——同一手牌
   /// 在两个相邻尺度上会出现「还有三成在跟」紧接着「一个都不跟」的台阶，
   /// 这正是听牌那条线 1.18 池 / 1.2 池之间那道缺口的来源。
+  ///
+  /// [band] 为 0（听牌那条线要的「门槛以上一律跟」）时上侧的斜坡只剩一个
+  /// 点，门槛两侧的取值都得是 1.0，所以下侧这条必须从 1.0 铺到 0。第一版
+  /// 图省事让它照通用式子从 0.5 铺起，等于在门槛上留了整整 0.5 的台阶：
+  /// 探针实测卡顺（JT on Q82）面对 40.5% 池跟 93%、41% 池只剩 44%，
+  /// 半个百分点的池差换掉一半的跟注率。
   bool _callMix(double equity, double need,
-      {double band = 0.04, double? foldBand}) {
+      {double band = 0.04, double? foldBand, double cap = 1.0}) {
     final lower = foldBand ?? band;
     final edge = equity - need;
-    if (edge >= band) return true;
+    if (edge >= band) return cap >= 1.0 ? true : _roll(cap);
     if (edge <= -lower) return false;
-    return _roll(edge >= 0
-        ? 0.5 + edge / (2 * band)
-        : 0.5 + edge / (2 * lower));
+    final p = band <= 0
+        ? 1.0 + edge / lower
+        : (edge >= 0 ? 0.5 + edge / (2 * band) : 0.5 + edge / (2 * lower));
+    return _roll(p < cap ? p : cap);
   }
 
   /// 听牌面对下注：跟注要跟得上「隐含赔率」，跟不动就弃。
@@ -2170,7 +2499,17 @@ class AiPlayer {
       return const AiDecision(ActionType.fold);
     }
     final streets = game.street == Street.flop ? 2 : 1;
-    final deep = me.stack > spot.pot * 1.5;
+    // 隐含赔率只有在「后面还有钱能赢」时才算数。以前这里是一条硬门槛
+    // `me.stack > pot * 1.5`：同一个听牌、同一个下注，筹码从 1.5 倍池涨到
+    // 1.6 倍池，那 6~8 个点的补贴就从有到无。探针实测（摊牌扫描已经固化
+    // 成 engine_test 的用例「听牌隐含赔率：筹码从 1.5 倍池涨到 1.8 倍池」）
+    // 坚果花听在转牌面对 2/3 池：1.5 倍池弃 11%、1.6 倍池直接弃 0%——5% 的筹码差把一整
+    // 档弃牌抹掉，对手只要把筹码摆到那个数上就能读出来。
+    // 改成 1.2~1.8 倍池之间的线性斜坡，两头锚点跟以前一致：1.8 倍池以上
+    // 逐点不变（回归里那些深筹码的探针格子全落在这段，所以数字一个不动），
+    // 1.2 倍池以下也确实没钱可赢、补贴为零。
+    final deepRamp =
+        ((me.stack / max(1, spot.pot) - 1.2) / 0.6).clamp(0.0, 1.0);
     // 隐含赔率：坚果花听/组合听牌成牌后还能再赢一笔。
     //
     // 它不是个常数：注越大，成牌之后能再收回来的钱越少——对手敢把 1.5 倍
@@ -2233,7 +2572,7 @@ class AiPlayer {
     final base = trustWeight <= 0
         ? drawOnly
         : drawOnly + (max(drawOnly, equity()) - drawOnly) * trustWeight;
-    final drawEq = base + (deep ? implied : 0);
+    final drawEq = base + implied * deepRamp;
     // 听牌的门槛只比裸赔率高一点点。以前在这上面再乘 1.25 × 1.1 的
     // 「安全余量」，等于要求 9 outs 的花听对着 1 倍池要有 46% 胜率才跟，
     // 结果 8~9 outs 的顺听/花听对着正常尺度一律弃掉——真人拿到这些牌
@@ -2264,9 +2603,38 @@ class AiPlayer {
     // 诈唬」那份，兑现不了；但门槛也因此卡得很紧，窄带子会让「跟」和「弃」
     // 在两个相邻的尺度上隔着一条缝。放宽之后两头顺面对 1.14/1.16/1.18/
     // 1.2/1.25/1.3 池的跟注率是 54/46/42/34/16/3%，单调连续。
+    //
+    // 弱听牌也得有个过渡带，只是**只往弃牌那侧铺**。「不值给自己找理由」
+    // 讲的是别在门槛以上给自己加频率，不是「把交叉点留成一个点」：卡顺
+    // 的出路数不随尺度变（4 outs 就是固定的 4/47），门槛却随尺度线性爬，
+    // 两条线迟早交叉——`drawEq >= need` 把交叉变成一个点。探针实测
+    // （JT on Q82 翻牌面对下注，400 手一格）：40.5% 池跟 93%，41% 池直接
+    // 弃 93%，半个百分点的池差就换了一次决定，对手把尺度挪半格就能把这手
+    // 牌的跟注整条关掉。真人这里是一段模糊区。
+    //
+    // 为什么 `band: 0`（门槛以上不给频率、照旧一律跟）：往上铺坡等于在
+    // 「赔率明明够」的价格上也开始丢牌，那不是模糊区、是打错。试过
+    // 0.04/0.035 的对称带，35% 池的跟注率从 93% 掉到 66%——弃掉的那些
+    // 全是占了便宜的价格，真人在这条线上不会丢。所以只把门槛以下那条
+    // 竖直的边改成斜坡，门槛以上一个点不动。
+    //
+    // 这条斜坡的起点必须是 1.0：`band: 0` 时门槛上方那条斜坡只剩一个点、
+    // 取值正是 1.0，可 [_callMix] 的通用式子让下坡从 0.5 起算，门槛两侧
+    // 于是留着整整 0.5 的台阶——探针实测 40.5% 池跟 93%、41% 池只剩
+    // 44%，半个百分点的池差换掉一半跟注率，跟修之前是同一个病。
+    //
+    // 带宽从 0.035 收到 0.025：宽度是按 equity 差定的，铺到池的尺度上会
+    // 被 [_capRelease] 那条隐含赔率曲线拉长——0.035 对应 0.405~0.57 池，
+    // 卡顺在 46% 池还跟 53%、50% 池还跟 25%，一个四条出路的弱听牌在半个
+    // 池的价格上跟掉四分之一，比真人松。收到 0.025 之后混合区是
+    // 0.405~0.475 池（实测 41% 池跟 91%、42% 78%、44% 57%、46% 44%、
+    // 50% 7%），门槛上照样接得上、没有台阶，验证器那句「只有卡顺时面对
+    // 下注大多弃牌」也从 70% 回到 94%。
+    // 强听牌那档带宽（0.04 上 / 0.08 下）不动：8~9 outs 的牌本来就在
+    // 门槛上混着打，那是刻意的。
     if (strongDraw
         ? _callMix(drawEq, need, foldBand: 0.08)
-        : drawEq >= need) {
+        : _callMix(drawEq, need, band: 0, foldBand: 0.025)) {
       return const AiDecision(ActionType.call);
     }
     // 便宜的小注：弱听牌也可以跟一张看转牌。
@@ -2316,10 +2684,24 @@ class AiPlayer {
     //
     // 翻牌圈不吃这一档：那时候加注是「收听牌的钱」，对手下得大说明底池涨得
     // 快、更要保护，真人对小注大注都愿意加（这条另有「湿面多收」那一项管）。
+    // 慢打的上限按街分开：翻牌圈是「收听牌的钱」，加注本来就是这一档的主线，
+    // 慢打再满也只有七成；转牌/河牌面对大注，薄怪物退到以跟注为主是对的
+    // （对手那条线两极分化，加注只会把诈唬打走），所以放到 0.85。
+    var maxTrap = 0.7;
     if (game.street != Street.flop) {
-      trap *= (1.0 + 1.6 * (spot.betSizeRel - 0.5)).clamp(1.0, 3.0);
+      // 同一个「怪兽牌」档里的成色还得再分一层：两对和顺子/三条被 [HandTier]
+      // 压在一起，可真人拿它们面对同一个大注完全是两种打法——顺子、三条
+      // 加注收价值，两对更接近抓诈唬、以跟为主。以前这一档只看 tier，探针
+      // 实测河牌拿 99（三条）和拿 97（两对）对着 1.5 倍池的读数逐字相同
+      // （跟 62% / 加 38%），对手从「他加不加」里读不出我们拿着哪一档，
+      // 我们自己也拿薄两对跟三条一样猛。见 [HandReading.monsterGrade]：
+      // 以三条（0.6）为基准往外线性拉，坚果级压低慢打、多收价值，
+      // 两对抬高慢打、多留诈唬。
+      final gradeTrap = 1.0 - (read.monsterGrade - 0.6) * 0.55;
+      trap *= (1.0 + 1.6 * (spot.betSizeRel - 0.5)).clamp(1.0, 3.0) * gradeTrap;
+      maxTrap = 0.85;
     }
-    return trap.clamp(0.0, 0.7);
+    return trap.clamp(0.0, maxTrap);
   }
 
   /// 强牌（顶对顶踢、超对这些）面对下注时「抬回去」的频率。
@@ -2354,11 +2736,8 @@ class AiPlayer {
       Street.turn => 0.35,
       _ => 0.18,
     };
-    final manyWay = spot.opponents >= 3
-        ? 0.3
-        : (spot.opponents == 2 ? 0.55 : 1.0);
     return base *
-        manyWay *
+        _manyWay(spot) *
         _aggression *
         _p.aggressionScale *
         (spot.betSizeRel <= 0.35
@@ -2369,6 +2748,144 @@ class AiPlayer {
         (read.texture.wetness > 0.6 ? 0.8 : 1.0) *
         (checkRaise ? 1.2 : 1.0) *
         (spot.villainRaisedThisStreet ? 0.5 : 1.0);
+  }
+
+  /// 超对在翻牌比顶对顶踢多出来的加注频率（加量，不是乘系数）。
+  ///
+  /// 超对打赢对手范围里的顶对——对手拿顶对就是被我们盖住的那一手；顶对顶踢
+  /// 加回去却只被更好的牌跟。真人拿这两手面对同一个下注/加注不是一个打法。
+  /// 可 [HandReading.overPair] 这个字段虽然早就算好了，很长一段时间里除了
+  /// verify_engine 那句断言之外全代码没人读，于是探针里（同一块 Q♥7♦2♣）
+  /// A♥Q♦ 和 K♥K♠ 面对下注、被加注两格都**逐字相同**。
+  ///
+  /// 为什么是加量，而且挂在 [_strongRaiseChance] 外面：
+  ///   · 乘系数：AI 自己就是翻前加注者那种牌局里这条式子本来就有三成上下，
+  ///     乘起来直接把超对顶到 100%（探针实测 32% → 100%）。
+  ///   · 放式子里面：「对手加到一个底池」那格要走大注分支，
+  ///     _bigBetRaiseScale 和 strengthScale 两个折扣一起把它压成 0.4 个点。
+  ///
+  /// 幅度：翻牌被加注 0.10 / 面对一注 0.08，转牌各收一档（0.08 / 0.06）——
+  /// 转牌的加注本来就比翻牌少（base 0.55 → 0.35），差异也跟着收。面对一注时
+  /// 顶对顶踢本来就有四成在加（见门禁用例「单加池里顶对顶踢照样要加 >35%」），
+  /// 不能往下压，所以想分开只能把超对往上抬一点。两个都按人数折（[_Spot] 的
+  /// 口径跟 [_strongRaiseChance] 的 manyWay 一致），不然四人池里那条式子本来
+  /// 就只剩一两成，加量相对起来会显得很大。
+  ///
+  /// 只挂翻牌和转牌：河牌再加回去等于只留下能打败我们的牌——门禁用例「河牌
+  /// 下注被加注：顶对不再推回去，只跟」盯着，乘 5 系数那一版就是被它抓红的。
+  double _overPairFlopRaiseBonus(GameEngine game, _Spot spot, HandReading read) {
+    if (!read.overPair) return 0.0;
+    final raised = spot.villainRaisedThisStreet;
+    final base = switch (game.street) {
+      Street.flop => raised ? 0.10 : 0.08,
+      Street.turn => raised ? 0.08 : 0.06,
+      _ => 0.0,
+    };
+    if (base == 0.0) return 0.0;
+    return base * _manyWay(spot);
+  }
+
+  /// 多人底池对「同一档内部的差异」的摊薄系数。
+  ///
+  /// 超对 vs 顶对、成牌 + 听牌 vs 纯成牌这些差别，在单挑里各是一手牌的全部，
+  /// 到四人池里只是「反正都得跟」的那点边际——真人也是这么打的。口径跟
+  /// [_strongRaiseChance] 里那档一致，别各写一份漂掉。
+  double _manyWay(_Spot spot) {
+    final n = spot.opponents;
+    if (n <= 1) return 1.0;
+    if (n == 2) return 0.55;
+    return 0.3 * _manyTail(n, 3);
+  }
+
+  /// 「人多于某一档之后接着摊薄」的尾巴：锚点那两级逐点不变，往后每多一家
+  /// 再乘 0.8。
+  ///
+  /// 多人池的折扣一直是「单挑一档、两家一档、三家以上一档」，第三家往后
+  /// **全是同一个数**——四个人的池子、五个人的池子、六个人的池子在我们眼里
+  /// 完全一样。探针实测（tool/ai_multi_probe.dart 的 B 节「所有人都过牌到
+  /// AI」）：第二对 87 在 3 / 4 / 5 人池里都是下注 24%，花听 AKs 在 4 / 5
+  /// 人池都是 37%，空气 87 在 4 / 5 人池都是 4%——逐字相同。真人不会在第三家
+  /// 上停下来：后面每多一家，「一注打走所有人」的概率往下走、有人反超的概率
+  /// 往上走，两个方向都指向同一个动作：收着打。
+  ///
+  /// 挂上之后的读数（同一块牌面、同一个种子、300 手一格）：第二对 87 在
+  /// 3 / 4 / 5 人池从 24 / 24 / 24 变成 24 / 18 / 13，花听 AKs 从 55 / 37 / 37
+  /// 变成 55 / 37 / 28，空气 87 从 7 / 4 / 4 变成 7 / 4 / 3——3 人池那一格
+  /// （锚点）逐点没动，掉的是第三家往后。
+  ///
+  /// 代价记一笔：ai_reraise_probe（9 人桌 1200 手、种子 7）跟着动了——单街
+  /// 第 2+ 次加注 54 → 60，其中「一对（strong）」从 4 手涨到 12 手。不过
+  /// 第 3+ 次加注（4-bet 以上）还是怪兽牌打底（9 手里 7 手怪兽，改前 9 手
+  /// 全是怪兽），而 [_valueRaiseChance] 那边要的本来就是「加注范围别清一色
+  /// 是怪兽牌」；收的主要是「没人下注时」的开火与薄价值，加注侧只是跟着
+  /// 宽了一点。真正要盯的是那 8 手多出来的 3-bet：牌力下沿确实松了，得靠
+  /// 用例继续看着，别一路松成「拿一对就能反加」。
+  ///
+  /// 挂在 [_manyWay] 上那一处（强牌加注 / 加注尺度的倍率）在 ai_multi_probe
+  /// 和 ai_reraise_probe 上都量不出差（逐字相同）：要四家以上、又正好拿着
+  /// 强牌面对下注才走到，300 手的分辨率看不见。留着是为了口径一致，不是
+  /// 因为量到了。
+  ///
+  /// [from] 是这一档的锚点人数（`>= 3` 的档传 3、`>= 2` 的档传 2）。锚点本身
+  /// 一点不动——那两级是好几条用例和探针格钉着的，改的是它对**上**的延伸。
+  double _manyTail(int opponents, int from) =>
+      opponents > from ? pow(0.8, opponents - from).toDouble() : 1.0;
+
+  /// 「成牌 + 强听」（顶对顶踢配坚果花听这类）的标记。
+  ///
+  /// 闸门是 8 张出路：花听 9 张、两头顺 8 张都算，卡顺 4 张不算——多一两张
+  /// 出路改变不了这手牌怎么打，真正让真人变激进的是一手成牌之外还多一条街
+  /// 的出路（被跟了有得补，被加注了也乐意把筹码放进去）。
+  bool _isStrongDraw(HandReading read) =>
+      read.tier == HandTier.strong && read.drawOuts >= 8;
+
+  /// 强牌档里「成牌 + 强听」比纯成牌多要的价值下注尺度（乘系数）。
+  ///
+  /// [HandTier.strong] 只装「顶对以上、怪兽未满」，可它把「顶对顶踢」和
+  /// 「顶对顶踢 + 坚果花听」混成一手牌：后者的胜率对着几乎任何范围都过半，
+  /// 真人拿它下得更大也更敢把筹码放进去。而 [HandReading.hasDraw] 在强牌
+  /// 分支里一直没人读——探针实测同一块 Q♦7♦2♣ 上 A♦Q♦（顶对顶踢 + 坚果
+  /// 花听）和 A♠Q♦（纯顶对，牌面逐字相同）在「被过牌到」那格的尺度分布
+  /// **逐字相同**，连下注频率都一模一样。
+  ///
+  /// 幅度刻意比 [_overPairFlopRaiseBonus] 小一档：超对是「打赢对手范围里
+  /// 的顶对」的成牌升级，多要两成池都合理；成牌 + 听牌只是多一手出路，
+  /// 尺度上多一两成就够。抬多了反而把「下注越大牌越强」这条明线递出去——
+  /// 我们现在下大注的范围里会多出一批听牌，正是要它别那么干净。
+  /// 只挂翻牌和转牌：河牌听牌已经发完，[_isStrongDraw] 自己也会判成 false。
+  double _strongDrawSizeScale(
+      GameEngine game, _Spot spot, HandReading read) {
+    if (!_isStrongDraw(read)) return 1.0;
+    final base = switch (game.street) {
+      Street.flop => 0.12,
+      Street.turn => 0.08,
+      _ => 0.0,
+    };
+    return 1 + base * _manyWay(spot);
+  }
+
+  /// 强牌档里「成牌 + 强听」多出来的加注频率（加量，不是乘系数）。
+  ///
+  /// 同一块 Q♦7♦2♣、面对同一个 0.5 池下注：A♠Q♦（纯顶对顶踢）加回去只
+  /// 被更好的牌跟，A♦Q♦（顶对顶踢 + 坚果花听）加回去被跟也还有一条街的
+  /// 出路，真人这两手的加注频率差得很明显。跟 [_overPairFlopRaiseBonus]
+  /// 一样挂在 [_strongRaiseChance] 外面，理由同它：乘系数会把本来就三成
+  /// 上下的式子顶到一百，放式子里面又会被大注那两个折扣压没。
+  ///
+  /// 幅度比超对小：超对是打赢顶对的成牌升级，成牌 + 听牌只是半诈唬那一侧
+  /// 的底气，翻牌被加注 0.07 / 面对一注 0.06，转牌各收一档。同样按人数折。
+  /// 只挂翻牌和转牌，河牌不抬——那时候听牌已经发完，抬了等于拿顶对乱 3-bet。
+  double _strongDrawRaiseBonus(
+      GameEngine game, _Spot spot, HandReading read) {
+    if (!_isStrongDraw(read)) return 0.0;
+    final raised = spot.villainRaisedThisStreet;
+    final base = switch (game.street) {
+      Street.flop => raised ? 0.07 : 0.06,
+      Street.turn => raised ? 0.06 : 0.05,
+      _ => 0.0,
+    };
+    if (base == 0.0) return 0.0;
+    return base * _manyWay(spot);
   }
 
   /// 大注（≥0.7 池）对强牌加注频率的压制。0.7 池不吃折扣，1.2 池压到两成，
@@ -2402,7 +2919,10 @@ class AiPlayer {
     // 的弱成牌加注率是有位置的 3 倍（实测转牌底对：没位置 8% vs 有位置
     // 2%），方向正好反了——没位置本来就该更少加注。
     if (!spot.checkedThisStreet || !medium) base *= 0.5;
-    if (spot.opponents >= 2) base *= 0.35; // 多人底池别拿一对乱加
+    // 多人底池别拿一对乱加，人越多越别加（见 [_manyTail]）。
+    if (spot.opponents >= 2) {
+      base *= 0.35 * _manyTail(spot.opponents, 2);
+    }
     if (spot.isThreeBetPot) base *= 0.7; // 3bet 底池大家范围都强
     base *= 1 - 0.6 * spot.villainStrength; // 对手线越强越少加
     // 对手小注更像阻挡注，值得抬回去；大注通常是真牌，别硬顶。
@@ -2442,7 +2962,6 @@ class AiPlayer {
   double _floatChance(GameEngine game, _Spot spot, HandReading read) {
     if (game.street != Street.flop) return 0.0;
     if (spot.opponents > 1) return 0.0; // 多人底池：后面还有人会加注
-    if (spot.betSizeRel > 0.6) return 0.0; // 大注浮不动
     // 被人加注了还想浮牌：没位置时这是纯烧钱，直接放弃这条线。
     if (spot.villainRaisedThisStreet && !spot.inPosition) return 0.0;
     final back = _backdoorScore(game, read);
@@ -2455,6 +2974,23 @@ class AiPlayer {
     // 注、要么直接放弃），之前两边频率完全一样（探针：有位置 25% vs
     // 没位置 26%），等于「位置」这个变量在这个决策里根本不存在。
     f *= spot.inPosition ? 1.4 : 0.25;
+    // 大注浮不动——但这条曲线以前是一道硬门槛（`betSizeRel > 0.6 直接
+    // 返回 0`）：探针实测同一手「后门花 + 两张高张」，0.55 池浮 21%、
+    // 0.60 池 15%、0.62 池一手都不浮了。而且这一档一关，浮牌登记的那条
+    // 半诈唬线整条消失——转牌对手过牌后「接着开火」的那部分挂在它上面
+    // （见 [_checkedTo] 第 6 档里的 [_registerFire]），对手把注抬过 0.6 池
+    // 就同时关掉了两条街的诈唬。改成 0.6~1.2 池的线性斜坡：0.6 池以内逐点
+    // 不变，1.2 池及以上仍然是零（那头本来就不该浮）。
+    //
+    // 但「0.6 池以内逐点不变」留了一段常量区间：探针实测 0.40 / 0.50 /
+    // 0.55 / 0.60 池四格读数逐字相同（弃 74%、跟 21%），也就是「注越小越
+    // 值得跟一张」这个真人最基本的判断在 0.6 池以内根本不存在——对手把注
+    // 从 0.6 池收小到 0.4 池，弃牌率一点没变，他大可以照 0.6 池的价格收
+    // 价值。补一条便宜那侧的斜坡：0.25 池及以下 ×1.5（再往上见封顶），
+    // 0.6 池收敛回 1.0——0.6 池那个锚点和上面那条大注斜坡一个点都不动。
+    f *= 1 + 0.5 * ((0.6 - spot.betSizeRel) / 0.35).clamp(0.0, 1.0);
+    final priceFade = ((spot.betSizeRel - 0.6) / 0.6).clamp(0.0, 1.0);
+    f *= 1 - priceFade;
     return f.clamp(0.0, spot.inPosition ? 0.5 : 0.15);
   }
 
@@ -2466,8 +3002,32 @@ class AiPlayer {
         : (read.drawOuts >= 8 ? 0.22 : 0.08);
     base *= _p.semiBluffRaiseScale;
     base *= _bluffiness * _aggression;
-    if (spot.opponents >= 2) base *= 0.4;
-    if (spot.betSizeRel >= 0.8) base *= 0.4; // 大注不硬凑
+    if (spot.opponents >= 2) base *= 0.4 * _manyTail(spot.opponents, 2);
+    // 「大注不硬凑」原来是 `betSizeRel >= 0.8` 的布尔（0.79 池乘 1.0、
+    // 0.80 池乘 0.4），探针实测坚果花听（AdKd on Qd7d2c）面对下注：
+    // 0.79 池加注 20%、0.80 池 12%、0.81 池 7%——加注率在门槛上一步掉
+    // 13 个点，对手把尺度卡在 0.79 池就必被加、卡到 0.81 池就稳收底池。
+    // 改成从 0.6 池起连续收到 0.4（1.0 池到满档），两端锚点跟以前一致
+    // （0.6 池以下不增不减、1.0 池及以上仍是 0.4）。
+    //
+    // 面对**加注**那条线必须换一组锚点，因为 [betSizeRel] 在两处的量纲不一样：
+    // 加注要先把对手那一注配上，同样「加到 2.2 倍」，摊到相对底池上只有
+    // 0.18~0.31 池；加到 3.5 倍也只有 0.37~0.65 池（探针实测的分布，见下）。
+    // 而上面这组锚点是照**下注**定的（0.6 池起、1.0 池封顶）——放到加注线上
+    // 斜坡整个是死的：探针（tool/ai_vs_raise_probe.dart，转牌牌面已钉死）实测
+    // 坚果花听面对 2.2 倍和 3.5 倍都是再加 13%、卡顺两档都是 4%，可同一块牌面
+    // 上的强牌和怪兽都随尺度衰减（顶对顶踢 19% → 11%、超对 29% → 17%）。
+    // 也就是说「他加到 3.5 倍」这个信息在这一档完全没进决策，而加到 3.5 倍的
+    // 人范围实得多、弃牌率也低得多，真人这时候很少再拿听牌往上顶。
+    // 所以加注侧按实测分布重定锚点：0.25 池起、0.6 池封顶，压到 0.45
+    // （0.25 及以下不动，0.6 及以上乘 0.45）。面对下注那一侧一个点不动。
+    final fadeFloor = spot.villainRaisedThisStreet ? 0.45 : 0.4;
+    final fadeFrom = spot.villainRaisedThisStreet ? 0.25 : 0.6;
+    final fence = spot.villainRaisedThisStreet ? 0.6 : 1.0;
+    final bigBetFade =
+        ((spot.betSizeRel - fadeFrom) / (fence - fadeFrom)).clamp(0.0, 1.0);
+    base *= 1 - (1 - fadeFloor) * bigBetFade;
+
     // 第二枪选牌：发出来的牌帮不到对手才值得用听牌加注施压。
     base *= barrel;
     // 先过牌再对下注加注（过牌-加注）本来就是没位置时打听牌的主力。
@@ -2514,11 +3074,19 @@ class AiPlayer {
       // 老逻辑把最小加注当成阻挡注，还额外乘 2 倍，探针实测：AKQ 这种
       // 完全没后路的空气面对最小加注，11% 直接 3-bet、跟注 0%——
       // 真人在这儿的频率只有它的三分之一。
+      // 0.8 池上那道 2.25 倍的开关（0.45 → 0.2）同样量过：AI 开一枪、
+      // 英雄按 0.5/0.58/0.62/0.7/0.8 倍池加回来，AKQ 上的纯空气在整段
+      // 都是 100% 弃、诈唬再加注 0%（见 tool/ai_probe.dart 的「面对加注」
+      // 一节）。基数本来就只剩两三个点，2.25 倍摊到决策上看不见，留着。
       base *= spot.betSizeRel >= 0.8 ? 0.2 : 0.45;
     } else if (spot.betSizeRel <= 0.35) {
       base *= 2.0; // 对手小注 = 牌力偏弱
     }
-    if (spot.betSizeRel >= 0.75) base *= 0.35; // 大注通常是真牌，别硬顶
+    // 同一道台阶在这个函数里也有一份：`>= 0.75` 乘 0.35。探针实测破花听
+    // （AhJh on Kh7h2c9s3d）面对河牌下注，0.74 池加注 8%、0.75 池只剩 3%。
+    // 同样改成连续：从 0.5 池起收到 0.35（1.0 池满档）。
+    final bigBetFade = ((spot.betSizeRel - 0.5) / 0.5).clamp(0.0, 1.0);
+    base *= 1 - 0.65 * bigBetFade;
     if (spot.villainStrength > 0.7) base *= 0.4;
     if (spot.inPosition) base *= 1.3;
     // 诈唬选牌：阻断牌越硬，被跟注的概率越低。

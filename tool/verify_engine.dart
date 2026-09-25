@@ -790,7 +790,13 @@ void main() {
 ({double bluffRate, double valueSize}) vsVillain({
   required bool alwaysFolds,
   int warmup = 60,
-  int rounds = 200,
+  // 200 手不够：跟注站那一侧的开火率只有 5% 上下，200 手的标准差就有 1.6 个
+  // 点，而这条检查要的是「两边差 10 个点」——余量的一半直接交给噪声。实测
+  // 同一个 AI 只是换掉热身阶段消耗的随机数相位（比如改一处跟读人无关的
+  // 薄价值频率），这一格就会在 5% 和 8% 之间跳，差 9 点「失败」还是差 12 点
+  // 「通过」全看抽到哪一串。2000 手把两侧的标准差都压到 1 个点以内，闸门
+  // 量的才是读人这条线本身。
+  int rounds = 2000,
 }) {
   final ai = AiPlayer(AiStyle.tightAggressive, random: Random(7));
 

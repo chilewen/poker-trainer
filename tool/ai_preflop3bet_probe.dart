@@ -127,7 +127,78 @@ List<Card> cs(String s) => s.split(' ').map(Card.parse).toList();
   return (facing: facing, openSizes: openSizes, n: n);
 }
 
+/// 8 人桌、AI 钉死在按钮位，量它面对「前面已经溜进来 [limpers] 家」时怎么打。
+///
+/// 桌子大小、座位、底池里的人数全都固定，只让「已经进池的家数」这一维动。
+/// 这一点是必须的：要是靠改桌子人数来造溜入（早先那个临时脚本就是这么干的），
+/// [_Spot] 里的 opponents 和位置会跟着一起变，量出来的差里混着「人多人少」，
+/// 根本读不出溜入家数这一维——量法本身是假的，数字再整齐也不算数。
+({Map<String, int> act, List<int> sizes, int n}) probeLimpers({
+  required String hole,
+  int limpers = 2,
+  AiStyle style = AiStyle.tightAggressive,
+  int seeds = 300,
+}) {
+  final act = <String, int>{};
+  final sizes = <int>[];
+  var n = 0;
+  for (var seed = 0; seed < probeSeeds(seeds); seed++) {
+    final rnd = Random(seed);
+    final g = GameEngine(random: rnd)..addPlayer('ai', 'AI');
+    final ai = AiPlayer(style, random: rnd);
+    for (var i = 0; i < 7; i++) {
+      g.addPlayer('p$i', 'P$i');
+    }
+    // players[0] 是 AI，buttonIndex 从 7 推到 0 → AI 坐按钮。8 人桌里
+    // 按钮前面有 5 家（翻前顺序 3,4,5,6,7,0(我),1,2），够铺 0~4 家溜入。
+    g.buttonIndex = 7;
+    g.startHand(holeOverride: {'ai': cs(hole)});
+    var guard = 0;
+    var acted = 0;
+    while (!g.handOver && guard++ < 80) {
+      final p = g.pendingAction();
+      final legal = p.actions;
+      final facing = legal.any((a) => a.type == ActionType.call);
+      if (p.player.id == 'ai') {
+        final d = ai.decide(g, p.player);
+        if (g.street == Street.preflop) {
+          final key = switch (d.type) {
+            ActionType.raise => '加注',
+            ActionType.call => '跟注',
+            ActionType.check => '过牌',
+            _ => '弃牌',
+          };
+          act[key] = (act[key] ?? 0) + 1;
+          if (d.type == ActionType.raise && d.amountTo != null) {
+            sizes.add(d.amountTo!);
+          }
+          n++;
+          break;
+        }
+        g.apply('ai', d.type, amount: d.amountTo);
+        continue;
+      }
+      // 前面按顺序：前 [limpers] 家补齐进池，其余的弃牌——把「已经进来几家」
+      // 钉死，不让 AI 面对的底池形状随手牌随机漂。
+      final want = acted < limpers
+          ? (facing ? ActionType.call : ActionType.check)
+          : (legal.any((a) => a.type == ActionType.fold)
+              ? ActionType.fold
+              : ActionType.check);
+      g.apply(p.player.id, want);
+      acted++;
+    }
+  }
+  return (act: act, sizes: sizes, n: n);
+}
+
 String _pct(int v, int n) => n == 0 ? '-' : '${(100 * v / n).round()}%';
+
+
+/// 带一位小数的百分比：轻 4bet 这一档的频率低到两三个点，整数百分比在这条
+/// 尾巴上分不开（4.3% 和 4.1% 都印成「4%」），坡度就看不见了。
+String _pct1(int v, int n) =>
+    n == 0 ? '-' : '${(100 * v / n).toStringAsFixed(1)}%';
 
 void main() {
   final seatLabel = {1: '小盲', 2: '大盲', 3: '前位', 4: '前位', 5: '中位', 6: '中位', 7: '劫位', 8: '劫位'};
@@ -177,5 +248,102 @@ void main() {
       parts.add('${hole.replaceAll(' ', '')} 跟${_pct(r.facing['跟注'] ?? 0, r.n)}');
     }
     print('  3bet ${(sb / 100).toStringAsFixed(1)}bb   ${parts.join('   ')}');
+  }
+
+  // 第四节：轻 4bet（A5s~A2s 这种没有摊牌价值、全靠阻断牌压回去的牌）
+  // 的频率也得跟着 3bet 的价格走。
+  //
+  // 以前这一档是个跟价格无关的常数（`_p.lightThreeBet * 2.5`），实测 A5s
+  // 对着 4.7 / 7.0 / 9.0 / 14.0bb 一律「加注 28%」——9bb 和 14bb 那两行连
+  // 弃牌率都逐字相同。对手把 3bet 加到 14bb 就能稳定地拿 AA/KK 收下两成八
+  // 个 30bb 的 4bet。
+  //
+  // 只补「贵了要收」还不够：收完之后 10bb 以下那一整段又成了新的常数区间
+  // （实测 4.7 / 6.2 / 8.0 / 10.0bb 一律 28%，三种风格全一样）。可 4.7bb
+  // 那档 4bet 出去只要投十几个 bb、14bb 那档要投三十个，「贵了要收」的理由
+  // 在便宜那头是反过来成立的——压回去的成本越低越该压。所以现在便宜侧也铺
+  // 了斜坡：拿离上限的余量按便宜程度补，紧凶 4.7bb 补到约 35%，松凶本来就
+  // 在 55%（超过上限、余量为负），一个点不动。
+  //
+  // 点位在 [4.7, 10.0]bb 这一段故意排得比贵侧密：两处斜坡的接头都在 10bb
+  // 附近，台阶最容易藏在那里，扫稀了看不出来。
+  //
+  // 但「贵了要收」收完也还是留了一段平台：14bb 收到基频的两成之后，价格
+  // 再往上涨这个两成就不动了，实测 14 / 16 / 18 / 20bb 四行逐字相同的
+  // 「加注 6%」（松凶 164/1500，也是逐字相同）。对手把 3bet 从 14bb 抬到
+  // 20bb，我们 4bet 出去要投的筹码从三十个涨到五十几个、敢这么加的范围又
+  // 硬得多，两头的期望一起往下走，频率却一个点不动。现在贵那侧接着收
+  // （倒数衰减，见 AiPlayer 里 `lightExpensiveRamp`），20bb 收到六成、
+  // 22bb 收到一半，一路往零收但收不到零。
+  //
+  // 这一节的样本提到 1200、百分比印一位小数：留下来的频率只有两三个点，
+  // 400 手在这条尾巴上的噪声就有 ±1%（打印又是整数百分比），4.3% 和 4.1%
+  // 会一起印成「4%」——量法本身把坡度抹平了，跟真的平台分不出来。
+  print('== 轻 4bet（A5s）的频率随 3bet 价格下降（${seatLabel[rel]}开池）==');
+  for (final sb in [
+    470, 500, 560, 620, 700, 800, 900, 1000,
+    1100, 1200, 1400, 1600, 1800, 2000, 2200, 2600,
+  ]) {
+    final r = probe(hole: 'Ah 5h', rel: rel, threeBet: sb, seeds: 1200);
+    print('  3bet ${(sb / 100).toStringAsFixed(1)}bb   '
+        '加注 ${_pct1(r.facing['加注'] ?? 0, r.n)}  '
+        '跟注 ${_pct1(r.facing['跟注'] ?? 0, r.n)}  '
+        '弃牌 ${_pct1(r.facing['弃牌'] ?? 0, r.n)}  n=${r.n}');
+  }
+
+  // 第五节：溜入家数。
+  //
+  // 这一节是「先修量法」的产物。早先有个临时脚本靠改**桌子人数**来造溜入，
+  // 量出来「1/2/3/4 家溜入」下 87o 的加注率是 100/100/10/0，看着像一道硬
+  // 台阶——可那个脚本里 AI 翻前其实是**先行动**的那一个（buttonIndex 推完
+  // 落在自己头上，8 人桌的翻前顺序是 3,4,…,7,0(我),1,2），limp`ers 恒为 0，
+  // 跟着变的只有桌子大小和位置。这里把桌子钉死 8 人、AI 钉死按钮，只让
+  // 「已经溜进来几家」这一维动。
+  //
+  // 改前读数（600 手一格，桌子大小/座位固定）：整个维度是死的——6 手牌 ×
+  // 两种风格，1 家 / 2 家 / 3 家 / 4 家溜入的动作**逐字相同**。55 / A5s 一律
+  // 「加 41% / 补齐 59%」（松凶 62/38）；87o 从 1 家起就只剩「加 10% / 跟 12%
+  // / 弃 79%」，2 家往后弃 100%；A8o / 99 / KQo 一律加 100%。加注**尺度**倒是
+  // 活的（3.5 → 4.6 → 5.6 → 6.6bb），也就是说这批牌对人数唯一的反应是
+  // 「加得更大」。
+  //
+  // 修法（两处，都是「锚点不动、往上铺」）：非同花开池范围那道布尔台阶
+  // （`shiftedOffsuit(limpers >= 2 ? 2 : 1)`）换成按人数一档一档收、4 档封顶；
+  // 两家以上再开一档中间档溜入表（PreflopRanges.limpMid：标准表 + 非同花连张
+  // / 非同花大牌 / 弱 A），里面那批牌只**按比例**进来（AiPlayer 里的 midMix，
+  // 0.45 起、随人数往上）——整档放开只是把台阶从「一律弃」挪成「一律补」，
+  // 读起来还是一句话。
+  //
+  // 改后读数：87o 紧凶补齐 12% → 42% → 57% → 69%（1 → 4 家），松凶
+  // 「加 63%/补 37%」→「加 63%/补 37%」→「加 14%/补 53%/弃 33%」→
+  // 「补 69%/弃 31%」；A8o 紧凶 加 100/100/100 → 4 家「加 21%/补 56%/弃 23%」；
+  // KQo 紧凶 加 100/100 → 3 家「加 21%/补 46%/弃 33%」→ 4 家「补 69%/弃 31%」。
+  //
+  // 还僵着两处，都留在这儿当下一轮的靶子：
+  //   · 55 / A5s 的「加还是补」比例对人数仍然不敏感（1~4 家一律 41/59）——这是
+  //     用例「翻前：面对溜入者，后位用边缘牌跟着溜入」故意的地板（7~8 家仍要
+  //     > 25% 加注，不然「他补齐 = 他没牌」又成了新的破译点）。锚点 41% 加
+  //     地板 25%，整条坡度最多十五个点；实测 0.05 的斜率就把 8 家压到 24% 报红，
+  //     收到 0.03 只剩 41 → 37，落在项目自己划的噪声带里，所以没做。
+  //   · 松凶那半边 87o 的 1 家与 2 家仍然相同：对它来说 87o 不是范围边界手
+  //     （边界在 76o/65o 那一层），要看见得换手牌量。
+  print('== 溜入家数：8 人桌 AI 按钮位，只有「已溜入几家」在变 ==');
+  for (final style in [AiStyle.tightAggressive, AiStyle.looseAggressive]) {
+    print('-- ${style.label} --');
+    for (final hole in ['8h 7d', '5h 5d', 'Ah 5h', 'Ah 8d', '9h 9d', 'Kh Qs']) {
+      final parts = <String>[];
+      for (final k in [0, 1, 2, 3, 4]) {
+        final r = probeLimpers(hole: hole, limpers: k, style: style, seeds: 600);
+        final avgBb = r.sizes.isEmpty
+            ? '-'
+            : (r.sizes.reduce((a, b) => a + b) / r.sizes.length / 100)
+                .toStringAsFixed(1);
+        parts.add('$k家 加${_pct(r.act['加注'] ?? 0, r.n)}'
+            '(${avgBb}bb) '
+            '跟${_pct(r.act['跟注'] ?? 0, r.n)} '
+            '弃${_pct(r.act['弃牌'] ?? 0, r.n)}');
+      }
+      print('  ${hole.padRight(8)} ${parts.join('  |  ')}');
+    }
   }
 }

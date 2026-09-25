@@ -322,4 +322,28 @@ void main() {
           '${parts.join('  |  ')}');
     }
   }
+
+  print('');
+  print('== D. 河牌防守下限：同一档里越弱的牌要弃得越多（四人池）==');
+  // 下限（[AiPlayer] 的 `riverDefendFloor`）原来是个跟手牌无关的定值：胜率一旦
+  // 掉到门槛以下，决定权就整块交给它，于是整档的弃牌率变成同一个数——对手把
+  // 尺度卡在「这一档刚好够不到门槛」的位置，我们的整个抓诈唬范围就是一个常数，
+  // 手里拿的是什么牌再也读不出来。下面三手牌是同一档（weak）里强弱分明的一组：
+  // 对着同一个范围算出来的胜率是 0.073 / 0.044 / 0.005，差十几倍。
+  // 改之前 1/2 池那一档三行逐字相同（弃 35/35/35、0.65 池 73/73/73）；
+  // 折扣按手牌给之后是 50/63/82 与 87/94/100，越强的牌守得越多。
+  final weakHands = <({String name, String hole, String board})>[
+    (name: '第二对 87', hole: '8h 7s', board: 'Kh 8d 3c 5h 9s'),
+    (name: '被盖口袋 66', hole: '6h 6d', board: 'Kh 8d 3c 5h 9s'),
+    (name: '底对 43', hole: '4h 3d', board: 'Ks 7c 3c 5h 9s'),
+  ];
+  for (final frac in [0.5, 0.65]) {
+    for (final h in weakHands) {
+      final r = probeRiverFacing(
+          hole: h.hole, board: h.board, callers: 2, frac: frac);
+      print('下注 ${frac.toStringAsFixed(2)} 池  ${h.name.padRight(14)} '
+          '弃 ${pct(r.fold).padLeft(3)}  跟 ${pct(r.call).padLeft(3)}  n=${r.n}');
+    }
+    print('');
+  }
 }
