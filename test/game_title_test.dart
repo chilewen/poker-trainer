@@ -140,4 +140,18 @@ void main() {
     expect(tester.takeException(), isNull, reason: '窄屏这一行不能溢出');
     expect(table.heroHandNet, -50);
   });
+
+  testWidgets('座位头像：类型用两个字，名牌还是 AI1', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await pumpTable(tester);
+
+    // 单挑桌的 AI 是紧凶：头像上是完整类型，而不是以前那个看不出所以然的
+    // 「紧」（松被动 / 松凶都会剩一个「松」）。名牌照旧是 AI1。
+    expect(find.text('紧凶'), findsOneWidget, reason: '头像是两个字的风格');
+    expect(find.text('紧'), findsNothing, reason: '一个字看不出类型，不用了');
+    expect(find.text('AI1'), findsOneWidget, reason: '名牌照旧');
+  });
 }

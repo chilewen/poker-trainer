@@ -11,20 +11,41 @@ import 'preflop_ranges.dart';
 /// AI 风格：
 /// - 紧凶：打得少打得凶，会用听牌和空气持续施压；
 /// - 松被动：跟注站，什么牌都便宜跟，很少主动加注；
-/// - 松凶：入池宽但攻击性强，半诈唬与诈唬压得最凶。
+/// - 松凶：入池宽但攻击性强，半诈唬与诈唬压得最凶；
+/// - 职业玩家：会读人的常客——紧凶骨架 + 读人吃得更透，换几手就能调整过来；
+/// - GTO：不看对手是谁，按同一套均衡频率打（不读人、不溜入、频率不抖）。
 enum AiStyle {
-  tightAggressive('紧凶'),
-  loosePassive('松被动'),
-  looseAggressive('松凶');
+  tightAggressive('紧凶', '紧凶'),
+  loosePassive('松被动', '松弱'),
+  looseAggressive('松凶', '松凶'),
+  pro('职业玩家', '职业'),
+  gto('GTO', '均衡');
 
-  const AiStyle(this.label);
+  const AiStyle(this.label, this.shortLabel);
+
+  /// 完整风格名：大厅、存档、行动记录里用这个。
   final String label;
+
+  /// 两个字的缩写：座位头像就那么大，只放得下一个「松」的话，松被动和松凶
+  /// 看起来一模一样。保持「松紧 + 凶/弱」两轴都在：紧凶 / 松弱 / 松凶；
+  /// 职业玩家 / GTO 各取两个字（职业 / 均衡）。
+  final String shortLabel;
+
+  /// 按 [label] 反查（玩家名和存档里存的是这个文本）。
+  static AiStyle? byLabel(String label) {
+    for (final style in AiStyle.values) {
+      if (style.label == label) return style;
+    }
+    return null;
+  }
 
   /// 风格参数表：三种风格共用同一套决策逻辑，区别只在这组数字。
   _Profile get _profile => switch (this) {
         AiStyle.tightAggressive => _tightProfile,
         AiStyle.loosePassive => _passiveProfile,
         AiStyle.looseAggressive => _looseAggressiveProfile,
+        AiStyle.pro => _proProfile,
+        AiStyle.gto => _gtoProfile,
       };
 }
 
@@ -51,6 +72,9 @@ class _Profile {
     this.limpsAnyPrice = false,
     this.wideLimp = false,
     this.overLimpMix = 0.0,
+    this.exploitScale = 1.0,
+    this.fixedPersonality = false,
+    this.neverLimp = false,
   });
 
   /// 开池范围的整体偏移（正 = 比标准范围更紧，负 = 更松）。
@@ -130,6 +154,29 @@ class _Profile {
 
   /// 跟注站特性：溜入范围放宽到「非同花杂牌也跟」。
   final bool wideLimp;
+
+  /// 读人（剥削调整）的力度。
+  ///
+  /// 1 = 标准：四个剥削因子（诈唬倍率、跟注门槛、价值尺度、疯子读牌）按
+  /// 读出来的倾向原样生效；> 1 = 职业玩家把读到的倾向吃得更透（对手越爱
+  /// 弃牌压得越狠、跟注站面前价值下注越黏）；0 = 完全不看人（GTO：对手是
+  /// 疯子还是岩石，它的门槛和频率一个字不动）。
+  final double exploitScale;
+
+  /// 频率要不要「钉死」。
+  ///
+  /// 默认每种风格里的每个 AI 都掷一次性格骰子（松紧 / 凶 / 诈唬各带
+  /// ±15~30%），让同一风格的对手也不完全一样。均衡型不掷：它的看点就是
+  /// 「同一手牌、同一个场合永远是同一个频率」，两个均衡型玩家自己先打得
+  /// 不一样的话，牌桌上就没有一把稳定的尺子可对了。
+  final bool fixedPersonality;
+
+  /// 从不溜入：要玩就加注，不然就弃。
+  ///
+  /// 溜入等于把自己的范围摊给全桌看（而且翻后没有主动权）。三个真人风格
+  /// 都保留了一点溜入：跟注站靠它进池，紧凶 / 松凶只在后面已经有人进池时
+  /// 用边缘牌跟着看翻牌。均衡型干脆不打这一档。
+  final bool neverLimp;
 }
 
 const _tightProfile = _Profile(
@@ -189,6 +236,68 @@ const _looseAggressiveProfile = _Profile(
   callSlack: 0.10,
   slowPlay: 0.18,
   overLimpMix: 0.40,
+);
+
+/// 职业玩家：会读人的常客。
+///
+/// 骨架跟紧凶同一条（位置感知的范围 + 标准尺度），差别在**读人吃得更透**：
+/// [exploitScale] 1.4——对手爱弃牌就压得更狠、跟注站面前价值下注更大更黏，
+/// 几手就能调整过来；同时尺度更贴位置、拿去溜入的垃圾牌更少，3bet/4bet
+/// 也比紧凶狠一档。牌桌上的感觉是「这人不吃素，但也没有疯到读不出来」。
+const _proProfile = _Profile(
+  // 骨架与紧凶逐项一致（同一套位置范围 + 同一套尺度/门槛），差别只在
+  // 「读人吃得更透」和更凶的 3bet/4bet、更小的开池尺度——这样牌桌上的
+  // 读法很明确：他跟紧凶是同一种人，但你怎么打他都记得更清楚。
+  openShift: 0,
+  limpShift: 1,
+  defendShift: 0,
+  threeBetShift: 0,
+  lightThreeBet: 0.18,
+  openSizeBb: 2.5,
+  positionSensitivity: 1.1,
+  bluffScale: 1.0,
+  semiBluffScale: 1.0,
+  aggressionScale: 1.0,
+  semiBluffRaiseScale: 1.0,
+  bluffRaiseScale: 1.0,
+  fourBetScale: 1.15,
+  callSlack: 0.0,
+  slowPlay: 0.12,
+  overLimpMix: 0.60,
+  exploitScale: 1.4,
+);
+
+/// 均衡型（GTO）：不看对手是谁，按同一套频率打。
+///
+/// 三个真人风格都是「基准策略 + 自己的偏差」，均衡型就是**基准本身**：
+///
+/// - 不读人（[exploitScale] 0）：对手是疯子还是岩石，跟注门槛和诈唬频率
+///   一个字不动——这是它和职业玩家最大的区别，也是它的弱点（对面是个跟
+///   注站时，它照旧按均衡频率诈唬，读不出「这人根本弃不掉」）；
+/// - 不掷性格骰子（[fixedPersonality]）：同一手牌、同一个场合永远是同一个
+///   频率，同一张桌上两个均衡型对手打得一模一样；
+/// - 不溜入（[neverLimp]）：要玩就加注，不然就弃；
+/// - 尺度、诈唬比例、MDF 防守都走基准（乘数全是 1.0），开池 2.5bb。
+const _gtoProfile = _Profile(
+  openShift: 0,
+  limpShift: 6,
+  defendShift: -1,
+  threeBetShift: 0,
+  lightThreeBet: 0.3,
+  openSizeBb: 2.5,
+  positionSensitivity: 0.9,
+  bluffScale: 1.0,
+  semiBluffScale: 1.0,
+  aggressionScale: 1.0,
+  semiBluffRaiseScale: 1.0,
+  bluffRaiseScale: 1.0,
+  fourBetScale: 1.0,
+  callSlack: 0.0,
+  slowPlay: 0.08,
+  overLimpMix: 0.0,
+  exploitScale: 0.0,
+  fixedPersonality: true,
+  neverLimp: true,
 );
 
 /// AI 的一次决策结果。
@@ -273,10 +382,18 @@ class _VillainRead {
 ///    拿什么都没挡到的牌就老实过牌——真人和按钮精灵最大的区别就在这。
 class AiPlayer {
   AiPlayer(this.style, {Random? random}) : _random = random ?? Random() {
-    // 同一风格的每个 AI 也有自己的性格，避免所有人打成一模一样。
-    _aggression = 0.85 + _random.nextDouble() * 0.3;
-    _bluffiness = 0.7 + _random.nextDouble() * 0.6;
-    _looseness = 0.9 + _random.nextDouble() * 0.25;
+    if (style._profile.fixedPersonality) {
+      // 均衡型不掷骰子（见 [_Profile.fixedPersonality]）：它的频率是拿来
+      // 当标尺用的，同一桌上两个均衡型对手得打得一模一样。
+      _aggression = 1.0;
+      _bluffiness = 1.0;
+      _looseness = 1.0;
+    } else {
+      // 其余风格：每个 AI 有自己的性格，避免所有人打成一模一样。
+      _aggression = 0.85 + _random.nextDouble() * 0.3;
+      _bluffiness = 0.7 + _random.nextDouble() * 0.6;
+      _looseness = 0.9 + _random.nextDouble() * 0.25;
+    }
   }
 
   final AiStyle style;
@@ -379,6 +496,13 @@ class AiPlayer {
           if (p.id != me.id) _reads[p.id],
       ].whereType<_VillainRead>().toList();
 
+  /// 把「读出来的倍率」按风格的剥削力度收一收。
+  ///
+  /// 剥出来的倍率是「相对中性值 1.0 的偏离」：职业玩家（>1）吃得更透，
+  /// 均衡型（0）原样返回 1.0——读人这一层对它等于不存在，牌桌上因此读不出
+  /// 「它是不是看穿我了」。读人档案照旧在攒（见 [readOf]），只是不参与决策。
+  double _temperExploit(double raw) => 1.0 + (raw - 1.0) * _p.exploitScale;
+
   /// 剥削因子：对手翻后爱弃牌就多诈唬，是跟注站就别装了。
   double _exploitBluffFactor(GameEngine game, PlayerState me) {
     final reads = _readsOf(game, me);
@@ -392,7 +516,7 @@ class AiPlayer {
           ? 0.42
           : (r.folder ? 1.85 : 0.55 + 0.9 * r.foldToBet);
     }
-    return (sum / reads.length).clamp(0.35, 1.9);
+    return _temperExploit((sum / reads.length).clamp(0.35, 1.9));
   }
 
   /// 对手的进攻性怎么影响我们的跟注门槛：
@@ -409,11 +533,14 @@ class AiPlayer {
       // 中性 1/3 → 1.0 倍；0.1 的岩石 → 1.28 倍；0.5 的疯子 → 0.80 倍。
       sum += (1 + (0.33 - r.aggroRate) * 1.2).clamp(0.8, 1.3);
     }
-    return sum / reads.length;
+    return _temperExploit(sum / reads.length);
   }
 
   /// 对手是不是「逮到机会就往里砸」的那种：拿强牌时别被他一个超池吓跑。
   bool _facingManiac(GameEngine game, PlayerState me) {
+    // 不看人的风格（均衡型）根本不承认「疯子」这个分类：他对谁都按同一
+    // 套门槛打，所以这里也不该有例外。
+    if (_p.exploitScale <= 0) return false;
     final reads = _readsOf(game, me);
     return reads.length == 1 && reads.first.aggroRate >= 0.45;
   }
@@ -430,7 +557,7 @@ class AiPlayer {
     for (final r in reads) {
       sum += ((r.aggroRate - 0.45) / 0.15).clamp(0.0, 1.0);
     }
-    return sum / reads.length;
+    return (sum / reads.length * _p.exploitScale).clamp(0.0, 1.0);
   }
 
   /// 价值因子：对手爱跟注（跟注站）就打得更大、更粘。
@@ -441,7 +568,7 @@ class AiPlayer {
     for (final r in reads) {
       sum += r.station ? 1.25 : (r.folder ? 0.9 : 1.0 + 0.3 * (0.45 - r.foldToBet));
     }
-    return (sum / reads.length).clamp(0.85, 1.3);
+    return _temperExploit((sum / reads.length).clamp(0.85, 1.3));
   }
 
   /// 登记一次诈唬开火：延续上一条街的诈唬线，或开一条新的。
@@ -591,7 +718,11 @@ class AiPlayer {
           : (_p.wideLimp
               ? PreflopRanges.limpLoose(seat).shifted(_p.limpShift + w)
               : (useMid ? midLimp : standard));
-      if (limpRange.contains(hand) && (cheap || _p.limpsAnyPrice)) {
+      // 均衡型不溜入（见 [_Profile.neverLimp]）：溜入等于把自己的范围摊
+      // 给全桌看，还放弃了翻后的主动权，均衡策略里没有这个动作。
+      if (!_p.neverLimp &&
+          limpRange.contains(hand) &&
+          (cheap || _p.limpsAnyPrice)) {
         // 中间档独有的那批牌（非同花连张 / 大牌 / 弱 A）只按比例进来：溜入
         // 的人越多越愿意补，但永远留一部分弃牌。不然它只是从「一律弃」换成
         // 「一律补」——台阶换了个位置，读起来还是一句话。

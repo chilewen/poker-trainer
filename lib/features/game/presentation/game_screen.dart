@@ -9,6 +9,7 @@ import '../../../engine/types.dart';
 import '../../../trainer/odds.dart';
 import '../../history/data/hand_history_store.dart';
 import '../data/table_session_store.dart';
+import '../domain/ai_player.dart';
 import 'chip_format.dart';
 import 'hand_review_sheet.dart';
 import 'session_summary_screen.dart';
@@ -40,6 +41,16 @@ String? cnPositionOf(GameEngine engine, PlayerState p) => cnPosition(
 /// 玩家名短显示：去掉风格前缀（紧凶·AI1 → AI1）。
 String shortName(String name) =>
     name.contains('·') ? name.split('·').last : name;
+
+/// 座位头像里的字：英雄显示自己的「我」，电脑玩家显示类型的那两个字。
+///
+/// 以前取的是名字首字，于是松被动和松凶都只剩一个「松」，牌桌上根本看不出
+/// 对手是什么类型；现在镶的是 [AiStyle.shortLabel]（紧凶 / 松弱 / 松凶）。
+String avatarLabel(String name) {
+  final parts = name.split('·');
+  if (parts.length < 2) return name.characters.first;
+  return AiStyle.byLabel(parts.first)?.shortLabel ?? parts.first;
+}
 
 /// 行动概览条用的徽标文案与颜色。
 (String, Color)? stripBadge(ActionRecord a) {
@@ -544,10 +555,10 @@ class OpponentSeat extends StatelessWidget {
                       radius: 20,
                       backgroundColor: avatarColor,
                       child: Text(
-                        p.name.characters.first,
+                        avatarLabel(p.name),
                         style: const TextStyle(
                             color: Colors.white,
-                            fontSize: 13,
+                            fontSize: 12,
                             fontWeight: FontWeight.bold),
                       ),
                     ),

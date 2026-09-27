@@ -607,13 +607,19 @@ void main() {
         reason: '英雄从没主动下注过，进攻性读数应该很低');
   });
 
-  t('读人：对手是疯子还是岩石，决定我们抓诈唬时跟不跟', () {
-    // 先跟一个「逮到机会就下注/加注」的疯子、和一个「只跟不主动」的岩石
-    // 各打一批准牌，攒出进攻性读数；再拿同一手第二对面对同一个 3 倍池
-    // 超池下注，看 AI 敢不敢抓。
-    ({double callRate, double aggroRate, int total}) callVsRead(
-        {required bool maniac}) {
-      final ai = AiPlayer(AiStyle.tightAggressive, random: Random(7));
+  /// 先跟一个「逮到机会就下注/加注」的疯子、和一个「只跟不主动」的岩石
+  /// 各打一批准牌，攒出进攻性读数；再拿同一手第二对面对同一个 3 倍池超池
+  /// 下注，看 AI 敢不敢抓。
+  ///
+  /// [style] 是**我们自己**的风格：读人强度只在几个风格之间有差别（职业吃
+  /// 得更透、均衡完全不看人），所以下面拿同一个局面喂不同读牌来对拍。
+  /// 返回的是测试阶段的跟注/加注率与 AI 对英雄攒出来的进攻性读数。
+  ({double callRate, double raiseRate, double aggroRate, int total}) callVsRead(
+      {required bool maniac,
+      AiStyle style = AiStyle.tightAggressive,
+      int warm = 150,
+      int test = 120}) {
+      final ai = AiPlayer(style, random: Random(7));
       ({ActionType? act}) play(int seed, bool record) {
         final g = GameEngine(
           config: const GameConfig(
@@ -671,24 +677,27 @@ void main() {
         return (act: act);
       }
 
-      for (var i = 0; i < 150; i++) {
+      for (var i = 0; i < warm; i++) {
         play(2000 + i, false);
       }
-      var calls = 0, total = 0;
-      for (var i = 0; i < 120; i++) {
+      var calls = 0, raises = 0, total = 0;
+      for (var i = 0; i < test; i++) {
         final r = play(300 + i, true);
         if (r.act == null) continue;
         total++;
         if (r.act == ActionType.call) calls++;
+        if (r.act == ActionType.raise) raises++;
       }
       final read = ai.readOf('hero');
       return (
+        raiseRate: total == 0 ? 0.0 : raises / total,
         callRate: total == 0 ? 0.0 : calls / total,
         aggroRate: read?.aggroRate ?? -1,
         total: total,
       );
     }
 
+  t('读人：对手是疯子还是岩石，决定我们抓诈唬时跟不跟', () {
     final vsManiac = callVsRead(maniac: true);
     final vsNit = callVsRead(maniac: false);
     expect(vsManiac.aggroRate, greaterThan(vsNit.aggroRate + 0.2),
@@ -6982,5 +6991,126 @@ void main() {
     expect(empty.netPerHand, 0);
     expect(empty.rebuysExhausted, isFalse);
     expect(empty.verdict, contains('没打完'));
+  }, fast: true);
+
+  t('对手类型：GTO 不溜入，也不掷性格骰子', () {
+    // 均衡型的三条硬规矩：不溜入、不掷性格骰子、不看人（最后一条见下面
+    // 那条拿同一局面喂两种读牌的用例）。
+    final gto =
+        aiOpenDecision('7h 6h', rel: 5, limpAhead: true, style: AiStyle.gto);
+    expect(gto.call, 0, reason: 'GTO 一次都不溜入（溜 ${gto.call}/${gto.n}）');
+    final tag = aiOpenDecision('7h 6h', rel: 5, limpAhead: true);
+    expect(tag.call / tag.n, greaterThan(0.5),
+        reason: '紧凶在同一局面会跟着溜入（溜 ${tag.call}/${tag.n}）');
+
+    // 不掷性格骰子：同一手牌、同一个位置，150 个种子里的动作完全一样。
+    // 紧凶在同一个点是混合的（性格 + 边界范围），均衡型则该是纯的。
+    for (final (hole, rel) in [('7h 6h', 5), ('Ah 5h', 3)]) {
+      final r = aiOpenDecision(hole, rel: rel, style: AiStyle.gto);
+      expect(r.raise == 0 || r.raise == r.n, isTrue,
+          reason: 'GTO 没有混合频率（$hole rel=$rel：加 ${r.raise}/${r.n}）');
+    }
+    final tagMid = aiOpenDecision('7h 6h', rel: 5);
+    expect(tagMid.raise, greaterThan(0),
+        reason: '对照：紧凶在这个点是混合的（加 ${tagMid.raise} '
+            '溜 ${tagMid.call} 弃 ${tagMid.fold}）');
+  }, fast: true);
+
+  t('对手类型：职业的 3bet/4bet 比紧凶凶', () {
+    // 职业玩家跟紧凶共用同一套位置范围，差别在于更敢再加注：拿 AA 面对方
+    // 3bet，职业 4bet 回去的比例要比紧凶高一档（fourBetScale 1.15）。
+    final tag = aiFacingThreeBet('Ah Ad');
+    final pro = aiFacingThreeBet('Ah Ad', style: AiStyle.pro);
+    expect(pro.raise, greaterThan(tag.raise + 8),
+        reason: '职业拿 AA 面对方 3bet 更多是 4bet（${pro.raise} vs ${tag.raise}）');
+    expect(pro.fold, 0, reason: 'AA 不许弃给 3bet');
+  });
+
+  t('对手类型：均衡型不看人，职业跟着读牌调', () {
+    String pct(double v) => '${(100 * v).round()}%';
+    final tagManiac = callVsRead(maniac: true);
+    final tagNit = callVsRead(maniac: false);
+    // 职业那两格给大一点的样本：诈唬加注本来就只有几个点，样本小了看不出差。
+    final proManiac =
+        callVsRead(maniac: true, style: AiStyle.pro, warm: 120, test: 240);
+    final proNit =
+        callVsRead(maniac: false, style: AiStyle.pro, warm: 120, test: 240);
+    final gtoManiac = callVsRead(maniac: true, style: AiStyle.gto);
+    final gtoNit = callVsRead(maniac: false, style: AiStyle.gto);
+
+    // 紧凶：读牌生效，对疯子抓得多、对岩石收得紧。
+    final tagGap = tagManiac.callRate - tagNit.callRate;
+    expect(tagGap, greaterThan(0.3),
+        reason: '紧凶按读牌调（对疯子跟 ${pct(tagManiac.callRate)} vs '
+            '对岩石 ${pct(tagNit.callRate)}）');
+
+    // 均衡型：同一手牌、同一个超池，喂什么读牌都一样（exploitScale = 0）。
+    final gtoGap = gtoManiac.callRate - gtoNit.callRate;
+    expect(gtoGap.abs(), lessThan(0.12),
+        reason: '均衡型不看人：两种读牌下跟注率几乎一样'
+            '（${pct(gtoManiac.callRate)} vs ${pct(gtoNit.callRate)}；'
+            '紧凶同一组是 ${pct(tagManiac.callRate)} vs ${pct(tagNit.callRate)}）');
+
+    // 职业：同样看人，而且方向更明确——它跟紧凶共用一套门槛，读人那一下
+    // 是 1.4 倍放大的（`_Profile.exploitScale`），所以在同一个超池面前对
+    // 疯子跟得更果断。
+    expect(proManiac.callRate, greaterThan(proNit.callRate + 0.3),
+        reason: '职业同样看人（对疯子跟 ${pct(proManiac.callRate)} vs '
+            '对岩石 ${pct(proNit.callRate)}）');
+  });
+
+  t('对手类型：9 人桌五种对手都上桌，职业/均衡能存进档再读回来', () async {
+    final tmp = TempSessionDir('poker_style_roundtrip');
+    final file = tmp.sessionFile;
+    const config = GameConfig(
+        startingStack: 10000, smallBlind: 50, bigBlind: 100);
+    final first = tmp.watch(TableController(
+      sessionStore: TableSessionStore(file),
+      random: Random(4),
+      aiThinkTime: Duration.zero,
+    ));
+    first.startRealTable(name: '实战 9人桌', config: config, playerCount: 9);
+
+    List<AiStyle> stylesOf(TableController t) => [
+          for (final p in t.engine.players)
+            if (p.id != TableController.heroId)
+              AiStyle.byLabel(p.name.split('·').first)!,
+        ];
+    final styles = stylesOf(first);
+    expect(styles.length, 8);
+    expect(styles.toSet().length, AiStyle.values.length,
+        reason: '八家对手里五种类型都出现（${[for (final p in first.engine.players) p.name]}）');
+    for (final style in AiStyle.values) {
+      expect(styles.where((s) => s == style).length, lessThanOrEqualTo(2),
+          reason: '${style.label} 在 9 人桌上最多坐两家（9 人桌 8 家对手 / 5 种）');
+    }
+
+    // 存档里存的是风格名，冷启动要能原样还原（含两种新风格）。
+    first.engine.handOver = true;
+    await first.persistSession();
+    expect(first.savedSession!.styles, contains(AiStyle.gto.name));
+    expect(first.savedSession!.styles, contains(AiStyle.pro.name));
+
+    final second = tmp.watch(TableController(
+      sessionStore: TableSessionStore(file),
+      random: Random(4),
+      aiThinkTime: Duration.zero,
+    ));
+    await second.loadSession();
+    expect(second.resumeSession(), isTrue);
+    expect(stylesOf(second), styles, reason: '续局后对手类型逐个还原');
+  }, fast: true);
+
+  t('头像风格：类型缩到两个字，松被动不再和松凶撞脸', () {
+    // 座位头像只放得下两个字，而名字首字一个「松」分不出松被动和松凶，
+    // 所以每个风格都得有个正好两个字的缩写（[AiStyle.shortLabel]）。
+    for (final style in AiStyle.values) {
+      expect(style.shortLabel.length, 2, reason: '${style.label} 的缩写要两个字');
+    }
+    expect(AiStyle.loosePassive.shortLabel, '松弱');
+    expect(AiStyle.tightAggressive.shortLabel,
+        isNot(AiStyle.looseAggressive.shortLabel));
+    expect(AiStyle.byLabel('松被动'), AiStyle.loosePassive);
+    expect(AiStyle.byLabel('我'), isNull);
   }, fast: true);
 }

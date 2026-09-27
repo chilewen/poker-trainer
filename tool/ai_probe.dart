@@ -1457,6 +1457,37 @@ void main() {
           style: AiStyle.loosePassive,
           heroFirst: {Street.river: (type: ActionType.bet, frac: 0.5)}));
 
+  sec('');
+  sec('== 职业 / 均衡风格对照 == ');
+  // 两种新对手 vs 紧凶基准：职业是「紧凶 + 读人吃得更透」，均衡是「基准
+  // 本身、不看人」。这几行只看得出频率方向；「看不看人」那一维得靠给同一
+  // 个局面喂不同的读牌才能量（见 test/engine_test.dart 的读人用例）。
+  final proPreflop = [
+    (who: 'ai', type: ActionType.raise, amount: 3 * 100),
+    (who: 'hero', type: ActionType.call, amount: null),
+  ];
+  for (final (label, st) in [
+    ('紧凶', AiStyle.tightAggressive),
+    ('职业', AiStyle.pro),
+    ('均衡', AiStyle.gto),
+  ]) {
+    show('听花（无人下注）$label',
+        _sample(hole: 'Ad Kd', heroHole: '3c 2h', board: 'Qd 7d 2c', target: Street.flop,
+            style: st));
+    show('空气（无人下注）$label',
+        _sample(hole: '9h 8h', heroHole: '3c 2h', board: '7s 6h 2d', target: Street.flop,
+            style: st));
+    show('空气（面对 1/3 池 bet）$label',
+        _sample(hole: '8h 7h', heroHole: '4c 6d', board: 'As Kd Qc', target: Street.flop,
+            style: st,
+            preflopScript: proPreflop,
+            heroFirst: {Street.flop: (type: ActionType.bet, frac: 0.33)}));
+    show('河牌顶对（面对 1/2 池 bet）$label',
+        _sample(hole: 'Ah Qd', heroHole: '3c 2h', board: 'Qh 7d 2c 5h 9s', target: Street.river,
+            style: st,
+            heroFirst: {Street.river: (type: ActionType.bet, frac: 0.5)}));
+  }
+
   if (_sectionFilter.isNotEmpty && !_sectionMatched) {
     print('AI_PROBE_SECTION=「$_sectionFilter」没命中任何段落——用 '
         'grep "== " tool/ai_probe.dart 看段落名。');

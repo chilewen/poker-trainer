@@ -122,6 +122,8 @@ class LobbyScreen extends ConsumerWidget {
       ('单挑 · 紧凶', [AiStyle.tightAggressive]),
       ('单挑 · 松跟', [AiStyle.loosePassive]),
       ('单挑 · 松凶', [AiStyle.looseAggressive]),
+      ('单挑 · 职业', [AiStyle.pro]),
+      ('单挑 · GTO', [AiStyle.gto]),
       ('松浪混战 · 6人桌', [
         AiStyle.loosePassive,
         AiStyle.loosePassive,
@@ -143,15 +145,17 @@ class LobbyScreen extends ConsumerWidget {
         AiStyle.looseAggressive,
         AiStyle.looseAggressive,
       ]),
+      // 五种对手都上桌：两种「好读的」（松跟 / 松凶）、两种「难打的」
+      // （职业会读人、均衡不看人），再加紧凶当基准。
       ('混合对手 · 9人桌', [
         AiStyle.tightAggressive,
         AiStyle.loosePassive,
         AiStyle.looseAggressive,
-        AiStyle.tightAggressive,
-        AiStyle.loosePassive,
+        AiStyle.pro,
+        AiStyle.gto,
+        AiStyle.pro,
+        AiStyle.gto,
         AiStyle.looseAggressive,
-        AiStyle.tightAggressive,
-        AiStyle.loosePassive,
       ]),
     ];
     showModalBottomSheet<void>(

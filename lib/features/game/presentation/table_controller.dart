@@ -24,8 +24,8 @@ class TableController extends ChangeNotifier {
       AiStyle.tightAggressive,
       AiStyle.loosePassive,
       AiStyle.looseAggressive,
-      AiStyle.tightAggressive,
-      AiStyle.loosePassive,
+      AiStyle.pro,
+      AiStyle.gto,
     ],
     this.aiThinkTime = const Duration(milliseconds: 300),
     this.store,
@@ -153,7 +153,10 @@ class TableController extends ChangeNotifier {
   }
 
   /// 实战开桌：按盲注级别与人数重建一桌（筹码重置），并立即发牌。
-  /// AI 风格按紧凶 / 松被动 / 松凶循环分配，桌上三种打法都有。
+  ///
+  /// AI 风格按紧凶 / 松弱 / 松凶 / 职业玩家 / 均衡循环分配：五种打法都上桌，
+  /// 从「能读懂的鱼」到「会读人的常客」再到「不看人的均衡型」各坐几个，
+  /// 9 人桌上也不会像以前那样只有三种人、同一种对手坐满半桌。
   ///
   /// [name] 只给桌名（如「实战 6人桌」）；带盲注级别的完整 [tableLabel]
   /// 由控制器拼出来，对局页的标题则用不带盲注的 [tableName]。
@@ -168,6 +171,8 @@ class TableController extends ChangeNotifier {
       AiStyle.tightAggressive,
       AiStyle.loosePassive,
       AiStyle.looseAggressive,
+      AiStyle.pro,
+      AiStyle.gto,
     ];
     startScenario('$name · ${config.smallBlind}/${config.bigBlind}', [
       for (var i = 0; i < playerCount - 1; i++) rotation[i % rotation.length],
