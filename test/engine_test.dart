@@ -12,12 +12,14 @@ import 'package:poker_trainer/engine/types.dart';
 import 'package:poker_trainer/features/game/data/table_session.dart';
 import 'package:poker_trainer/features/game/data/table_session_store.dart';
 import 'package:poker_trainer/features/game/domain/hand_strength.dart';
+import 'package:poker_trainer/features/game/domain/session_summary.dart';
 import 'package:poker_trainer/features/game/domain/table_restore.dart';
 import 'package:poker_trainer/features/game/presentation/table_controller.dart';
 import 'package:poker_trainer/features/game/domain/preflop_ranges.dart';
 import 'package:poker_trainer/trainer/odds.dart';
 
 import 'support/test_shard.dart';
+import 'support/temp_session_dir.dart';
 
 List<Card> _cs(String s) => s.split(' ').map(Card.parse).toList();
 
@@ -6297,7 +6299,8 @@ void main() {
   });
 
   t('存档：一局的桌面快照能原样存回来，坏存档不会崩', () async {
-    final file = File('${Directory.systemTemp.path}/poker_session_test.json');
+    final tmp = TempSessionDir('poker_session_snapshot');
+    final file = tmp.sessionFile;
     final store = TableSessionStore(file);
     await store.clear();
     expect(await store.load() == null, isTrue, reason: '没存过就读到 null');
@@ -6394,18 +6397,17 @@ void main() {
   }, fast: true);
 
   t('存档：关掉再打开，回来还是同一张桌、同一批筹码', () async {
-    final dir = Directory.systemTemp.createTempSync('poker_session_test');
-    addTearDown(() => dir.deleteSync(recursive: true));
-    final file = File('${dir.path}/session.json');
+    final tmp = TempSessionDir('poker_session_test');
+    final file = tmp.sessionFile;
     const config = GameConfig(
         startingStack: 10000, smallBlind: 50, bigBlind: 100);
 
     // 第一台：开一桌、把筹码打散一点，然后落盘。
-    final first = TableController(
+    final first = tmp.watch(TableController(
       sessionStore: TableSessionStore(file),
       random: Random(3),
       aiThinkTime: Duration.zero,
-    );
+    ));
     first.startRealTable(
         name: '实战 6人桌', config: config, playerCount: 6);
     first.engine.players[0].stack = 13400;
@@ -6418,11 +6420,11 @@ void main() {
     final sessionId = first.savedSession!.id;
 
     // 第二台：模拟 App 重启——内存里空空如也，只剩磁盘上的存档。
-    final second = TableController(
+    final second = tmp.watch(TableController(
       sessionStore: TableSessionStore(file),
       random: Random(3),
       aiThinkTime: Duration.zero,
-    );
+    ));
     expect(second.hasSavedSession, isFalse, reason: '还没读档');
     expect(second.sessionNeedsRestore, isFalse);
     await second.loadSession();
@@ -6508,17 +6510,16 @@ void main() {
   });
 
   t('存档：牌局打到一半退出，回来接着把这一手打完', () async {
-    final dir = Directory.systemTemp.createTempSync('poker_midhand');
-    addTearDown(() => dir.deleteSync(recursive: true));
-    final file = File('${dir.path}/session.json');
+    final tmp = TempSessionDir('poker_midhand');
+    final file = tmp.sessionFile;
     const config =
         GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
 
-    final first = TableController(
+    final first = tmp.watch(TableController(
       sessionStore: TableSessionStore(file),
       random: Random(9),
       aiThinkTime: Duration.zero,
-    );
+    ));
     first.startRealTable(
         name: '实战 单挑', config: config, playerCount: 2);
     // 打几个动作，停在手牌中途（没打完就「退出 App」）。
@@ -6560,11 +6561,11 @@ void main() {
     expect(raw!['hand'] != null, isTrue, reason: '打到一半也要落盘');
 
     // 模拟 App 被杀：内存全丢，只剩磁盘上的存档。
-    final second = TableController(
+    final second = tmp.watch(TableController(
       sessionStore: TableSessionStore(file),
       random: Random(9),
       aiThinkTime: Duration.zero,
-    );
+    ));
     await second.loadSession();
     expect(second.savedSession!.handInProgress, isTrue,
         reason: '存档里带着「打到一半」的那一手');
@@ -6599,17 +6600,16 @@ void main() {
   }, fast: true);
 
   t('存档：一手打完后不再存这半截，下一手照常重新发牌', () async {
-    final dir = Directory.systemTemp.createTempSync('poker_between');
-    addTearDown(() => dir.deleteSync(recursive: true));
-    final file = File('${dir.path}/session.json');
+    final tmp = TempSessionDir('poker_between');
+    final file = tmp.sessionFile;
     const config =
         GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
 
-    final first = TableController(
+    final first = tmp.watch(TableController(
       sessionStore: TableSessionStore(file),
       random: Random(21),
       aiThinkTime: Duration.zero,
-    );
+    ));
     first.startRealTable(
         name: '实战 单挑', config: config, playerCount: 2);
     var guard = 0;
@@ -6626,11 +6626,11 @@ void main() {
     expect(raw, isNotNull, reason: '结算后要落盘');
     expect(raw!['hand'] == null, isTrue, reason: '两手之间不存半截手牌');
 
-    final second = TableController(
+    final second = tmp.watch(TableController(
       sessionStore: TableSessionStore(file),
       random: Random(21),
       aiThinkTime: Duration.zero,
-    );
+    ));
     await second.loadSession();
     expect(second.savedSession!.handInProgress, isFalse);
     second.resumeSession();
@@ -6664,17 +6664,16 @@ void main() {
   }, fast: true);
 
   t('继续上局：标题桌名跟着存档回来，不带盲注', () async {
-    final dir = Directory.systemTemp.createTempSync('pt_session_name');
-    addTearDown(() => dir.deleteSync(recursive: true));
-    final file = File('${dir.path}/session.json');
+    final tmp = TempSessionDir('pt_session_name');
+    final file = tmp.sessionFile;
     const config =
         GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
 
-    final first = TableController(
+    final first = tmp.watch(TableController(
       sessionStore: TableSessionStore(file),
       random: Random(31),
       aiThinkTime: Duration.zero,
-    );
+    ));
     // 大厅/存档用带盲注的完整标签，对局页标题只用桌名。
     first.startRealTable(name: '实战 9人桌', config: config, playerCount: 3);
     expect(first.tableLabel, '实战 9人桌 · 50/100');
@@ -6687,11 +6686,11 @@ void main() {
     expect(raw['name'], '实战 9人桌');
     expect(raw['label'], '实战 9人桌 · 50/100');
 
-    final cold = TableController(
+    final cold = tmp.watch(TableController(
       sessionStore: TableSessionStore(file),
       random: Random(32),
       aiThinkTime: Duration.zero,
-    );
+    ));
     await cold.loadSession();
     expect(cold.resumeSession(), isTrue);
     expect(cold.tableName, '实战 9人桌', reason: '续局后标题还是不带盲注');
@@ -6701,11 +6700,11 @@ void main() {
     // 老存档没有 'name' 字段：从 label 里把盲注后缀剪掉，别让标题带上 50/100。
     final legacy = Map<String, Object?>.from(raw)..remove('name');
     await file.writeAsString(jsonEncode(legacy));
-    final legacyCold = TableController(
+    final legacyCold = tmp.watch(TableController(
       sessionStore: TableSessionStore(file),
       random: Random(33),
       aiThinkTime: Duration.zero,
-    );
+    ));
     await legacyCold.loadSession();
     expect(legacyCold.savedSession!.name, '实战 9人桌');
     expect(legacyCold.resumeSession(), isTrue);
@@ -6713,16 +6712,15 @@ void main() {
   }, fast: true);
 
   t('本局累计：本手跟着筹码走，本局跟着存档走', () async {
-    final dir = Directory.systemTemp.createTempSync('pt_session_net');
-    addTearDown(() => dir.deleteSync(recursive: true));
-    final file = File('${dir.path}/session.json');
+    final tmp = TempSessionDir('pt_session_net');
+    final file = tmp.sessionFile;
     const config =
         GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
-    final t = TableController(
+    final t = tmp.watch(TableController(
       sessionStore: TableSessionStore(file),
       random: Random(11),
       aiThinkTime: Duration.zero,
-    );
+    ));
     t.startRealTable(name: '实战 单挑', config: config, playerCount: 2);
 
     // 单挑英雄坐按钮 = 小盲：本手 -50，本局也刚开始，等于本手。
@@ -6734,11 +6732,11 @@ void main() {
     expect(t.savedSession!.heroNet, -50, reason: '本局累计要落盘');
 
     // 冷启动恢复：本局累计跟着存档回来（不会从 0 重新数）。
-    final cold = TableController(
+    final cold = tmp.watch(TableController(
       sessionStore: TableSessionStore(file),
       random: Random(12),
       aiThinkTime: Duration.zero,
-    );
+    ));
     await cold.loadSession();
     expect(cold.resumeSession(), isTrue);
     expect(cold.heroSessionNet, lessThanOrEqualTo(-100),
@@ -6758,5 +6756,231 @@ void main() {
     expect(g.topUp('hero'), 9900);
     expect(g.players[0].stack, 10000);
     expect(g.topUp('hero'), 0);
+  }, fast: true);
+
+  t('对局规则：补码最多 6 次，用完再输光这局直接结束', () async {
+    final tmp = TempSessionDir('poker_rebuy_cap');
+    const config =
+        GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
+    final t = tmp.watch(TableController(
+      sessionStore: TableSessionStore(tmp.sessionFile),
+      random: Random(41),
+      aiThinkTime: Duration.zero,
+    ));
+    t.startRealTable(name: '实战 单挑', config: config, playerCount: 2);
+    expect(t.rebuys, 0);
+    expect(t.rebuysLeft, TableController.maxRebuys);
+    expect(t.canRebuy, isTrue);
+
+    // 每一轮都是「筹码输光 + 不再发牌」：控制器该停下来等玩家决定补不补。
+    for (var i = 1; i <= TableController.maxRebuys; i++) {
+      t.engine.handOver = true;
+      t.hero.stack = 0;
+      t.startHand();
+      expect(t.heroBusted, isTrue, reason: '第 $i 次要停下来等补码');
+      expect(t.canRebuy, isTrue);
+      expect(t.sessionOver, isFalse);
+
+      t.heroRebuy();
+      expect(t.rebuys, i);
+      expect(t.rebuysLeft, TableController.maxRebuys - i);
+      // 补完马上发下一手，盲注已经投出去了：用「筹码 + 本手投入」核对补满。
+      expect(t.hero.stack + t.hero.totalBet, config.startingStack,
+          reason: '补满至起始买入');
+    }
+
+    // 第 7 次输光：没得补了——这局直接结束，不再等玩家点。
+    expect(t.canRebuy, isFalse);
+    t.engine.handOver = true;
+    t.hero.stack = 0;
+    t.startHand();
+    expect(t.sessionOver, isTrue, reason: '补码用完再输光就收局');
+    expect(t.endReason, contains('补码'));
+    expect(t.heroBusted, isFalse, reason: '收局之后不再弹补码提示');
+    expect(t.heroToAct, isFalse, reason: '收局之后不再发牌');
+  }, fast: true);
+
+  t('对局总结：主动结束清掉存档，账目照实给', () async {
+    final tmp = TempSessionDir('pt_end_session');
+    const config =
+        GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
+    final t = tmp.watch(TableController(
+      sessionStore: TableSessionStore(tmp.sessionFile),
+      random: Random(43),
+      aiThinkTime: Duration.zero,
+    ));
+    t.startRealTable(name: '实战 单挑', config: config, playerCount: 2);
+    // 单挑里英雄坐按钮 = 小盲，弃牌就走完这一手（-50）。
+    t.heroAct(ActionType.fold);
+    expect(t.handsPlayed, 1);
+    await t.persistSession();
+    expect(tmp.sessionFile.existsSync(), isTrue, reason: '两手之间要落盘');
+
+    t.endSession(reason: '主动结束');
+    expect(t.sessionOver, isTrue);
+    expect(t.endReason, '主动结束');
+    expect(t.savedSession, isNull, reason: '结束的局不再提供「继续上局」');
+
+    // 盘上那份也要删掉：删的动作排在写队列后面，所以等刷干再看。
+    await t.flushWrites();
+    expect(tmp.sessionFile.existsSync(), isFalse, reason: '盘上的存档也要清');
+
+    final s = t.buildSummary();
+    expect(s.handsPlayed, 1);
+    expect(s.handsLost, 1);
+    expect(s.handsWon, 0);
+    expect(s.heroNet, -50);
+    expect(s.worstHandNet, -50);
+    expect(s.rebuys, 0);
+    expect(s.maxRebuys, TableController.maxRebuys);
+    expect(s.endReason, '主动结束');
+    expect(s.hands.length, 1, reason: '明细里是这一局打过的牌');
+    expect(s.label, '实战 单挑 · 50/100');
+
+    // 收了之后不会再发牌，也不会再写回存档。
+    t.startHand();
+    expect(t.handsPlayed, 1);
+    await t.flushWrites();
+    expect(tmp.sessionFile.existsSync(), isFalse);
+  }, fast: true);
+
+  t('对局总结：赢输手数、单手最好/最差跟着存档回来', () async {
+    final tmp = TempSessionDir('pt_summary_stats');
+    const config =
+        GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
+    final store = TableSessionStore(tmp.sessionFile);
+    final started = DateTime.fromMillisecondsSinceEpoch(1700000000000);
+    await store.save(TableSession(
+      id: 'table-stats',
+      label: '实战 6人桌 · 50/100',
+      name: '实战 6人桌',
+      config: config,
+      styles: [AiStyle.tightAggressive.name, AiStyle.loosePassive.name],
+      seats: const [
+        SessionSeat(id: 'hero', name: '我', stack: 10000),
+        SessionSeat(id: 'ai0', name: '紧凶·AI1', stack: 10000),
+        SessionSeat(id: 'ai1', name: '松被动·AI2', stack: 9000),
+      ],
+      buttonIndex: 0,
+      handsPlayed: 9,
+      heroNet: -1400,
+      rebuys: 2,
+      handsWon: 3,
+      handsLost: 5,
+      handsTied: 1,
+      bestHandNet: 2200,
+      worstHandNet: -3000,
+      startedAt: started,
+      savedAt: DateTime.fromMillisecondsSinceEpoch(1700003600000),
+    ));
+
+    final cold = tmp.watch(TableController(
+      sessionStore: store,
+      random: Random(47),
+      aiThinkTime: Duration.zero,
+    ));
+    await cold.loadSession();
+    expect(cold.resumeSession(), isTrue);
+
+    final s = cold.buildSummary();
+    expect(s.handsPlayed, 9);
+    expect(s.handsWon, 3);
+    expect(s.handsLost, 5);
+    expect(s.handsTied, 1);
+    expect(s.bestHandNet, 2200, reason: '单手最好跟着存档回来');
+    expect(s.worstHandNet, -3000, reason: '单手最惨也跟着回来');
+    expect(s.rebuys, 2, reason: '补码次数是本局规则，必须跟着存档走');
+    expect(s.duration.inMinutes, greaterThanOrEqualTo(60),
+        reason: '时长按开局时刻算，不是从恢复那一刻从零数');
+    expect(s.hands, isEmpty,
+        reason: '恢复的局只带得回汇总数字：早先那些手牌的明细不在内存里');
+  }, fast: true);
+
+  t('对局总结：结束之后从复盘页「重玩本手」会开一局新的', () async {
+    final tmp = TempSessionDir('pt_replay_after_end');
+    const config =
+        GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
+    final t = tmp.watch(TableController(
+      sessionStore: TableSessionStore(tmp.sessionFile),
+      random: Random(53),
+      aiThinkTime: Duration.zero,
+    ));
+    t.startRealTable(name: '实战 单挑', config: config, playerCount: 2);
+    t.heroAct(ActionType.fold);
+    final hand = t.lastHand!;
+    t.endSession(reason: '主动结束');
+    expect(t.sessionOver, isTrue);
+
+    // 复盘页的「重玩本手」是复用同一手牌再打一遍：本局已经收了，
+    // 这里得当成开一局新的，不然牌摆好了界面还钉在总结页上。
+    t.replayHand(hand);
+    expect(t.sessionOver, isFalse);
+    expect(t.handsPlayed, 0, reason: '重玩算新的一局，手数从头数');
+    expect(t.replayingHand, same(hand));
+    expect(t.engine.handOver, isFalse, reason: '牌摆好了就要能接着打');
+    expect(t.lastHand!.id, isNot(hand.id), reason: '换个新牌局 id，别和原手撞');
+  }, fast: true);
+
+  t('对局总结：胜率、每手均盈亏、时长文案', () {
+    const s = SessionSummary(
+      tableName: '实战 单挑',
+      label: '实战 单挑 · 50/100',
+      handsPlayed: 10,
+      handsWon: 4,
+      handsLost: 6,
+      handsTied: 0,
+      heroNet: 1200,
+      bestHandNet: 3000,
+      worstHandNet: -1500,
+      rebuys: 6,
+      maxRebuys: 6,
+      duration: Duration(minutes: 72, seconds: 30),
+      endReason: '主动结束',
+    );
+    expect(s.winRate, 0.4);
+    expect(s.netPerHand, 120);
+    expect(s.rebuysExhausted, isTrue);
+    expect(s.durationText, '1 小时 12 分');
+    expect(s.verdict, contains('赢'));
+
+    SessionSummary withDuration(Duration d) => SessionSummary(
+          tableName: s.tableName,
+          label: s.label,
+          handsPlayed: s.handsPlayed,
+          handsWon: s.handsWon,
+          handsLost: s.handsLost,
+          handsTied: s.handsTied,
+          heroNet: s.heroNet,
+          bestHandNet: s.bestHandNet,
+          worstHandNet: s.worstHandNet,
+          rebuys: s.rebuys,
+          maxRebuys: s.maxRebuys,
+          duration: d,
+          endReason: s.endReason,
+        );
+    expect(withDuration(const Duration(seconds: 38)).durationText, '38 秒');
+    expect(withDuration(const Duration(minutes: 12, seconds: 30)).durationText,
+        '12 分 30 秒');
+
+    // 一手没打完就收手：胜率按 0，结论也不能瞎说「赢了/输了」。
+    const empty = SessionSummary(
+      tableName: '实战 单挑',
+      label: '实战 单挑 · 50/100',
+      handsPlayed: 0,
+      handsWon: 0,
+      handsLost: 0,
+      handsTied: 0,
+      heroNet: 0,
+      bestHandNet: 0,
+      worstHandNet: 0,
+      rebuys: 0,
+      maxRebuys: 6,
+      duration: Duration(seconds: 5),
+      endReason: '主动结束',
+    );
+    expect(empty.winRate, 0);
+    expect(empty.netPerHand, 0);
+    expect(empty.rebuysExhausted, isFalse);
+    expect(empty.verdict, contains('没打完'));
   }, fast: true);
 }

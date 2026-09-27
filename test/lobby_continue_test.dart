@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -11,6 +10,8 @@ import 'package:poker_trainer/features/game/presentation/game_screen.dart';
 import 'package:poker_trainer/features/game/presentation/lobby_screen.dart';
 import 'package:poker_trainer/features/game/presentation/table_controller.dart';
 
+import 'support/temp_session_dir.dart';
+
 /// 大厅的「继续上局」入口：冷启动后看得见、点得进去。
 ///
 /// 存档分两种：牌局打到一半退出（回来接着打这一手）和停在两手之间
@@ -20,12 +21,12 @@ void main() {
       GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
 
   /// 开一桌、随便打两下，返回落好盘的那张桌。
-  Future<TableController> playThenQuit(Directory dir) async {
-    final live = TableController(
-      sessionStore: TableSessionStore(File('${dir.path}/session.json')),
+  Future<TableController> playThenQuit(TempSessionDir tmp) async {
+    final live = tmp.watch(TableController(
+      sessionStore: TableSessionStore(tmp.sessionFile),
       random: Random(5),
       aiThinkTime: Duration.zero,
-    );
+    ));
     live.startRealTable(
         name: '实战 单挑', config: config, playerCount: 2);
     var steps = 0;
@@ -42,9 +43,9 @@ void main() {
   }
 
   /// 冷启动：内存里没有桌，只能读磁盘。
-  Future<TableController> coldStart(Directory dir) async {
+  Future<TableController> coldStart(TempSessionDir tmp) async {
     final cold = TableController(
-      sessionStore: TableSessionStore(File('${dir.path}/session.json')),
+      sessionStore: TableSessionStore(tmp.sessionFile),
       random: Random(5),
       aiThinkTime: Duration.zero,
     );
@@ -66,13 +67,12 @@ void main() {
   }
 
   testWidgets('大厅：打到一半退出，冷启动是「继续上局 · 这手进行中」', (tester) async {
-    final dir = Directory.systemTemp.createTempSync('pt_lobby_mid');
-    addTearDown(() => dir.deleteSync(recursive: true));
+    final tmp = TempSessionDir('pt_lobby_mid');
     late TableController cold;
     await tester.runAsync(() async {
-      final live = await playThenQuit(dir);
+      final live = await playThenQuit(tmp);
       expect(live.engine.handOver, isFalse, reason: '这一手要停在半截');
-      cold = await coldStart(dir);
+      cold = tmp.watch(await coldStart(tmp));
     });
     expect(cold.savedSession!.handInProgress, isTrue);
 
@@ -82,14 +82,13 @@ void main() {
   });
 
   testWidgets('大厅：停在两手之间，冷启动是「继续上局 · 下一手 + 我的筹码」', (tester) async {
-    final dir = Directory.systemTemp.createTempSync('pt_lobby_between');
-    addTearDown(() => dir.deleteSync(recursive: true));
+    final tmp = TempSessionDir('pt_lobby_between');
     late TableController cold;
     await tester.runAsync(() async {
-      final live = await playThenQuit(dir);
+      final live = await playThenQuit(tmp);
       live.engine.handOver = true; // 这一手已结算 = 存档停在两手之间
       await live.persistSession();
-      cold = await coldStart(dir);
+      cold = tmp.watch(await coldStart(tmp));
     });
     expect(cold.savedSession!.handInProgress, isFalse);
 
@@ -100,12 +99,11 @@ void main() {
   });
 
   testWidgets('冷启动点「继续上局」能直接坐回牌桌', (tester) async {
-    final dir = Directory.systemTemp.createTempSync('pt_lobby_enter');
-    addTearDown(() => dir.deleteSync(recursive: true));
+    final tmp = TempSessionDir('pt_lobby_enter');
     late TableController cold;
     await tester.runAsync(() async {
-      await playThenQuit(dir);
-      cold = await coldStart(dir);
+      await playThenQuit(tmp);
+      cold = tmp.watch(await coldStart(tmp));
     });
 
     await pumpLobby(tester, cold);

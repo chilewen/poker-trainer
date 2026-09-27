@@ -35,6 +35,13 @@ class TableSession {
     required this.handsPlayed,
     required this.savedAt,
     this.heroNet = 0,
+    this.rebuys = 0,
+    this.handsWon = 0,
+    this.handsLost = 0,
+    this.handsTied = 0,
+    this.bestHandNet = 0,
+    this.worstHandNet = 0,
+    this.startedAt,
     this.handSnapshot,
   });
 
@@ -68,6 +75,24 @@ class TableSession {
 
   /// 英雄在本局的累计输赢（已完成手牌之和，不含存档时正在进行的那一手）。
   final int heroNet;
+
+  /// 本局已经补过几次筹码（见 `TableController.maxRebuys`）。
+  final int rebuys;
+
+  /// 本局赢 / 输 / 平的手数，用来在对局总结里拆细。
+  final int handsWon;
+  final int handsLost;
+  final int handsTied;
+
+  /// 本局单手最大盈利 / 最大亏损（没有对应手牌时为 0）。
+  final int bestHandNet;
+  final int worstHandNet;
+
+  /// 本局开始的时间；老存档没有这个字段，用 [savedAt] 顶上。
+  final DateTime? startedAt;
+
+  /// 本局开始的时刻（总结页算时长用）。
+  DateTime get sessionStart => startedAt ?? savedAt;
 
   /// 存档时正在进行的那手牌（[GameEngine.toSnapshotJson] 的结果）。
   ///
@@ -104,6 +129,13 @@ class TableSession {
         'buttonIndex': buttonIndex,
         'handsPlayed': handsPlayed,
         'heroNet': heroNet,
+        'rebuys': rebuys,
+        'won': handsWon,
+        'lost': handsLost,
+        'tied': handsTied,
+        'best': bestHandNet,
+        'worst': worstHandNet,
+        'startedAt': sessionStart.millisecondsSinceEpoch,
         'savedAt': savedAt.millisecondsSinceEpoch,
         if (handSnapshot != null) 'hand': handSnapshot,
       };
@@ -133,6 +165,17 @@ class TableSession {
         handsPlayed: (json['handsPlayed']! as num).toInt(),
         // 老存档没有 'heroNet'：按 0 处理（本局累计从这一手重新数）。
         heroNet: (json['heroNet'] as num?)?.toInt() ?? 0,
+        // 同理，总结用的这几个字段老存档都没有：缺了就按 0 起算。
+        rebuys: (json['rebuys'] as num?)?.toInt() ?? 0,
+        handsWon: (json['won'] as num?)?.toInt() ?? 0,
+        handsLost: (json['lost'] as num?)?.toInt() ?? 0,
+        handsTied: (json['tied'] as num?)?.toInt() ?? 0,
+        bestHandNet: (json['best'] as num?)?.toInt() ?? 0,
+        worstHandNet: (json['worst'] as num?)?.toInt() ?? 0,
+        startedAt: (json['startedAt'] as num?) == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(
+                (json['startedAt']! as num).toInt()),
         savedAt:
             DateTime.fromMillisecondsSinceEpoch((json['savedAt']! as num).toInt()),
         // 老存档（或两手之间的存档）没有 'hand' 字段，按「两手之间」处理。

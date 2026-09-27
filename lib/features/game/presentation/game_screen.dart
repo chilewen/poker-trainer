@@ -9,7 +9,9 @@ import '../../../engine/types.dart';
 import '../../../trainer/odds.dart';
 import '../../history/data/hand_history_store.dart';
 import '../data/table_session_store.dart';
+import 'chip_format.dart';
 import 'hand_review_sheet.dart';
+import 'session_summary_screen.dart';
 import 'table_controller.dart';
 
 // ---------- 主题常量（深色牌桌风） ----------
@@ -87,6 +89,14 @@ class _GameScreenState extends ConsumerState<GameScreen> {
   @override
   Widget build(BuildContext context) {
     final table = ref.watch(tableProvider);
+    // 这局收了（补码用尽输光、或玩家自己结束）：整页换成对局总结。
+    if (table.sessionOver) {
+      return SessionSummaryScreen(
+        summary: table.buildSummary(),
+        onPlayAgain: table.restartSession,
+        onLeave: () => Navigator.of(context).maybePop(),
+      );
+    }
     if (!_started && widget.autoStart) {
       _started = true;
       WidgetsBinding.instance.addPostFrameCallback((_) => table.startHand());
@@ -102,6 +112,11 @@ class _GameScreenState extends ConsumerState<GameScreen> {
         // 桌名、手数、本手/本局输赢都在这一行里（不再单开一条）。
         title: _TableTitle(table: table),
         actions: [
+          IconButton(
+            tooltip: '结束对局',
+            icon: const Icon(Icons.flag_outlined, size: 20),
+            onPressed: () => _confirmEndSession(context, table),
+          ),
           IconButton(
             tooltip: '行动路线',
             icon: const Icon(Icons.receipt_long_outlined, size: 20),
@@ -132,7 +147,7 @@ class _GameScreenState extends ConsumerState<GameScreen> {
               height: _bottomBarHeight,
               width: double.infinity,
               child: Center(
-                child: g.handOver
+                child: table.handStopped
                     ? _HandOverBar(table: table)
                     : table.heroToAct
                         ? _ActionBar(table: table)
@@ -157,6 +172,36 @@ class _GameScreenState extends ConsumerState<GameScreen> {
       ),
     );
   }
+
+  /// 「结束对局」确认弹窗。
+  ///
+  /// 主动收手会把存档一起删掉（这一局不能再接着打），所以不能让玩家误触
+  /// 一下就执行；弹窗里把「打了多少手、输赢多少」摆出来再做决定。
+  Future<void> _confirmEndSession(
+      BuildContext context, TableController table) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('结束本局？'),
+        content: Text(
+          '本局打了 ${table.handsPlayed} 手，'
+          '净输赢 ${signedChips(table.heroSessionNet)}。\n'
+          '结束之后存档会清掉，不能再接着打这一局。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('继续打'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('结束'),
+          ),
+        ],
+      ),
+    );
+    if (ok ?? false) table.endSession(reason: '主动结束');
+  }
 }
 
 /// 顶部行动概览条：每位玩家一格（位置 + 最近动作 + 筹码），
@@ -176,7 +221,7 @@ class _ActionStrip extends StatelessWidget {
         lastAct.putIfAbsent(a.actorId, () => a);
       }
     }
-    final pendingId = g.handOver ? null : g.pendingAction().player.id;
+    final pendingId = table.handStopped ? null : g.pendingAction().player.id;
 
     // 识别翻牌前的前两条盲注记录，徽标显示为「小盲/大盲」而非「下注」。
     final acts = hand?.actions ?? const <ActionRecord>[];
@@ -342,7 +387,7 @@ class _TableArea extends StatelessWidget {
         g.players[(heroIdx + k) % g.players.length],
     ];
     final slots = slotsFor(opponents.length);
-    final pendingId = g.handOver ? null : g.pendingAction().player.id;
+    final pendingId = table.handStopped ? null : g.pendingAction().player.id;
     final results = g.lastHand?.netResult ?? const {};
 
     return Padding(
@@ -1002,13 +1047,6 @@ class _NetChip extends StatelessWidget {
   }
 }
 
-/// 筹码数缩写：上万之后改写成「万」，免得导航栏被长数字撑爆。
-String compactChips(int v) {
-  final n = v.abs();
-  if (n < 10000) return '$v';
-  return '${v < 0 ? '-' : ''}${(n / 10000).toStringAsFixed(1)}万';
-}
-
 /// 结算条：盈亏 + 下一手。
 class _HandOverBar extends StatelessWidget {
   const _HandOverBar({required this.table});
@@ -1042,9 +1080,19 @@ class _HandOverBar extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 2),
-            Text('本手亏损 $heroNet',
+            Text(
+                hand == null
+                    ? '筹码不够一个大盲，先决定补不补'
+                    : '本手亏损 $heroNet',
                 style: const TextStyle(
                     color: Color(0xFF8A9299), fontSize: 11.5)),
+            const SizedBox(height: 4),
+            Text(
+              '本局已补码 ${table.rebuys}/${TableController.maxRebuys} 次'
+              '，还剩 ${table.rebuysLeft} 次',
+              style:
+                  const TextStyle(color: Color(0xFF8A9299), fontSize: 11.5),
+            ),
             const SizedBox(height: 8),
             SizedBox(
               width: double.infinity,
