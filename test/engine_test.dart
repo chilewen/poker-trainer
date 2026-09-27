@@ -7101,6 +7101,35 @@ void main() {
     expect(stylesOf(second), styles, reason: '续局后对手类型逐个还原');
   }, fast: true);
 
+  t('开局座位：换一局就换位置，风格一个不多一个不少', () {
+    const config =
+        GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
+
+    List<String> seats(int seed) {
+      final t =
+          TableController(random: Random(seed), aiThinkTime: Duration.zero);
+      addTearDown(t.dispose);
+      t.startRealTable(name: '实战 9人桌', config: config, playerCount: 9);
+      return [for (final p in t.engine.players) p.name];
+    }
+
+    List<String> stylesOf(List<String> names) =>
+        [for (final n in names.skip(1)) n.split('·').first]..sort();
+
+    final a = seats(11);
+    final b = seats(12);
+    // 英雄永远坐 0 号位（界面上就是屏幕底下那个「我」）。
+    expect(a.first, '我');
+    expect(b.first, '我');
+    // 八家对手换了位置，但阵容（各风格各几家）一个不少、一个不多。
+    expect(stylesOf(a), stylesOf(b), reason: '换种子只换位置，不换阵容');
+    expect(a.sublist(1).toSet().length, 8, reason: '同一个人不会坐两个位子');
+    expect(a.sublist(1), isNot(b.sublist(1)),
+        reason: '换一局座位就该不一样——以前是固定顺序，每局长得一模一样');
+    // 同一个种子还是同一张桌：固定 rand 时结果可复现，回归/分片要靠它。
+    expect(seats(11), a, reason: '同一个种子座位顺序要稳定');
+  }, fast: true);
+
   t('头像风格：类型缩到两个字，松被动不再和松凶撞脸', () {
     // 座位头像只放得下两个字，而名字首字一个「松」分不出松被动和松凶，
     // 所以每个风格都得有个正好两个字的缩写（[AiStyle.shortLabel]）。

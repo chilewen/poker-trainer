@@ -48,6 +48,29 @@ echo "ipa 直链 $IPA_URL"
 echo "签名方式 $METHOD"
 echo ""
 
+# Flutter 每次 build 都会把 ios/Flutter/ephemeral/Packages 整个删掉重建；目录里
+# 有上一轮 / Xcode 留下的残留（或半删状态）时，递归删除会撞上「删到一半某个条目
+# 没了」的竞态，报
+#   Unable to delete file or directory at …/ephemeral/Packages/.packages
+# 那句「read-only volume」是误导——判定码其实是 ENOENT（找不到文件），不是权限。
+# 出包前先best-effort清干净，撞上了再清一次重试，基本就不再见了。
+clean_swiftpm_packages() {
+  local dir="$ROOT/ios/Flutter/ephemeral/Packages"
+  [[ -e "$dir" ]] || return 0
+  rm -rf "$dir" 2>/dev/null || true
+}
+
+BUILD_LOG="${TMPDIR:-/tmp}/poker_build_$$.log"
+trap 'rm -f "$BUILD_LOG"' EXIT
+
+# 构建输出照旧实时打到屏幕上，同时存一份到 $BUILD_LOG 供失败时判断原因。
+# 退出码取管道里 flutter 那一截（$pipestatus[1]），别被 tee 的 0 盖掉。
+build_ipa() {
+  setopt local_options pipefail
+  flutter build ipa --release --export-method "$METHOD" 2>&1 | tee "$BUILD_LOG"
+  return ${pipestatus[1]}
+}
+
 if (( BUMP )); then
   if (( DRY )); then
     echo "（试运行）会把 pubspec.yaml 的构建号 +1"
@@ -61,7 +84,19 @@ if (( SKIP_BUILD )); then
 elif (( DRY )); then
   echo "（试运行）会执行：flutter build ipa --release --export-method $METHOD"
 else
-  flutter build ipa --release --export-method "$METHOD"
+  clean_swiftpm_packages
+  if ! build_ipa; then
+    if grep -q 'Unable to delete file or directory' "$BUILD_LOG" &&
+       grep -q 'ephemeral/Packages' "$BUILD_LOG"; then
+      echo ""
+      echo "撞上 ephemeral/Packages 的删除竞态了，清干净重试一次…"
+      clean_swiftpm_packages
+      build_ipa || { echo "重试还是失败，日志在上面。"; exit 1; }
+    else
+      echo "出包失败，日志在上面。"
+      exit 1
+    fi
+  fi
 fi
 
 if (( DRY )); then

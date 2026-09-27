@@ -130,7 +130,10 @@ class TableController extends ChangeNotifier {
     _resetSessionRules();
     _sessionId = 'table-${DateTime.now().microsecondsSinceEpoch}';
     engine = GameEngine(config: _config, random: _random);
-    _setupPlayers(styles);
+    // 开局座位随机排：以前对手永远按固定顺序落座（紧凶必坐你左手），每局看着
+    // 一模一样。洗一下顺序再落座，风格、名牌、行动顺序都跟着换位置。
+    // 先复制再洗：调用方可能传 const 列表，而且不同桌之间不该互相影响。
+    _setupPlayers([...styles]..shuffle(_random));
     engine.startHand();
     notifyListeners();
     _pump();

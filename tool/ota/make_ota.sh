@@ -149,7 +149,7 @@ cat > "$OUT/install.html" <<HTML_EOF
 </head>
 <body>
   <h1>$TITLE</h1>
-  <p>版本 $VER_TEXT · $BID</p>
+  <p>版本 $VER_TEXT</p>
   <p>发布于 $PUBLISHED</p>
   <a href="itms-services://?action=download-manifest&amp;url=$MANIFEST_URL">安装</a>
   <p>点击后如果没反应，用 Safari 打开本页。</p>

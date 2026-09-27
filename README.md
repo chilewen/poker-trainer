@@ -12,7 +12,7 @@ A new Flutter project.
 
   约 7 秒（源码没动，dill 缓存直接命中）；改过 `lib/` 要重编那一遍，约 9 秒。
   用例默认走 `tool/sharded_test.sh`：先编译一次，再按用例拆 8 片并行跑。
-  `flutter test` 只按**文件**并行，`test/engine_test.dart` 里那 131 条用例它拆不开，
+  `flutter test` 只按**文件**并行，`test/engine_test.dart` 里那 132 条用例它拆不开，
   裸跑要 18 秒上下。
 
 - 只想确认「有没有跑不起来 / 结构性错」：
@@ -44,12 +44,12 @@ A new Flutter project.
   zsh tool/regression.sh --quick-probes
   ```
 
-  约 14 秒（探针 20 秒 → 6 秒）。131 条用例一条不少、就是真门禁，只是上面那些
+  约 14 秒（探针 20 秒 → 6 秒）。132 条用例一条不少、就是真门禁，只是上面那些
   比例带 ±5~10% 的抖动，只够看方向——要写进注释、拿去改阈值的数字，还是跑
   `--probes` 全量那遍。（`--fast` 也能把探针砍到 1/4，但那档连用例都跳过，
   门禁就废了，所以单列了这一档。）
 
-  只想看数字、不想等门禁（分析 + 131 条用例 + 校验）那一半：
+  只想看数字、不想等门禁（分析 + 132 条用例 + 校验）那一半：
 
   ```bash
   zsh tool/regression.sh --probes-only
@@ -119,6 +119,10 @@ A new Flutter project.
   （完全不读人）、`fixedPersonality = true`（不掷性格骰子，频率不抖）、从不溜入
   （`neverLimp`），但半诈唬/诈唬/再加注都用 1.0 的满频率。
 
+**开局座位随机**：每开一局（含「再来一局」）都会先把对手顺序打乱再落座，所以
+同一套阵容每局的坐法都不一样——不会出现「紧凶永远坐你左手」。英雄始终在界面底部
+那个位置，按钮/盲注照旧每手往前挪一格。
+
 **多人桌怎么排**：默认对手轮转按
 `紧凶 → 松弱 → 松凶 → 职业 → GTO` 循环，9 人桌正好五种各坐一个，不再整桌重复同一
 种风格。大厅里也各有单挑场景（`单挑 · 职业`、`单挑 · GTO`），「混合对手 · 9人桌」
@@ -143,6 +147,12 @@ A new Flutter project.
    - `--dry-run` 只打印「会做什么」，不出包也不推送；
    - `--skip-build` 复用现有的 ipa，只重推安装页；
    - 想换签名方式：`EXPORT_METHOD=development zsh tool/ota/release_ios.sh`。
+
+   出包前它会先best-effort清掉 `ios/Flutter/ephemeral/Packages`，并且万一构建报
+   `Unable to delete file or directory at …/ephemeral/Packages/.packages`（Flutter
+   删那个 SwiftPM 符号链接目录时撞上「删到一半文件没了」的竞态；提示里的
+   「read-only volume」是误导，判定码其实是 ENOENT，不是权限），就再清一次、
+   自动重试一遍——不用手动重跑。
 
    等价的手动三步（想自己控制时用）：
 
