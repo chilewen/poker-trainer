@@ -141,6 +141,111 @@ void main() {
     expect(table.heroHandNet, -50);
   });
 
+  testWidgets('补充筹码条：底栏随内容长高，不溢出', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final table =
+        TableController(random: Random(7), aiThinkTime: Duration.zero);
+    await tester.pumpWidget(ProviderScope(
+      overrides: [tableProvider.overrideWith((ref) => table)],
+      child: MaterialApp(
+        theme: ThemeData(splashFactory: InkRipple.splashFactory),
+        home: const GameScreen(autoStart: false),
+      ),
+    ));
+
+    // 续一张英雄已经输光（筹码不足一个大盲）的桌：一恢复就停在补码那一步。
+    table.savedSession = TableSession(
+      id: 'table-rebuy',
+      label: '实战 单挑 · 50/100',
+      name: '实战 单挑',
+      config: config,
+      styles: [AiStyle.tightAggressive.name],
+      seats: const [
+        SessionSeat(id: 'hero', name: '我', stack: 40),
+        SessionSeat(id: 'ai0', name: '紧凶·AI1', stack: 10000),
+      ],
+      buttonIndex: 0,
+      handsPlayed: 5,
+      heroNet: -9960,
+      rebuys: 2,
+      savedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+    );
+    expect(table.resumeSession(), isTrue);
+    await tester.pump();
+
+    expect(table.heroBusted, isTrue);
+    // 补码条比普通底栏多一行「本局已补码 x/6」——以前底栏高度钉死 124，
+    // 这一屏会被顶穿报 RenderFlex overflowed on the bottom（实测 9~17 像素）。
+    expect(find.textContaining('补充筹码'), findsOneWidget);
+    expect(find.textContaining('本局已补码 2/6'), findsOneWidget);
+    // 「本手亏损」不再重复——标题栏右上角已经有本手输赢了（这里是「本局」）。
+    expect(find.textContaining('本手亏损'), findsNothing,
+        reason: '本手输赢标题栏已经有了，底栏别再说一遍');
+    expect(find.text('本局 -9960'), findsOneWidget);
+    // 还没发牌时补一句为什么停下来。
+    expect(find.text('筹码不够一个大盲，先决定补不补'), findsOneWidget);
+    expect(tester.takeException(), isNull, reason: '补码底栏不能溢出');
+    // 底栏确实长高了：按钮底边仍然留在屏幕里，没被顶到屏幕外。
+    expect(tester.getRect(find.textContaining('补充筹码')).bottom,
+        lessThanOrEqualTo(844));
+  });
+
+  testWidgets('补充筹码条：刚打完一手也不重复本手亏损', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final table =
+        TableController(random: Random(1), aiThinkTime: Duration.zero);
+    await tester.pumpWidget(ProviderScope(
+      overrides: [tableProvider.overrideWith((ref) => table)],
+      child: MaterialApp(
+        theme: ThemeData(splashFactory: InkRipple.splashFactory),
+        home: const GameScreen(autoStart: false),
+      ),
+    ));
+    // 短筹码单挑：每手都推全下，几手就把自己打光，停在补码那一步。
+    table.startRealTable(
+        name: '实战 单挑',
+        config: const GameConfig(
+            startingStack: 400, smallBlind: 50, bigBlind: 100),
+        playerCount: 2);
+    await tester.pump();
+
+    for (var hand = 0; hand < 12 && !table.heroBusted; hand++) {
+      var guard = 0;
+      while (!table.handStopped && guard++ < 200) {
+        if (table.heroToAct) {
+          LegalAction? raise;
+          for (final a in table.heroLegalActions) {
+            if (a.type == ActionType.raise || a.type == ActionType.bet) {
+              raise = a;
+            }
+          }
+          table.heroAct(raise?.type ?? ActionType.fold,
+              amountTo: raise?.maxAmount);
+        }
+        await tester.pump(const Duration(milliseconds: 1));
+      }
+      await tester.pump();
+      if (table.handStopped && !table.heroBusted) {
+        table.startHand();
+        await tester.pump();
+      }
+    }
+
+    expect(table.heroBusted, isTrue, reason: '短筹码全下几手就该停下来补码');
+    // 刚打完一手：标题栏有「本手 -X」，底栏只留「筹码耗尽 + 已补码次数」。
+    expect(find.textContaining('本手亏损'), findsNothing,
+        reason: '本手输赢标题栏已经有了，底栏别再说一遍');
+    expect(find.text('筹码耗尽'), findsOneWidget);
+    expect(find.textContaining('补充筹码'), findsOneWidget);
+    expect(tester.takeException(), isNull, reason: '补码底栏不能溢出');
+  });
+
   testWidgets('座位头像：类型用两个字，名牌还是 AI1', (tester) async {
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1;

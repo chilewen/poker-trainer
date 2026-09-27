@@ -154,28 +154,34 @@ class _GameScreenState extends ConsumerState<GameScreen> {
           children: [
             _ActionStrip(table: table),
             Expanded(child: _TableArea(table: table)),
-            SizedBox(
-              height: _bottomBarHeight,
-              width: double.infinity,
-              child: Center(
-                child: table.handStopped
-                    ? _HandOverBar(table: table)
-                    : table.heroToAct
-                        ? _ActionBar(table: table)
-                        : const Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              SizedBox(
-                                  width: 14,
-                                  height: 14,
-                                  child: CircularProgressIndicator(
-                                      strokeWidth: 1.5, color: _cyan)),
-                              SizedBox(width: 10),
-                              Text('等待行动…',
-                                  style: TextStyle(
-                                      color: Color(0xFF8FD8D5), fontSize: 13)),
-                            ],
-                          ),
+            ConstrainedBox(
+              // 底栏只给最小高度、不钉死：补码那一屏比标准底栏高十几像素
+              // （多一行「本局已补码 x/6 次」），钉死 124 会把它顶穿，
+              // 报 RenderFlex overflowed on the bottom。
+              constraints: const BoxConstraints(minHeight: _bottomBarHeight),
+              child: SizedBox(
+                width: double.infinity,
+                child: Center(
+                  child: table.handStopped
+                      ? _HandOverBar(table: table)
+                      : table.heroToAct
+                          ? _ActionBar(table: table)
+                          : const Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 1.5, color: _cyan)),
+                                SizedBox(width: 10),
+                                Text('等待行动…',
+                                    style: TextStyle(
+                                        color: Color(0xFF8FD8D5),
+                                        fontSize: 13)),
+                              ],
+                            ),
+                ),
               ),
             ),
           ],
@@ -1091,12 +1097,12 @@ class _HandOverBar extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 2),
-            Text(
-                hand == null
-                    ? '筹码不够一个大盲，先决定补不补'
-                    : '本手亏损 $heroNet',
-                style: const TextStyle(
-                    color: Color(0xFF8A9299), fontSize: 11.5)),
+            // 这里不再重复「本手亏损」——导航栏右上角已经有本手输赢（本手 ±X）。
+            // 只有还没发牌（冷启动 / 续局就被挡下）时才补一句为什么停下来。
+            if (hand == null)
+              Text('筹码不够一个大盲，先决定补不补',
+                  style: const TextStyle(
+                      color: Color(0xFF8A9299), fontSize: 11.5)),
             const SizedBox(height: 4),
             Text(
               '本局已补码 ${table.rebuys}/${TableController.maxRebuys} 次'
