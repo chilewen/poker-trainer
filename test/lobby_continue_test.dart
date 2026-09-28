@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:poker_trainer/app_version.dart';
 import 'package:poker_trainer/engine/game.dart';
 import 'package:poker_trainer/engine/types.dart';
 import 'package:poker_trainer/features/game/data/table_session_store.dart';
@@ -79,6 +80,12 @@ void main() {
     await pumpLobby(tester, cold);
     expect(find.text('继续上局'), findsOneWidget);
     expect(find.textContaining('第 1 手进行中'), findsOneWidget);
+    // 大厅底部挂着版本号，装完对着安装页看就知道是不是最新那包。
+    // 列表是懒建的：先滚到底再找。
+    await tester.scrollUntilVisible(
+        find.text('版本 $appVersionText'), 200,
+        scrollable: find.byType(Scrollable).first);
+    expect(find.text('版本 $appVersionText'), findsOneWidget);
   });
 
   testWidgets('大厅：停在两手之间，冷启动是「继续上局 · 下一手 + 我的筹码」', (tester) async {

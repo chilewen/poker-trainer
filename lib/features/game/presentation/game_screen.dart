@@ -11,6 +11,7 @@ import '../../history/data/hand_history_store.dart';
 import '../data/table_session_store.dart';
 import '../domain/ai_player.dart';
 import 'chip_format.dart';
+import '../domain/table_position.dart';
 import 'hand_review_sheet.dart';
 import 'session_summary_screen.dart';
 import 'table_controller.dart';
@@ -39,8 +40,7 @@ String? cnPositionOf(GameEngine engine, PlayerState p) => cnPosition(
     );
 
 /// 玩家名短显示：去掉风格前缀（紧凶·AI1 → AI1）。
-String shortName(String name) =>
-    name.contains('·') ? name.split('·').last : name;
+String shortName(String name) => shortPlayerName(name);
 
 /// 座位头像里的字：英雄显示自己的「我」，电脑玩家显示类型的那两个字。
 ///
@@ -68,8 +68,8 @@ final historyStoreProvider = Provider<HandHistoryStore>(
 
 /// 对局存档存储：在 main() 中初始化并 override。
 final sessionStoreProvider = Provider<TableSessionStore>(
-  (ref) => throw UnimplementedError(
-      'sessionStoreProvider 必须在 main() 中 override'),
+  (ref) =>
+      throw UnimplementedError('sessionStoreProvider 必须在 main() 中 override'),
 );
 
 /// 牌桌控制器常驻：筹码与历史跨 Tab 保留。
@@ -101,7 +101,11 @@ class _GameScreenState extends ConsumerState<GameScreen> {
   Widget build(BuildContext context) {
     final table = ref.watch(tableProvider);
     // 这局收了（补码用尽输光、或玩家自己结束）：整页换成对局总结。
-    if (table.sessionOver) {
+    //
+    // 看的是 showSummary 而不是 sessionOver：输光的那一手会先在牌桌上停一下
+    // （见 TableController.endSession 的 holdOnTable），让玩家看清亮出来的底牌和
+    // 公共牌，他自己按了「本局总结」才翻页。
+    if (table.showSummary) {
       return SessionSummaryScreen(
         summary: table.buildSummary(),
         onPlayAgain: table.restartSession,
@@ -126,7 +130,10 @@ class _GameScreenState extends ConsumerState<GameScreen> {
           IconButton(
             tooltip: '结束对局',
             icon: const Icon(Icons.flag_outlined, size: 20),
-            onPressed: () => _confirmEndSession(context, table),
+            // 已经收局了就别再给「结束对局」：这时候该按的是底栏的「查看本局总结」。
+            onPressed: table.sessionOver
+                ? null
+                : () => _confirmEndSession(context, table),
           ),
           IconButton(
             tooltip: '行动路线',
@@ -143,8 +150,7 @@ class _GameScreenState extends ConsumerState<GameScreen> {
                         current,
                       ...table.history,
                     ];
-                    showHandReviewSheet(
-                        context, hands, TableController.heroId);
+                    showHandReviewSheet(context, hands, TableController.heroId);
                   },
           ),
         ],
@@ -170,15 +176,21 @@ class _GameScreenState extends ConsumerState<GameScreen> {
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
                                 SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: CircularProgressIndicator(
-                                        strokeWidth: 1.5, color: _cyan)),
+                                  width: 14,
+                                  height: 14,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 1.5,
+                                    color: _cyan,
+                                  ),
+                                ),
                                 SizedBox(width: 10),
-                                Text('等待行动…',
-                                    style: TextStyle(
-                                        color: Color(0xFF8FD8D5),
-                                        fontSize: 13)),
+                                Text(
+                                  '等待行动…',
+                                  style: TextStyle(
+                                    color: Color(0xFF8FD8D5),
+                                    fontSize: 13,
+                                  ),
+                                ),
                               ],
                             ),
                 ),
@@ -195,7 +207,9 @@ class _GameScreenState extends ConsumerState<GameScreen> {
   /// 主动收手会把存档一起删掉（这一局不能再接着打），所以不能让玩家误触
   /// 一下就执行；弹窗里把「打了多少手、输赢多少」摆出来再做决定。
   Future<void> _confirmEndSession(
-      BuildContext context, TableController table) async {
+    BuildContext context,
+    TableController table,
+  ) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -285,8 +299,13 @@ class _ActionStrip extends StatelessWidget {
     );
   }
 
-  Widget _stripChip(PlayerState p, ActionRecord? act, String? pos, bool pending,
-      {String? blindLabel}) {
+  Widget _stripChip(
+    PlayerState p,
+    ActionRecord? act,
+    String? pos,
+    bool pending, {
+    String? blindLabel,
+  }) {
     final badge = act == null
         ? null
         : blindLabel != null
@@ -308,8 +327,7 @@ class _ActionStrip extends StatelessWidget {
         children: [
           Text(
             pos ?? shortName(p.name),
-            style:
-                const TextStyle(color: Color(0xFF9AA3AB), fontSize: 11.5),
+            style: const TextStyle(color: Color(0xFF9AA3AB), fontSize: 11.5),
           ),
           if (badge != null) ...[
             const SizedBox(width: 6),
@@ -319,15 +337,20 @@ class _ActionStrip extends StatelessWidget {
                 color: _chipBg,
                 borderRadius: BorderRadius.circular(6),
               ),
-              child: Text(badge.$1,
-                  style: TextStyle(color: badge.$2, fontSize: 10.5)),
+              child: Text(
+                badge.$1,
+                style: TextStyle(color: badge.$2, fontSize: 10.5),
+              ),
             ),
           ],
           const SizedBox(width: 6),
           Text(
             '${p.stack + p.streetBet}',
             style: const TextStyle(
-                color: _cyan, fontSize: 12, fontWeight: FontWeight.w600),
+              color: _cyan,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
           ),
         ],
       ),
@@ -397,8 +420,7 @@ class _TableArea extends StatelessWidget {
   Widget build(BuildContext context) {
     final g = table.engine;
     // 无论英雄在玩家列表何处，都按其后座位顺序排列对手。
-    final heroIdx =
-        g.players.indexWhere((p) => p.id == TableController.heroId);
+    final heroIdx = g.players.indexWhere((p) => p.id == TableController.heroId);
     final opponents = [
       for (var k = 1; k < g.players.length; k++)
         g.players[(heroIdx + k) % g.players.length],
@@ -427,7 +449,10 @@ class _TableArea extends StatelessWidget {
             ),
           ),
           // 中央：底池 + 公共牌
-          Align(alignment: const Alignment(0, -0.12), child: _Board(g: g)),
+          Align(
+            alignment: const Alignment(0, -0.12),
+            child: _Board(g: g),
+          ),
           // 对手座位
           for (var i = 0; i < opponents.length; i++)
             Align(
@@ -527,7 +552,8 @@ class OpponentSeat extends StatelessWidget {
     // 结算亮牌：手牌结束后亮出全部 AI 底牌供学习（含弃牌者，
     // 已弃牌玩家整体以 35% 透明度加以区分）。
     final showCards = g.handOver;
-    final avatarColor = _avatarColors[positiveHash(p.id) % _avatarColors.length];
+    final avatarColor =
+        _avatarColors[positiveHash(p.id) % _avatarColors.length];
 
     return Opacity(
       opacity: p.folded ? 0.35 : 1,
@@ -542,9 +568,9 @@ class OpponentSeat extends StatelessWidget {
                     padding: const EdgeInsets.only(bottom: 2),
                     child: Text(
                       '◉ ${p.streetBet}',
-                    style: const TextStyle(color: _cyan, fontSize: 11),
-                  ),
-                )
+                      style: const TextStyle(color: _cyan, fontSize: 11),
+                    ),
+                  )
                 : null,
           ),
           // 头像与名牌叠放：名牌上缘压住头像下缘，节省纵向空间。
@@ -563,9 +589,10 @@ class OpponentSeat extends StatelessWidget {
                       child: Text(
                         avatarLabel(p.name),
                         style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold),
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ),
                     if (isButton)
@@ -580,11 +607,14 @@ class OpponentSeat extends StatelessWidget {
                             shape: BoxShape.circle,
                           ),
                           alignment: Alignment.center,
-                          child: const Text('D',
-                              style: TextStyle(
-                                  color: Colors.black,
-                                  fontSize: 9,
-                                  fontWeight: FontWeight.bold)),
+                          child: const Text(
+                            'D',
+                            style: TextStyle(
+                              color: Colors.black,
+                              fontSize: 9,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
                         ),
                       ),
                   ],
@@ -593,7 +623,9 @@ class OpponentSeat extends StatelessWidget {
                   bottom: 0,
                   child: Container(
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 8, vertical: 2),
+                      horizontal: 8,
+                      vertical: 2,
+                    ),
                     decoration: BoxDecoration(
                       color: _plate,
                       borderRadius: BorderRadius.circular(8),
@@ -612,16 +644,18 @@ class OpponentSeat extends StatelessWidget {
                         Text(
                           shortName(p.name),
                           style: const TextStyle(
-                              color: _nameColor,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600),
+                            color: _nameColor,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                         Text(
                           '${p.stack}',
                           style: const TextStyle(
-                              color: _cyan,
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold),
+                            color: _cyan,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ],
                     ),
@@ -636,11 +670,12 @@ class OpponentSeat extends StatelessWidget {
                       children: [
                         for (final c in p.holeCards)
                           PlayingCard(
-                              card: c,
-                              width: 26,
-                              height: 36,
-                              fontSize: 11,
-                              marginH: 1),
+                            card: c,
+                            width: 26,
+                            height: 36,
+                            fontSize: 11,
+                            marginH: 1,
+                          ),
                       ],
                     ),
                   ),
@@ -691,7 +726,9 @@ class HeroCluster extends StatelessWidget {
                     child: Text(
                       equityHint,
                       style: const TextStyle(
-                          color: Color(0xFF8FD8D5), fontSize: 11),
+                        color: Color(0xFF8FD8D5),
+                        fontSize: 11,
+                      ),
                     ),
                   )
                 : null,
@@ -726,39 +763,46 @@ class HeroCluster extends StatelessWidget {
               if (madeHand != null)
                 Container(
                   margin: const EdgeInsets.only(right: 6),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 7,
+                    vertical: 3,
+                  ),
                   decoration: BoxDecoration(
                     color: _chipBg,
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child: Text(madeHand,
-                      style: const TextStyle(
-                          color: Colors.white70, fontSize: 11)),
+                  child: Text(
+                    madeHand,
+                    style: const TextStyle(color: Colors.white70, fontSize: 11),
+                  ),
                 ),
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 5,
+                ),
                 decoration: BoxDecoration(
                   color: _plate,
                   borderRadius: BorderRadius.circular(10),
                   border: Border.all(
-                    color:
-                        table.heroToAct ? _cyan : Colors.transparent,
+                    color: table.heroToAct ? _cyan : Colors.transparent,
                     width: 1.4,
                   ),
                 ),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(pos ?? '我',
-                        style: const TextStyle(color: _cyan, fontSize: 13)),
+                    Text(
+                      pos ?? '我',
+                      style: const TextStyle(color: _cyan, fontSize: 13),
+                    ),
                     Text(
                       '${hero.stack}',
                       style: const TextStyle(
-                          color: _cyan,
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold),
+                        color: _cyan,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ],
                 ),
@@ -789,12 +833,10 @@ class HeroCluster extends StatelessWidget {
       opponents: g.active.length - 1,
       trials: 300,
     ).win;
-    final buf =
-        StringBuffer('胜率约 ${(equity * 100).toStringAsFixed(0)}%');
+    final buf = StringBuffer('胜率约 ${(equity * 100).toStringAsFixed(0)}%');
     if (g.board.length < 5) {
       try {
-        final outs =
-            Odds.outs(heroHole: table.hero.holeCards, board: g.board);
+        final outs = Odds.outs(heroHole: table.hero.holeCards, board: g.board);
         if (outs > 0) buf.write(' · outs $outs');
       } catch (_) {
         // board 仅 1~2 张时 outs 不适用，忽略。
@@ -843,8 +885,10 @@ class _ActionBarState extends State<_ActionBar> {
       _sig = sig;
       _amount = null;
     }
-    final amount = (_amount ?? raiser?.minAmount ?? 0)
-        .clamp(raiser?.minAmount ?? 0, raiser?.maxAmount ?? 0);
+    final amount = (_amount ?? raiser?.minAmount ?? 0).clamp(
+      raiser?.minAmount ?? 0,
+      raiser?.maxAmount ?? 0,
+    );
 
     final raiseType = raiser?.type;
 
@@ -866,7 +910,9 @@ class _ActionBarState extends State<_ActionBar> {
                         onTap: () => setState(() => _amount = preset.$2),
                         child: Container(
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 6),
+                            horizontal: 10,
+                            vertical: 6,
+                          ),
                           decoration: BoxDecoration(
                             color: amount == preset.$2
                                 ? _chipBg
@@ -878,9 +924,13 @@ class _ActionBarState extends State<_ActionBar> {
                                   : const Color(0xFF2A333B),
                             ),
                           ),
-                          child: Text(preset.$1,
-                              style: const TextStyle(
-                                  color: Colors.white70, fontSize: 11.5)),
+                          child: Text(
+                            preset.$1,
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 11.5,
+                            ),
+                          ),
                         ),
                       ),
                     ),
@@ -919,9 +969,7 @@ class _ActionBarState extends State<_ActionBar> {
                 const SizedBox(width: 8),
                 _bigButton(
                   color: _btnGreen,
-                  label: check != null
-                      ? '过牌'
-                      : '跟注 ${call?.amount ?? 0}',
+                  label: check != null ? '过牌' : '跟注 ${call?.amount ?? 0}',
                   onPressed: check != null
                       ? () => table.heroAct(ActionType.check)
                       : call != null
@@ -958,9 +1006,9 @@ class _ActionBarState extends State<_ActionBar> {
           disabledBackgroundColor: color.withValues(alpha: 0.25),
           minimumSize: const Size(0, 52),
           shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12)),
-          textStyle:
-              const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
         ),
         onPressed: onPressed,
         child: FittedBox(
@@ -1076,9 +1124,93 @@ class _HandOverBar extends StatelessWidget {
         ? ''
         : hand.netResult.entries
             .where((e) => e.value > 0)
-            .map((e) => '${shortName(hand.playerNames[e.key] ?? e.key)} '
-                '+${e.value}')
+            .map(
+              (e) => '${shortName(hand.playerNames[e.key] ?? e.key)} '
+                  '+${e.value}',
+            )
             .join('，');
+
+    // 输光收手：这一手还没翻过去，先把结果、为什么收手、复盘的入口留在牌桌上。
+    if (table.sessionOver) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 6, 16, 14),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _HandResultText(heroNet: heroNet),
+            if (lines.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  lines,
+                  style: const TextStyle(
+                    color: Color(0xFF8A9299),
+                    fontSize: 11.5,
+                  ),
+                ),
+              ),
+            const SizedBox(height: 4),
+            Text(
+              table.endReason,
+              style: const TextStyle(color: Color(0xFF8A9299), fontSize: 11.5),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: SizedBox(
+                    height: 46,
+                    child: OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: _cyan,
+                        side: const BorderSide(color: Color(0x553AD0CC)),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      onPressed: hand == null
+                          ? null
+                          : () => showHandReviewSheet(
+                              context,
+                              <HandHistory>[
+                                hand,
+                              ],
+                              TableController.heroId),
+                      icon: const Icon(Icons.receipt_long_outlined, size: 18),
+                      label: const Text('本手复盘'),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: SizedBox(
+                    height: 46,
+                    child: FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: _btnGreen,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      onPressed: table.openSummary,
+                      icon: const Icon(Icons.assessment_outlined, size: 18),
+                      label: const Text(
+                        '查看本局总结',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+
     if (table.heroBusted) {
       final buyIn = table.engine.config.startingStack;
       return Padding(
@@ -1098,15 +1230,18 @@ class _HandOverBar extends StatelessWidget {
             // 这里不再重复「本手亏损」——导航栏右上角已经有本手输赢（本手 ±X）。
             // 只有还没发牌（冷启动 / 续局就被挡下）时才补一句为什么停下来。
             if (hand == null)
-              Text('筹码不够一个大盲，先决定补不补',
-                  style: const TextStyle(
-                      color: Color(0xFF8A9299), fontSize: 11.5)),
+              Text(
+                '筹码不够一个大盲，先决定补不补',
+                style: const TextStyle(
+                  color: Color(0xFF8A9299),
+                  fontSize: 11.5,
+                ),
+              ),
             const SizedBox(height: 4),
             Text(
               '本局已补码 ${table.rebuys}/${TableController.maxRebuys} 次'
               '，还剩 ${table.rebuysLeft} 次',
-              style:
-                  const TextStyle(color: Color(0xFF8A9299), fontSize: 11.5),
+              style: const TextStyle(color: Color(0xFF8A9299), fontSize: 11.5),
             ),
             const SizedBox(height: 8),
             SizedBox(
@@ -1116,13 +1251,18 @@ class _HandOverBar extends StatelessWidget {
                 style: FilledButton.styleFrom(
                   backgroundColor: _btnRed,
                   shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12)),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
                 ),
                 onPressed: table.heroRebuy,
                 icon: const Icon(Icons.replay),
-                label: Text('补充筹码 $buyIn 并开始下一手',
-                    style: const TextStyle(
-                        fontSize: 15, fontWeight: FontWeight.w600)),
+                label: Text(
+                  '补充筹码 $buyIn 并开始下一手',
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
               ),
             ),
           ],
@@ -1134,28 +1274,17 @@ class _HandOverBar extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            heroNet > 0
-                ? '本手赢利 +$heroNet'
-                : heroNet < 0
-                    ? '本手亏损 $heroNet'
-                    : '本手不亏不赚',
-            style: TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.bold,
-              color: heroNet > 0
-                  ? const Color(0xFF7CC98B)
-                  : heroNet < 0
-                      ? const Color(0xFFE56B6B)
-                      : Colors.white70,
-            ),
-          ),
+          _HandResultText(heroNet: heroNet),
           if (lines.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 2),
-              child: Text(lines,
-                  style: const TextStyle(
-                      color: Color(0xFF8A9299), fontSize: 11.5)),
+              child: Text(
+                lines,
+                style: const TextStyle(
+                  color: Color(0xFF8A9299),
+                  fontSize: 11.5,
+                ),
+              ),
             ),
           const SizedBox(height: 8),
           SizedBox(
@@ -1165,15 +1294,45 @@ class _HandOverBar extends StatelessWidget {
               style: FilledButton.styleFrom(
                 backgroundColor: _btnGreen,
                 shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12)),
+                  borderRadius: BorderRadius.circular(12),
+                ),
               ),
               onPressed: table.startHand,
               icon: const Icon(Icons.skip_next),
-              label: const Text('下一手',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+              label: const Text(
+                '下一手',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+              ),
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 结算条上的「本手赢利 / 本手亏损 / 本手不亏不赚」那一行。
+class _HandResultText extends StatelessWidget {
+  const _HandResultText({required this.heroNet});
+
+  final int heroNet;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      heroNet > 0
+          ? '本手赢利 +$heroNet'
+          : heroNet < 0
+              ? '本手亏损 $heroNet'
+              : '本手不亏不赚',
+      style: TextStyle(
+        fontSize: 15,
+        fontWeight: FontWeight.bold,
+        color: heroNet > 0
+            ? const Color(0xFF7CC98B)
+            : heroNet < 0
+                ? const Color(0xFFE56B6B)
+                : Colors.white70,
       ),
     );
   }

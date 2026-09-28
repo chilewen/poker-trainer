@@ -27,3 +27,6 @@ new = f"version: {m.group(1)}+{int(m.group(2) or 0) + 1}"
 open(path, 'w', encoding='utf-8').write(src.replace(old, new, 1))
 print(f"{old.strip()}  →  {new}")
 PY
+
+# 版本号变了，App 里显示的那份常量也要跟着重新生成，不然装上去看着还是旧版。
+zsh "$ROOT/tool/gen_app_version.sh" "$PUBSPEC" >/dev/null

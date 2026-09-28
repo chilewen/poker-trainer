@@ -3,8 +3,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../../engine/hand_history.dart';
-import '../../../engine/types.dart';
+import '../../game/domain/hero_stats.dart';
 import '../../game/presentation/game_screen.dart';
 import '../../game/presentation/table_controller.dart';
 
@@ -18,7 +17,8 @@ class StatsScreen extends ConsumerWidget {
     if (history.isEmpty) {
       return const Center(child: Text('还没有手牌记录，先去打几手吧'));
     }
-    final stats = _HeroStats.from(history.reversed);
+    final stats =
+        HeroStats.from(history.reversed, heroId: TableController.heroId);
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -36,16 +36,18 @@ class StatsScreen extends ConsumerWidget {
             _StatTile(label: 'VPIP', value: _percent(stats.vpip)),
             _StatTile(label: 'PFR', value: _percent(stats.pfr)),
             _StatTile(
+              label: '3bet',
+              value: stats.threeBet == null ? '-' : _percent(stats.threeBet!),
+            ),
+            _StatTile(
               label: '攻击系数 AF',
-              value: stats.aggressionFactor.isInfinite
-                  ? '无限'
-                  : stats.aggressionFactor.toStringAsFixed(1),
+              value: stats.aggressionFactor?.toStringAsFixed(1) ?? '-',
             ),
             _StatTile(
               label: '摊牌胜率',
-              value: stats.showdowns == 0
+              value: stats.showdownWinRate == null
                   ? '-'
-                  : _percent(stats.showdownWins / stats.showdowns),
+                  : _percent(stats.showdownWinRate!),
             ),
             _StatTile(
               label: '每手均盈亏',
@@ -97,70 +99,6 @@ class _StatTile extends StatelessWidget {
         ),
       ),
     );
-  }
-}
-
-/// 按时间顺序（最早到最新）遍历手牌，汇总英雄统计数据。
-class _HeroStats {
-  _HeroStats();
-
-  static const _hero = TableController.heroId;
-
-  int hands = 0;
-  int net = 0;
-  int wins = 0;
-  int vpipHands = 0;
-  int pfrHands = 0;
-  int aggressiveActs = 0; // 所有街道 bet + raise 次数
-  int calls = 0;
-  int showdowns = 0;
-  int showdownWins = 0;
-  final List<double> cumulativeNet = [];
-
-  double get winRate => hands == 0 ? 0 : wins / hands;
-  double get vpip => hands == 0 ? 0 : vpipHands / hands;
-  double get pfr => hands == 0 ? 0 : pfrHands / hands;
-  double get aggressionFactor =>
-      calls == 0 ? double.infinity : aggressiveActs / calls;
-
-  factory _HeroStats.from(Iterable<HandHistory> chronological) {
-    final s = _HeroStats();
-    for (final hand in chronological) {
-      if (!hand.holeCards.containsKey(_hero)) continue;
-      s.hands++;
-      final result = hand.netResult[_hero] ?? 0;
-      s.net += result;
-      if (result > 0) s.wins++;
-      s.cumulativeNet.add(s.net.toDouble());
-
-      var putVoluntary = false;
-      var raisedPreflop = false;
-      for (final a in hand.actions.where((a) => a.actorId == _hero)) {
-        switch (a.type) {
-          case ActionType.bet:
-          case ActionType.raise:
-            s.aggressiveActs++;
-            if (a.street == Street.preflop) {
-              putVoluntary = true;
-              raisedPreflop = true;
-            }
-          case ActionType.call:
-            s.calls++;
-            if (a.street == Street.preflop) putVoluntary = true;
-          case ActionType.check:
-          case ActionType.fold:
-            break;
-        }
-      }
-      if (putVoluntary) s.vpipHands++;
-      if (raisedPreflop) s.pfrHands++;
-
-      if (hand.actions.any((a) => a.street == Street.showdown)) {
-        s.showdowns++;
-        if (result > 0) s.showdownWins++;
-      }
-    }
-    return s;
   }
 }
 

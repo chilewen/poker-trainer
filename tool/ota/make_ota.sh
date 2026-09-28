@@ -19,6 +19,11 @@
 #
 # 注意：ipa 必须是用「包含你这台设备 UDID 的」描述文件签的（Ad Hoc 或开发包），
 # 否则手机上下载完会提示无法安装。
+#
+# 防呆：会拿 ipa 的构建号（CFBundleVersion）跟 app 仓库 pubspec.yaml 的「+N」
+# 对一下，对不上直接报错退出——那说明 ipa 是在版本号改动之前打的，发出去手机
+# 上装的还是旧包（页面却会照常翻新，看着像「发布了但没生效」）。
+# 确实要发旧包时：OTA_SKIP_VERSION_CHECK=1 放行。
 set -e
 
 if [ $# -lt 2 ]; then
@@ -54,6 +59,17 @@ IPA_URL="${4:-$BASE/$IPA_NAME}"
 case "$IPA_URL" in *\?*) IPA_URL="${IPA_URL%%\?*}" ;; esac      # 丢掉历史遗留的 query
 IPA_URL="${IPA_URL%/*}/$IPA_STAMPED"
 mkdir -p "$OUT"
+
+# 跟上次发布的包逐字节相同：页面会翻新，装到手机上却是同一个 App。
+OLD_IPA=$(find "$OUT" -maxdepth 1 -name '*.ipa' 2>/dev/null | head -1)
+if [ -n "$OLD_IPA" ] && [ "${OLD_IPA:A}" != "${IPA:A}" ]; then
+  OLD_SHA=$(shasum -a 256 < "$OLD_IPA" | cut -d' ' -f1)
+  NEW_SHA=$(shasum -a 256 < "$IPA" | cut -d' ' -f1)
+  if [ "$OLD_SHA" = "$NEW_SHA" ]; then
+    echo "⚠ 这次的 ipa 跟上次发布的完全一样（${NEW_SHA[1,12]}…），手机装上去还是同一个 App。" >&2
+  fi
+fi
+
 # 先把新包拷进来再清旧的：有一种常见用法是「直接对 build/ota 里这个 ipa 重跑
 # make_ota」（发布目录里的 pre-commit 钩子就是这么干的），先删就会把源文件删掉。
 cp "$IPA" "$OUT/$IPA_STAMPED.new"
@@ -61,6 +77,8 @@ find "$OUT" -maxdepth 1 -name '*.ipa' -delete   # 清掉上一次的包，目录
 mv "$OUT/$IPA_STAMPED.new" "$OUT/$IPA_STAMPED"
 find "$OUT" -maxdepth 1 -name 'manifest*.plist' -delete  # 旧 manifest 一并清掉
 touch "$OUT/.nojekyll"  # 别让 GitHub Pages 走 Jekyll 处理
+# 包指纹：页面上标一份，怀疑装错包时可以对一下到底下的是哪一个。
+IPA_SHA=$(shasum -a 256 "$OUT/$IPA_STAMPED" | cut -d' ' -f1)
 
 # 从 ipa 里的 Info.plist 读出真实的应用信息，免得手写错。
 TMP=$(mktemp -d)
@@ -77,6 +95,26 @@ VER=$(plutil -extract CFBundleShortVersionString raw "$PLIST")
 # CFBundleVersion，苹果的「短版本」永远停在 0.1.0。只看短版本的话，装了新版
 # 手机上和安装页上都是 0.1.0——「版本号一直没变化」就是这么来的。
 BVER=$(plutil -extract CFBundleVersion raw "$PLIST" 2>/dev/null || echo '')
+
+# ---- 防呆：ipa 的构建号必须跟 app 仓库 pubspec.yaml 里的一致 ----
+# 踩过的坑：pubspec 早就 +12 了，但 build/ios/ipa 还是上一次的 build 10
+# （bump 之后忘了重新出包，或者走了 --skip-build）。于是页面照常翻新、
+# 版本文字照常刷新，推上去的却是旧二进制——手机上装完还是老样子。
+# 构建号是「这包是哪次构建」的唯一凭据，对不上就等于拿旧包当新包发。
+# 确实要发旧包时设 OTA_SKIP_VERSION_CHECK=1 放行。
+APP_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+PUBSPEC="$APP_ROOT/pubspec.yaml"
+if [ -f "$PUBSPEC" ] && [ "${OTA_SKIP_VERSION_CHECK:-0}" != "1" ]; then
+  PUB_BUILD=$(sed -n 's/^version:[[:space:]]*[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*+\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$PUBSPEC" | head -1)
+  if [ -n "$PUB_BUILD" ] && [ -n "$BVER" ] && [ "$PUB_BUILD" != "$BVER" ]; then
+    echo "✗ 这个 ipa 是 build $BVER，但 pubspec.yaml 已经是 +$PUB_BUILD。" >&2
+    echo "  说明 ipa 是在版本号改动之前打的（多半是 bump 之后没重新出包）。" >&2
+    echo "  先重新出包：zsh tool/ota/release_ios.sh --bump" >&2
+    echo "  确实要发这个旧包时：OTA_SKIP_VERSION_CHECK=1 zsh tool/ota/make_ota.sh ..." >&2
+    exit 1
+  fi
+fi
+
 VER_TEXT="$VER"
 case "$BVER" in
   ''|*[!0-9]*) ;;                       # 读不到或是非数字（比如 1.0.3）就只显示短版本
@@ -150,7 +188,7 @@ cat > "$OUT/install.html" <<HTML_EOF
 <body>
   <h1>$TITLE</h1>
   <p>版本 $VER_TEXT</p>
-  <p>发布于 $PUBLISHED</p>
+  <p>发布于 $PUBLISHED · 包指纹 <code>${IPA_SHA[1,12]}</code></p>
   <a href="itms-services://?action=download-manifest&amp;url=$MANIFEST_URL">安装</a>
   <p>点击后如果没反应，用 Safari 打开本页。</p>
   <details style="text-align:left;max-width:420px;margin:32px auto 0">

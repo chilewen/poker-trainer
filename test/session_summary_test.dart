@@ -7,13 +7,13 @@ import 'package:poker_trainer/engine/card.dart' as poker;
 import 'package:poker_trainer/engine/game.dart';
 import 'package:poker_trainer/engine/hand_history.dart';
 import 'package:poker_trainer/engine/types.dart';
+import 'package:poker_trainer/features/game/domain/hero_stats.dart';
 import 'package:poker_trainer/features/game/domain/session_summary.dart';
 import 'package:poker_trainer/features/game/presentation/game_screen.dart';
 import 'package:poker_trainer/features/game/presentation/session_summary_screen.dart';
 import 'package:poker_trainer/features/game/presentation/table_controller.dart';
 
-const _config =
-    GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
+const _config = GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
 
 /// 对局总结页：一局收手之后，这一局打了多久、赚亏多少、补码用了几次、
 /// 为什么结束，一屏看得清；最近几手还能直接点进逐手复盘。
@@ -37,6 +37,50 @@ void main() {
     return h;
   }
 
+  ActionRecord rec(
+    String id,
+    ActionType type,
+    int potAfter, {
+    Street street = Street.preflop,
+    int amount = 0,
+  }) => ActionRecord(
+    street: street,
+    actorId: id,
+    type: type,
+    amount: amount,
+    potAfter: potAfter,
+  );
+
+  /// 一手打错的牌：单挑坐庄，翻牌拿 76s 在中不到的牌面上跟了一个重注
+  /// ——「跟注没有赔率」。总结页该给它挂 ⚠ 并按类型归并。
+  HandHistory mistakeHand() {
+    final h = HandHistory(
+      id: 'm1',
+      timestamp: DateTime.fromMillisecondsSinceEpoch(1700000000000),
+      playerNames: const {'hero': '我', 'ai0': '紧凶·AI1'},
+      startingStacks: const {'hero': 10000, 'ai0': 10000},
+      holeCards: {
+        'hero': '7h 6h'.split(' ').map(poker.Card.parse).toList(),
+        'ai0': '2c 3d'.split(' ').map(poker.Card.parse).toList(),
+      },
+      buttonIndex: 0,
+      smallBlind: 50,
+      bigBlind: 100,
+    );
+    h.board.addAll('Kh Qd 9c'.split(' ').map(poker.Card.parse));
+    h.actions.addAll([
+      rec('hero', ActionType.bet, 50),
+      rec('ai0', ActionType.bet, 100),
+      rec('hero', ActionType.call, 200),
+      rec('ai0', ActionType.check, 200),
+      rec('ai0', ActionType.bet, 400, street: Street.flop, amount: 200),
+      rec('hero', ActionType.call, 600, street: Street.flop),
+    ]);
+    h.netResult['hero'] = -250;
+    h.netResult['ai0'] = 250;
+    return h;
+  }
+
   SessionSummary sample({
     int handsPlayed = 11,
     int handsWon = 5,
@@ -48,40 +92,45 @@ void main() {
     int rebuys = 2,
     String endReason = '主动结束',
     List<HandHistory>? hands,
-  }) =>
-      SessionSummary(
-        tableName: '实战 6人桌',
-        label: '实战 6人桌 · 50/100',
-        handsPlayed: handsPlayed,
-        handsWon: handsWon,
-        handsLost: handsLost,
-        handsTied: handsTied,
-        heroNet: heroNet,
-        bestHandNet: bestHandNet,
-        worstHandNet: worstHandNet,
-        rebuys: rebuys,
-        maxRebuys: 3,
-        duration: const Duration(minutes: 42, seconds: 5),
-        endReason: endReason,
-        hands:
-            hands ?? [hand('h3', -4200), hand('h2', 9000), hand('h1', 300)],
-      );
+  }) => SessionSummary(
+    tableName: '实战 6人桌',
+    label: '实战 6人桌 · 50/100',
+    handsPlayed: handsPlayed,
+    handsWon: handsWon,
+    handsLost: handsLost,
+    handsTied: handsTied,
+    heroNet: heroNet,
+    bestHandNet: bestHandNet,
+    worstHandNet: worstHandNet,
+    rebuys: rebuys,
+    maxRebuys: 3,
+    duration: const Duration(minutes: 42, seconds: 5),
+    endReason: endReason,
+    heroStats: HeroStats.from(const [], heroId: 'hero'),
+    hands: hands ?? [hand('h3', -4200), hand('h2', 9000), hand('h1', 300)],
+  );
 
-  Future<void> pump(WidgetTester tester, SessionSummary summary,
-      {VoidCallback? onPlayAgain, VoidCallback? onLeave}) async {
+  Future<void> pump(
+    WidgetTester tester,
+    SessionSummary summary, {
+    VoidCallback? onPlayAgain,
+    VoidCallback? onLeave,
+  }) async {
     // 总结页是整屏列表：测试窗口给高一点，免得下面的按钮还没建出来。
     tester.view.physicalSize = const Size(400, 1600);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
-    await tester.pumpWidget(MaterialApp(
-      // 点击换成水波纹，免得依赖 Material 3 的 ink_sparkle 着色器。
-      theme: ThemeData(splashFactory: InkRipple.splashFactory),
-      home: SessionSummaryScreen(
-        summary: summary,
-        onPlayAgain: onPlayAgain ?? () {},
-        onLeave: onLeave ?? () {},
+    await tester.pumpWidget(
+      MaterialApp(
+        // 点击换成水波纹，免得依赖 Material 3 的 ink_sparkle 着色器。
+        theme: ThemeData(splashFactory: InkRipple.splashFactory),
+        home: SessionSummaryScreen(
+          summary: summary,
+          onPlayAgain: onPlayAgain ?? () {},
+          onLeave: onLeave ?? () {},
+        ),
       ),
-    ));
+    );
     await tester.pump();
   }
 
@@ -114,11 +163,71 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('总结页：本局打法 + 逐手复盘里能看到单手范围/胜率/底池', (tester) async {
+    await pump(tester, sample());
+
+    // 打法统计：和统计页同一口径（VPIP/PFR/3bet/AF/摊牌）。
+    expect(find.text('本局打法'), findsOneWidget);
+    expect(find.text('入池 VPIP'), findsOneWidget);
+    expect(find.text('3bet'), findsOneWidget);
+    expect(find.text('打法失误'), findsOneWidget);
+    expect(find.text('没有'), findsOneWidget, reason: '造的历史没有失误');
+
+    // 点进逐手复盘，展开第一手：单手基础数据 + 范围 + 翻前胜率 + 底池。
+    await tester.tap(find.text('逐手复盘'));
+    await tester.pumpAndSettle();
+    expect(find.text('手牌回顾'), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.keyboard_arrow_down).first);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('起手 AKo'), findsOneWidget);
+    expect(find.textContaining('翻前胜率'), findsOneWidget);
+    expect(find.textContaining('翻前池'), findsOneWidget);
+    expect(find.textContaining('最终池'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('总结页：打错的牌挂 ⚠，失误按类型归并', (tester) async {
+    await pump(tester, sample(hands: [mistakeHand(), hand('h1', 300)]));
+
+    expect(find.text('1 处'), findsOneWidget, reason: '汇总报失误数');
+    expect(
+      find.textContaining('跟注没有赔率 1'),
+      findsOneWidget,
+      reason: '分类归并：哪一类错了几次',
+    );
+    expect(find.text('⚠1'), findsOneWidget, reason: '打错的那手带标记');
+    expect(find.text('庄位'), findsWidgets, reason: '每手标出英雄的位置');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('总结页：窄屏上打法那一块也不溢出', (tester) async {
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData(splashFactory: InkRipple.splashFactory),
+        home: SessionSummaryScreen(
+          summary: sample(),
+          onPlayAgain: () {},
+          onLeave: () {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('总结页：两个出口各按各的回调走', (tester) async {
     var again = 0;
     var left = 0;
-    await pump(tester, sample(),
-        onPlayAgain: () => again++, onLeave: () => left++);
+    await pump(
+      tester,
+      sample(),
+      onPlayAgain: () => again++,
+      onLeave: () => left++,
+    );
 
     await tester.tap(find.text('再来一局'));
     expect(again, 1);
@@ -133,16 +242,19 @@ void main() {
     expect(find.text('筹码输光，补码次数已用完'), findsOneWidget);
 
     // 一手没打完就收手：别硬说赢了还是输了，也别列空明细。
-    await pump(tester, sample(
-      handsPlayed: 0,
-      handsWon: 0,
-      handsLost: 0,
-      heroNet: 0,
-      bestHandNet: 0,
-      worstHandNet: 0,
-      endReason: '主动结束',
-      hands: const [],
-    ));
+    await pump(
+      tester,
+      sample(
+        handsPlayed: 0,
+        handsWon: 0,
+        handsLost: 0,
+        heroNet: 0,
+        bestHandNet: 0,
+        worstHandNet: 0,
+        endReason: '主动结束',
+        hands: const [],
+      ),
+    );
     expect(find.text('没打完就收了'), findsOneWidget);
     expect(find.text('最近几手'), findsNothing);
     expect(tester.takeException(), isNull);
@@ -156,16 +268,20 @@ void main() {
     tester.view.physicalSize = const Size(400, 1600);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
-    final table =
-        TableController(random: Random(3), aiThinkTime: Duration.zero);
+    final table = TableController(
+      random: Random(3),
+      aiThinkTime: Duration.zero,
+    );
     addTearDown(table.dispose);
-    await tester.pumpWidget(ProviderScope(
-      overrides: [tableProvider.overrideWith((ref) => table)],
-      child: MaterialApp(
-        theme: ThemeData(splashFactory: InkRipple.splashFactory),
-        home: const GameScreen(autoStart: false),
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [tableProvider.overrideWith((ref) => table)],
+        child: MaterialApp(
+          theme: ThemeData(splashFactory: InkRipple.splashFactory),
+          home: const GameScreen(autoStart: false),
+        ),
       ),
-    ));
+    );
     table.startRealTable(name: '实战 单挑', config: _config, playerCount: 2);
     await tester.pump();
     return table;
@@ -183,8 +299,11 @@ void main() {
 
   testWidgets('对局结束：牌桌整页换成总结，点「再来一局」回到新的一局', (tester) async {
     final table = await pumpTable(tester);
-    expect(find.byType(SessionSummaryScreen), findsNothing,
-        reason: '还在打的时候不该有总结页');
+    expect(
+      find.byType(SessionSummaryScreen),
+      findsNothing,
+      reason: '还在打的时候不该有总结页',
+    );
 
     // 弃牌走完这一手（-50），然后主动收手。
     table.heroAct(ActionType.fold);
@@ -193,8 +312,11 @@ void main() {
     table.endSession(reason: '主动结束');
     await tester.pump();
 
-    expect(find.byType(SessionSummaryScreen), findsOneWidget,
-        reason: '收局之后牌桌整页换成总结');
+    expect(
+      find.byType(SessionSummaryScreen),
+      findsOneWidget,
+      reason: '收局之后牌桌整页换成总结',
+    );
     expect(find.text('对局总结'), findsOneWidget);
     expect(find.text('主动结束'), findsOneWidget);
     // 同一个数在大字、每手均盈亏、单手最惨、明细里都会出现，只要求「有」。
@@ -229,5 +351,58 @@ void main() {
     expect(table.sessionOver, isTrue);
     expect(find.byType(SessionSummaryScreen), findsOneWidget);
     expect(find.text('主动结束'), findsOneWidget);
+  });
+
+  testWidgets('最后一手输光：先留在牌桌上看这手牌，按「查看本局总结」才翻页', (tester) async {
+    final table = await pumpTable(tester);
+
+    // 把 3 次补码机会用光：每次都是「输光 + 停下来等补码」。
+    for (var i = 0; i < TableController.maxRebuys; i++) {
+      table.engine.handOver = true;
+      table.hero.stack = 0;
+      table.startHand();
+      table.heroRebuy();
+    }
+    await advance(tester);
+    expect(table.canRebuy, isFalse, reason: '补码机会已经用完');
+
+    // 推进到轮到英雄行动的那一手（单挑里偶尔 AI 先弃牌，就重新发一手）。
+    var guard = 0;
+    while (!table.heroToAct && guard++ < 200) {
+      if (table.handStopped) {
+        table.startHand();
+        await tester.pump();
+      } else {
+        await tester.pump(const Duration(milliseconds: 200));
+      }
+    }
+    expect(table.heroToAct, isTrue, reason: '总有一手会轮到英雄行动');
+
+    // 最后这一手也输光：这局到头了，但牌桌得留着。
+    table.hero.stack = 0;
+    table.heroAct(ActionType.fold);
+    await advance(tester);
+
+    expect(table.sessionOver, isTrue);
+    expect(table.lastHand, isNotNull, reason: '最后一手的牌还在');
+    expect(table.showSummary, isFalse, reason: '刚输光那一手不能一帧都不给看');
+    expect(find.byType(SessionSummaryScreen), findsNothing);
+    expect(find.text('筹码输光，补码次数已用完'), findsOneWidget);
+    expect(find.text('本手复盘'), findsOneWidget);
+    expect(find.text('查看本局总结'), findsOneWidget);
+    expect(tester.takeException(), isNull, reason: '收局底栏不能溢出');
+
+    // 本手复盘：这一手的行动路线还翻得出来。
+    await tester.tap(find.text('本手复盘'));
+    await tester.pumpAndSettle();
+    expect(find.text('手牌回顾'), findsOneWidget);
+    Navigator.of(tester.element(find.text('手牌回顾'))).pop();
+    await tester.pumpAndSettle();
+
+    // 玩家自己按了才翻去总结页。
+    await tester.tap(find.text('查看本局总结'));
+    await advance(tester);
+    expect(find.byType(SessionSummaryScreen), findsOneWidget);
+    expect(find.text('对局总结'), findsOneWidget);
   });
 }

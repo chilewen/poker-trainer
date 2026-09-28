@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
 import '../../../engine/card.dart' as poker;
 import '../../../engine/hand_history.dart';
 import '../../../engine/types.dart';
+import '../domain/hand_analysis.dart';
+import '../domain/hand_grade.dart';
+import '../domain/table_position.dart';
 
 const _sheetBg = Color(0xFF0F1418);
 const _cardBg = Color(0xFF141B21);
@@ -19,30 +22,6 @@ Color actionColor(ActionType t) => switch (t) {
       ActionType.bet => const Color(0xFF5FA8F5),
       ActionType.raise => _red,
     };
-
-/// 中文位置名：庄位/小盲/大盲/枪口/中位/关煞（单挑：庄位、大盲）。
-String? cnPosition(List<String> order, int buttonIndex, String id) {
-  final n = order.length;
-  if (n < 2 || buttonIndex < 0) return null;
-  final i = order.indexOf(id);
-  if (i < 0) return null;
-  if (n == 2) return i == buttonIndex ? '庄位' : '大盲';
-  final d = (i - buttonIndex + n) % n;
-  switch (d) {
-    case 0:
-      return '庄位';
-    case 1:
-      return '小盲';
-    case 2:
-      return '大盲';
-    case 3:
-      return '枪口';
-    default:
-      if (d == n - 1) return '关煞';
-      if (d == n - 2 && n > 6) return '嗨加';
-      return '中位';
-  }
-}
 
 /// 打开「手牌回顾」底部面板：近局列表，点开展开该手的行动路线。
 /// [hands] 最新在前（可含进行中的当前手）。
@@ -261,6 +240,11 @@ class _HandDetail extends StatelessWidget {
 
   List<Widget> _buildSections() {
     final order = hand.playerNames.keys.toList();
+    // 单手复盘数据（位置/SPR/底池/赔率）——纯 Dart 算，这里只负责摆出来。
+    final analysis = HandAnalysis.of(hand, heroId: heroId);
+    // 判断层：范围归属、翻前胜率、失误标记。
+    final grade = HandGrade.of(analysis);
+    final mistakeAt = {for (final m in grade.mistakes) m.decisionIndex: m};
     // 逐条记录模拟每位玩家的「后手」（剩余筹码）与本街下注额。
     final behind = Map<String, int>.of(hand.startingStacks);
     final streetBet = {for (final id in order) id: 0};
@@ -268,7 +252,10 @@ class _HandDetail extends StatelessWidget {
     Street? cur;
     var preflopBets = 0; // 用于识别前两条盲注
 
-    final widgets = <Widget>[];
+    final widgets = <Widget>[
+      _overview(analysis, grade),
+      if (grade.mistakes.isNotEmpty) _mistakeList(grade),
+    ];
     final folded = <String>{};
 
     Widget rowOf({
@@ -373,6 +360,22 @@ class _HandDetail extends StatelessWidget {
           label = '${a.type.label} ${a.amount}';
         }
 
+        // 英雄面对下注的决策：保本胜率 + 跟注 EV。光看赔率不够——胜率足够
+        // 高时跟注才是正 EV，「保本多少」和「跟了值多少」是两个问题。
+        final point = analysis.decisions[i];
+        if (point.isHero && point.facingBet) {
+          var tail = '保本 ${(point.potOdds * 100).round()}%';
+          final ev = grade.callEv(point);
+          if (ev != null) {
+            tail += '，跟注 EV ${ev >= 0 ? '+' : ''}${ev.round()}';
+          }
+          label += '（$tail）';
+        }
+        final miss = mistakeAt[i];
+        if (miss != null) {
+          label += '  ⚠${miss.kind.label}';
+        }
+
         if (!seqLabels.containsKey(a.actorId)) {
           seqLabels[a.actorId] = [];
           seqPlayers.add(a.actorId);
@@ -451,6 +454,73 @@ class _HandDetail extends StatelessWidget {
     }
 
     return widgets;
+  }
+
+  /// 单手概览：位置、起手牌与范围、翻前胜率、SPR、各街底池，再加行动线速记。
+  ///
+  /// 位置和底池在下面的分街明细里也有，但那要一行行读；这里给的是「一眼看完
+  /// 这手是个什么局面」——SPR 1 和 SPR 15 是完全两种打法。
+  Widget _overview(HandAnalysis a, HandGrade g) {
+    final equity = g.preflopEquity(opponents: a.order.length - 1);
+    final facts = <(String, String)>[
+      if (a.heroPosition != null) ('位置', a.heroPosition!),
+      if (g.preflopLabel != null) ('起手', g.preflopLabel!),
+      if (g.preflopLabel != null)
+        ('范围', g.inOpenRange ? '开池内' : '开池外'),
+      if (equity != null)
+        ('翻前胜率', '${(equity * 100).round()}% · 对${a.order.length - 1}人'),
+      if (a.spr != null) ('SPR', a.spr!.toStringAsFixed(1)),
+      ('翻前池', '${a.potPreflop}'),
+      if (a.potAtFlop != null) ('翻牌池', '${a.potAtFlop}'),
+      ('最终池', '${a.finalPot}'),
+    ];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 2),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 12,
+            runSpacing: 4,
+            children: [
+              for (final (label, value) in facts)
+                Text('$label $value',
+                    style: const TextStyle(
+                        color: Color(0xFF9AA3AB), fontSize: 11.5)),
+            ],
+          ),
+          if (a.actionLine.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              a.actionLine,
+              style: const TextStyle(
+                  color: Colors.white70, fontSize: 12, height: 1.5),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// 失误清单：这手哪里打错了，一句话一条。
+  Widget _mistakeList(HandGrade g) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 4, 10, 2),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (final m in g.mistakes)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 3),
+              child: Text(
+                '⚠ ${m.kind.label}：${m.detail}',
+                style: const TextStyle(
+                    color: Color(0xFFE5A96B), fontSize: 11.5, height: 1.4),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   int? _streetEndPot(Street s) {

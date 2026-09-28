@@ -12,6 +12,7 @@ import 'package:poker_trainer/engine/types.dart';
 import 'package:poker_trainer/features/game/data/table_session.dart';
 import 'package:poker_trainer/features/game/data/table_session_store.dart';
 import 'package:poker_trainer/features/game/domain/hand_strength.dart';
+import 'package:poker_trainer/features/game/domain/hero_stats.dart';
 import 'package:poker_trainer/features/game/domain/session_summary.dart';
 import 'package:poker_trainer/features/game/domain/table_restore.dart';
 import 'package:poker_trainer/features/game/presentation/table_controller.dart';
@@ -6932,7 +6933,7 @@ void main() {
   }, fast: true);
 
   t('对局总结：胜率、每手均盈亏、时长文案', () {
-    const s = SessionSummary(
+    final s = SessionSummary(
       tableName: '实战 单挑',
       label: '实战 单挑 · 50/100',
       handsPlayed: 10,
@@ -6946,6 +6947,7 @@ void main() {
       maxRebuys: 6,
       duration: Duration(minutes: 72, seconds: 30),
       endReason: '主动结束',
+      heroStats: HeroStats.from(const [], heroId: 'hero'),
     );
     expect(s.winRate, 0.4);
     expect(s.netPerHand, 120);
@@ -6967,13 +6969,14 @@ void main() {
           maxRebuys: s.maxRebuys,
           duration: d,
           endReason: s.endReason,
+          heroStats: s.heroStats,
         );
     expect(withDuration(const Duration(seconds: 38)).durationText, '38 秒');
     expect(withDuration(const Duration(minutes: 12, seconds: 30)).durationText,
         '12 分 30 秒');
 
     // 一手没打完就收手：胜率按 0，结论也不能瞎说「赢了/输了」。
-    const empty = SessionSummary(
+    final empty = SessionSummary(
       tableName: '实战 单挑',
       label: '实战 单挑 · 50/100',
       handsPlayed: 0,
@@ -6987,6 +6990,7 @@ void main() {
       maxRebuys: 6,
       duration: Duration(seconds: 5),
       endReason: '主动结束',
+      heroStats: HeroStats.from(const [], heroId: 'hero'),
     );
     expect(empty.winRate, 0);
     expect(empty.netPerHand, 0);

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../app_version.dart';
 import '../../../main.dart';
 import '../domain/ai_player.dart';
 import 'game_screen.dart';
@@ -105,6 +106,18 @@ class LobbyScreen extends ConsumerWidget {
             ),
           ],
         ),
+        const SizedBox(height: 20),
+        // 版本号：装完对着安装页上一行看就知道手机上是不是最新那包。
+        Center(
+          child: Text(
+            '版本 $appVersionText',
+            style: Theme.of(context)
+                .textTheme
+                .bodySmall
+                ?.copyWith(color: Theme.of(context).colorScheme.outline),
+          ),
+        ),
+        const SizedBox(height: 8),
       ],
     );
   }

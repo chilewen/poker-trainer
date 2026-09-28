@@ -10,6 +10,7 @@ import '../../history/data/hand_history_store.dart';
 import '../data/table_session.dart';
 import '../data/table_session_store.dart';
 import '../domain/ai_player.dart';
+import '../domain/hero_stats.dart';
 import '../domain/session_summary.dart';
 import '../domain/table_restore.dart';
 
@@ -79,7 +80,27 @@ class TableController extends ChangeNotifier {
   bool _sessionOver = false;
 
   /// 这局是不是已经结束了（补码用尽还输光，或者玩家自己按了「结束对局」）。
+  ///
+  /// 注意这是「规则上打完了」，跟「界面现在该不该翻页」是两件事——见 [showSummary]。
   bool get sessionOver => _sessionOver;
+
+  /// 这局结束了，但界面还留在牌桌上，等玩家看完最后一手。
+  bool _summaryPending = false;
+
+  /// 界面现在该不该整页换成对局总结。
+  ///
+  /// 输光收手时，最后那一手往往正是最该复盘的那一手。要是 [endSession] 一被
+  /// 调用就翻页，那一手的公共牌、亮出来的底牌、本手输赢一帧都看不到，只能在
+  /// 总结里对着一个「-3200」猜是怎么输的。所以这时候先挂着 [sessionOver]、
+  /// 留在牌桌上，玩家自己按了「本局总结」才翻。
+  bool get showSummary => _sessionOver && !_summaryPending;
+
+  /// 玩家看完了最后一手，转去对局总结页。
+  void openSummary() {
+    if (!_summaryPending) return;
+    _summaryPending = false;
+    notifyListeners();
+  }
 
   String _endReason = '';
 
@@ -265,15 +286,14 @@ class TableController extends ChangeNotifier {
     final store = sessionStore;
     if (store == null) return;
     // 串行写：动作密集时保证最后落盘的就是最新状态；单次写失败不拖垮后续存档。
-    _writes = _writes.then((_) => store.save(session)).catchError((Object _) {});
+    _writes =
+        _writes.then((_) => store.save(session)).catchError((Object _) {});
     await _writes;
   }
 
   /// 正在进行的那手牌的快照；停在两手之间（或还没发牌）时返回 null。
   Map<String, Object?>? _inProgressSnapshot() =>
-      handStopped || engine.lastHand == null
-          ? null
-          : engine.toSnapshotJson();
+      handStopped || engine.lastHand == null ? null : engine.toSnapshotJson();
 
   /// 每个动作之后落一次盘，让牌局随时可续。
   void _saveProgress() {
@@ -375,9 +395,7 @@ class TableController extends ChangeNotifier {
   /// 就已经不够了（[_awaitingChips]，这时牌还没发）。牌打到一半不算——
   /// 那时候筹码低是正常的（可能已经全下），不该弹补码提示。
   bool get heroBusted =>
-      !_sessionOver &&
-      handStopped &&
-      hero.stack < engine.config.bigBlind;
+      !_sessionOver && handStopped && hero.stack < engine.config.bigBlind;
 
   PlayerState? get _pendingPlayer =>
       handStopped ? null : engine.pendingAction().player;
@@ -440,15 +458,19 @@ class TableController extends ChangeNotifier {
     startHand();
   }
 
-  /// 结束本局：不再发牌、清掉存档，界面转去对局总结。
+  /// 结束本局：不再发牌、清掉存档。
   ///
   /// 两种触发：补码次数用完还把筹码输光（见 [_afterHand]），
   /// 或者玩家自己按了「结束对局」。
-  void endSession({required String reason}) {
+  ///
+  /// [holdOnTable] 为 true 时先不翻页（[showSummary] 仍是 false），牌桌留成
+  /// 刚打完的样子，让玩家看清这一手再自己按「本局总结」。
+  void endSession({required String reason, bool holdOnTable = false}) {
     if (_sessionOver) return;
     _sessionOver = true;
     _endReason = reason;
     _awaitingChips = false;
+    _summaryPending = holdOnTable;
     // 挂着的 AI 回调作废：这局已经收手，别再改筹码、别再落盘。
     _generation++;
     // 结束的局没有「继续上局」可言：存档删掉，大厅不再显示那张卡片。
@@ -490,6 +512,7 @@ class TableController extends ChangeNotifier {
         maxRebuys: maxRebuys,
         duration: DateTime.now().difference(_sessionStart),
         endReason: _endReason.isEmpty ? '主动结束' : _endReason,
+        heroStats: HeroStats.from(_sessionHands.reversed, heroId: heroId),
         hands: List.unmodifiable(_sessionHands),
       );
 
@@ -507,10 +530,7 @@ class TableController extends ChangeNotifier {
     _generation++;
     _recordFinishedHand();
     replayingHand = hand;
-    engine.startHand(
-      holeOverride: hand.holeCards,
-      boardOverride: hand.board,
-    );
+    engine.startHand(holeOverride: hand.holeCards, boardOverride: hand.board);
     notifyListeners();
     unawaited(persistSession());
     _pump();
@@ -555,17 +575,19 @@ class TableController extends ChangeNotifier {
     }
     final gen = _generation;
     final actorId = engine.pendingAction().player.id;
-    unawaited(Future.delayed(aiThinkTime, () {
-      if (gen != _generation || engine.handOver) return;
-      final pending = engine.pendingAction();
-      final ai = _ais[pending.player.id];
-      if (ai == null || pending.player.id != actorId) return;
-      final d = ai.decide(engine, pending.player);
-      engine.apply(pending.player.id, d.type, amount: d.amountTo);
-      notifyListeners();
-      _saveProgress();
-      _pump();
-    }));
+    unawaited(
+      Future.delayed(aiThinkTime, () {
+        if (gen != _generation || engine.handOver) return;
+        final pending = engine.pendingAction();
+        final ai = _ais[pending.player.id];
+        if (ai == null || pending.player.id != actorId) return;
+        final d = ai.decide(engine, pending.player);
+        engine.apply(pending.player.id, d.type, amount: d.amountTo);
+        notifyListeners();
+        _saveProgress();
+        _pump();
+      }),
+    );
   }
 
   void _recordFinishedHand() {
@@ -597,7 +619,9 @@ class TableController extends ChangeNotifier {
   /// 还有补码次数时不自动收——补不补是玩家的选择，结算条上给他按钮。
   void _afterHand() {
     if (_sessionOver || !heroBusted || canRebuy) return;
-    endSession(reason: '筹码输光，补码次数已用完');
+    // 输光的这一手先留在桌上：底牌、公共牌、谁赢了都在牌面上，直接翻去总结
+    // 的话这些一帧都看不到（玩家只能从本局净输赢去猜那把是怎么输的）。
+    endSession(reason: '筹码输光，补码次数已用完', holdOnTable: true);
   }
 
   bool _disposed = false;

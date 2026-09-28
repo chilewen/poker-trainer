@@ -1,4 +1,5 @@
 import '../../../engine/hand_history.dart';
+import 'hero_stats.dart';
 
 /// 一局结束后的总结（纯 Dart，不碰 Flutter，好在用例里直接断言）。
 ///
@@ -20,6 +21,7 @@ class SessionSummary {
     required this.maxRebuys,
     required this.duration,
     required this.endReason,
+    required this.heroStats,
     this.hands = const [],
   });
 
@@ -54,6 +56,12 @@ class SessionSummary {
 
   /// 本局打过的牌（最新在前），给「逐手明细」用。
   final List<HandHistory> hands;
+
+  /// 本局的打法汇总（VPIP / PFR / 3bet / AF / 摊牌胜率）。
+  ///
+  /// 由控制器从本局手牌现算。冷启动恢复的局只带得回恢复之后的手牌，所以
+  /// 这里的样本可能比 [handsPlayed] 少——宁可少算几手，也不拿没记录的牌硬凑。
+  final HeroStats heroStats;
 
   /// 胜率：赢的手数 ÷ 打过的总手数。没打过牌时按 0。
   double get winRate => handsPlayed == 0 ? 0 : handsWon / handsPlayed;

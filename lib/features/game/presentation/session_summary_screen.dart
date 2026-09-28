@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../engine/hand_history.dart';
+import '../domain/hand_grade.dart';
 import '../domain/session_summary.dart';
 import 'chip_format.dart';
 import 'hand_review_sheet.dart';
@@ -37,6 +38,11 @@ class SessionSummaryScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 逐手评估：位置 / 底牌 / 失误一次算好，列表和汇总共用。
+    final grades = gradeHands(summary.hands, heroId: TableController.heroId);
+    // 本局最大的一个底池：一手牌能打多大，比「平均底池」更有印象。
+    final maxPot = grades.values
+        .fold<int>(0, (m, g) => g.analysis.finalPot > m ? g.analysis.finalPot : m);
     return Scaffold(
       backgroundColor: _bg,
       appBar: AppBar(
@@ -55,10 +61,12 @@ class SessionSummaryScreen extends StatelessWidget {
             const SizedBox(height: 12),
             _Facts(summary: summary),
             const SizedBox(height: 12),
-            _Breakdown(summary: summary),
+            _Breakdown(summary: summary, maxPot: maxPot),
+            const SizedBox(height: 12),
+            _PlayStyle(summary: summary, grades: grades),
             if (summary.hands.isNotEmpty) ...[
               const SizedBox(height: 12),
-              _HandList(summary: summary),
+              _HandList(summary: summary, grades: grades),
             ],
             const SizedBox(height: 18),
             Row(
@@ -224,11 +232,14 @@ class _Fact extends StatelessWidget {
   }
 }
 
-/// 拆细：赢输手数、胜率、单手最好/最差。
+/// 拆细：赢输手数、胜率、单手最好/最差、最大底池。
 class _Breakdown extends StatelessWidget {
-  const _Breakdown({required this.summary});
+  const _Breakdown({required this.summary, required this.maxPot});
 
   final SessionSummary summary;
+
+  /// 本局最大的一个底池（有明细时才算得出来）。
+  final int maxPot;
 
   @override
   Widget build(BuildContext context) {
@@ -283,9 +294,118 @@ class _Breakdown extends StatelessWidget {
                         : (summary.netPerHand < 0 ? _red : _grey),
                   ),
                 ),
+                const Spacer(),
+                const Text('最大底池',
+                    style: TextStyle(color: _grey, fontSize: 11.5)),
+                const SizedBox(width: 8),
+                Text(
+                  compactChips(maxPot),
+                  style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white70),
+                ),
+                const SizedBox(width: 8),
               ],
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 本局打法：入池/加注/3bet/AF/摊牌胜率 + 打法失误数。
+///
+/// 和统计页那张表同一口径（都用 [HeroStats]），这里只是按「本局」算。
+class _PlayStyle extends StatelessWidget {
+  const _PlayStyle({required this.summary, required this.grades});
+
+  final SessionSummary summary;
+
+  /// handId → 逐手评估（拿失误用）。
+  final Map<String, HandGrade> grades;
+
+  static String _pct(double v) => '${(v * 100).round()}%';
+
+  @override
+  Widget build(BuildContext context) {
+    final s = summary.heroStats;
+    final mistakes = [
+      for (final g in grades.values) ...g.mistakes,
+    ];
+    final mistakeCount = mistakes.length;
+    // 失误按类型归并：光报「错了几处」没用，得看出是哪一种毛病。
+    final byKind = <MistakeKind, int>{};
+    for (final m in mistakes) {
+      byKind.update(m.kind, (v) => v + 1, ifAbsent: () => 1);
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+      decoration: BoxDecoration(
+        color: _plate,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: 8, bottom: 8),
+            child: Row(
+              children: const [
+                Text('本局打法',
+                    style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600)),
+              ],
+            ),
+          ),
+          Row(
+            children: [
+              _Fact(label: '入池 VPIP', value: _pct(s.vpip)),
+              _Fact(label: '翻前加注 PFR', value: _pct(s.pfr)),
+              _Fact(
+                label: '3bet',
+                value: s.threeBet == null ? '-' : _pct(s.threeBet!),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              _Fact(
+                label: '攻击系数 AF',
+                value: s.aggressionFactor?.toStringAsFixed(1) ?? '-',
+              ),
+              _Fact(
+                label: '摊牌胜率',
+                value: s.showdownWinRate == null
+                    ? '-'
+                    : _pct(s.showdownWinRate!),
+              ),
+              _Fact(
+                label: '打法失误',
+                value: mistakeCount == 0 ? '没有' : '$mistakeCount 处',
+                strong: mistakeCount > 0,
+              ),
+            ],
+          ),
+          if (mistakeCount > 0) ...[
+            const SizedBox(height: 10),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  [
+                    for (final e in byKind.entries) '${e.key.label} ${e.value}',
+                  ].join(' · '),
+                  style: const TextStyle(
+                      color: Color(0xFFE5A96B), fontSize: 11.5, height: 1.4),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -297,9 +417,12 @@ class _Breakdown extends StatelessWidget {
 /// 只列最近 5 手——总结页不是复盘页，够看出「这局是怎么走的」就行，
 /// 想看全部就点「逐手复盘」，那边复用牌桌上的那个复盘面板。
 class _HandList extends StatelessWidget {
-  const _HandList({required this.summary});
+  const _HandList({required this.summary, required this.grades});
 
   final SessionSummary summary;
+
+  /// handId → 逐手评估（打标记用）。
+  final Map<String, HandGrade> grades;
 
   static const _shown = 5;
 
@@ -342,6 +465,7 @@ class _HandList extends StatelessWidget {
               worst: (hands[i].netResult[TableController.heroId] ?? 0) ==
                       summary.worstHandNet &&
                   summary.worstHandNet < 0,
+              grade: grades[hands[i].id],
             ),
           const SizedBox(height: 8),
         ],
@@ -356,12 +480,18 @@ class _HandRow extends StatelessWidget {
     required this.handNo,
     required this.best,
     required this.worst,
+    this.grade,
   });
 
   final HandHistory hand;
   final int handNo;
   final bool best;
   final bool worst;
+
+  /// 这手的评估（位置、失误）；明细算不出来时为 null。
+  final HandGrade? grade;
+
+  List<Mistake> get _mistakes => grade?.mistakes ?? const [];
 
   @override
   Widget build(BuildContext context) {
@@ -374,8 +504,17 @@ class _HandRow extends StatelessWidget {
         children: [
           SizedBox(
             width: 54,
-            child: Text('第 $handNo 手',
-                style: const TextStyle(color: _grey, fontSize: 11.5)),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('第 $handNo 手',
+                    style: const TextStyle(color: _grey, fontSize: 11.5)),
+                // 位置：单手最基础的一条信息，坐在哪儿打这手差很多。
+                if (grade?.analysis.heroPosition != null)
+                  Text(grade!.analysis.heroPosition!,
+                      style: const TextStyle(color: _cyan, fontSize: 10.5)),
+              ],
+            ),
           ),
           Expanded(
             child: Text(
@@ -396,6 +535,21 @@ class _HandRow extends StatelessWidget {
                       fontSize: 10,
                       color: best ? _cyan : _grey,
                       fontWeight: FontWeight.w600)),
+            ),
+            const SizedBox(width: 8),
+          ],
+          if (_mistakes.isNotEmpty) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+              decoration: BoxDecoration(
+                color: _red.withValues(alpha: 0.16),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                '⚠${_mistakes.length}',
+                style: const TextStyle(
+                    fontSize: 10, color: _red, fontWeight: FontWeight.w600),
+              ),
             ),
             const SizedBox(width: 8),
           ],
