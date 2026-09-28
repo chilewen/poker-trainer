@@ -10,10 +10,10 @@ import 'package:poker_trainer/features/game/domain/ai_player.dart';
 import 'package:poker_trainer/features/game/presentation/game_screen.dart';
 import 'package:poker_trainer/features/game/presentation/table_controller.dart';
 
-/// 对局页顶部导航栏：桌名（不带盲注级别）+ 第几手 + 本手输赢。
+/// 对局页顶部导航栏：第几手 + 本手输赢 + 本局输赢。
 ///
-/// 盲注级别在大厅卡片和存档里已经有，导航栏这一行留给「打到第几手、
-/// 本手赢了多少」——抬头就能看见这一手是赚是亏。
+/// 桌名和盲注级别在大厅卡片、存档和总结页里都有，导航栏这一行只留「打到
+/// 第几手、这一手赚了还是亏了」——抬头就能看见。
 void main() {
   const config =
       GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
@@ -33,7 +33,7 @@ void main() {
     return table;
   }
 
-  testWidgets('导航栏：桌名不带盲注，本手输赢跟着筹码走', (tester) async {
+  testWidgets('导航栏：不显示桌名与盲注，本手输赢跟着筹码走', (tester) async {
     // 手机宽度也要放得下：标题过长用省略号收尾，不能溢出报错。
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1;
@@ -41,9 +41,11 @@ void main() {
 
     final table = await pumpTable(tester);
 
-    expect(find.textContaining('实战 单挑 · 第 1 手'), findsOneWidget);
+    expect(find.text('第 1 手'), findsOneWidget);
+    expect(find.textContaining('实战 单挑'), findsNothing,
+        reason: '导航栏里不再显示桌名');
     expect(find.textContaining('50/100'), findsNothing,
-        reason: '导航栏里不再显示盲注级别');
+        reason: '导航栏里也不显示盲注级别');
 
     // 单挑里英雄坐按钮 = 小盲：一开局就投了 50，先显示 -50。
     expect(table.heroHandNet, -50);
@@ -51,16 +53,16 @@ void main() {
     // 本局累计也一起显示（还没打完任何一手，本局 = 本手）。
     expect(find.text('本局 -50'), findsOneWidget);
 
-    // 两个数字要和桌名挤在同一行（不再单独占一条），顺序是桌名在前。
-    final titleRect = tester.getRect(find.textContaining('实战 单挑 · 第 1 手'));
+    // 两个数字要和手数挤在同一行（不再单独占一条），顺序是手数在前。
+    final titleRect = tester.getRect(find.text('第 1 手'));
     final handRect = tester.getRect(find.text('本手 -50'));
     final sessRect = tester.getRect(find.text('本局 -50'));
     expect((handRect.center.dy - titleRect.center.dy).abs(), lessThan(2),
-        reason: '本手要和标题同一行');
+        reason: '本手要和手数同一行');
     expect((sessRect.center.dy - titleRect.center.dy).abs(), lessThan(2),
-        reason: '本局要和标题同一行');
+        reason: '本局要和手数同一行');
     expect(handRect.left, greaterThanOrEqualTo(titleRect.right),
-        reason: '数字排在桌名右边');
+        reason: '数字排在手数右边');
     expect(sessRect.left, greaterThan(handRect.right),
         reason: '本局排在本手右边');
     expect(tester.takeException(), isNull, reason: '这一行不能溢出');
@@ -78,7 +80,7 @@ void main() {
     expect(find.text('本手 -50'), findsOneWidget);
   });
 
-  testWidgets('续局后标题仍然不带盲注', (tester) async {
+  testWidgets('续局后标题仍然不带桌名、不带盲注', (tester) async {
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
@@ -94,7 +96,7 @@ void main() {
     ));
 
     // 冷启动「继续上局」：以前这里直接拿存档里的完整 label 当桌名，
-    // 标题就又变成「实战 9人桌 · 50/100 · 第 1 手」。
+    // 标题就又变成「实战 9人桌 · 50/100 · 第 1 手」。现在标题只有手数。
     table.savedSession = TableSession(
       id: 'table-1',
       label: '实战 9人桌 · 50/100',
@@ -118,11 +120,13 @@ void main() {
       await tester.pump(const Duration(milliseconds: 1));
     }
 
-    expect(find.textContaining('实战 9人桌 · 第 1 手'), findsOneWidget);
+    expect(find.text('第 1 手'), findsOneWidget);
+    expect(find.textContaining('实战 9人桌'), findsNothing,
+        reason: '续局也不把桌名带到导航栏');
     expect(find.textContaining('50/100'), findsNothing);
   });
 
-  testWidgets('窄屏 320：两个数字和桌名挤在同一行也不溢出', (tester) async {
+  testWidgets('窄屏 320：手数和两个数字挤在同一行也不溢出', (tester) async {
     tester.view.physicalSize = const Size(320, 568);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
@@ -132,11 +136,10 @@ void main() {
     expect(find.text('本手 -50'), findsOneWidget);
     expect(find.text('本局 -50'), findsOneWidget);
 
-    final titleRect =
-        tester.getRect(find.textContaining('实战 单挑 · 第 1 手'));
+    final titleRect = tester.getRect(find.text('第 1 手'));
     final handRect = tester.getRect(find.text('本手 -50'));
     expect(handRect.left, greaterThanOrEqualTo(titleRect.right),
-        reason: '窄屏上也要把两个数字摆在桌名右边');
+        reason: '窄屏上也要把两个数字摆在手数右边');
     expect(tester.takeException(), isNull, reason: '窄屏这一行不能溢出');
     expect(table.heroHandNet, -50);
   });
@@ -177,10 +180,10 @@ void main() {
     await tester.pump();
 
     expect(table.heroBusted, isTrue);
-    // 补码条比普通底栏多一行「本局已补码 x/6」——以前底栏高度钉死 124，
+    // 补码条比普通底栏多一行「本局已补码 x/3」——以前底栏高度钉死 124，
     // 这一屏会被顶穿报 RenderFlex overflowed on the bottom（实测 9~17 像素）。
     expect(find.textContaining('补充筹码'), findsOneWidget);
-    expect(find.textContaining('本局已补码 2/6'), findsOneWidget);
+    expect(find.textContaining('本局已补码 2/3'), findsOneWidget);
     // 「本手亏损」不再重复——标题栏右上角已经有本手输赢了（这里是「本局」）。
     expect(find.textContaining('本手亏损'), findsNothing,
         reason: '本手输赢标题栏已经有了，底栏别再说一遍');

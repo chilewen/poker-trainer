@@ -63,7 +63,7 @@ class TableController extends ChangeNotifier {
   ///
   /// 「无限补码」等于没有风险：输多少都补回来，打得再烂也感觉不到疼。
   /// 给个上限，一局才有「打完」这件事，也才有了对局总结可看。
-  static const maxRebuys = 6;
+  static const maxRebuys = 3;
 
   int _rebuys = 0;
 

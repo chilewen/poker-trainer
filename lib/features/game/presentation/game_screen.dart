@@ -120,7 +120,7 @@ class _GameScreenState extends ConsumerState<GameScreen> {
         backgroundColor: _bg,
         foregroundColor: Colors.white70,
         elevation: 0,
-        // 桌名、手数、本手/本局输赢都在这一行里（不再单开一条）。
+        // 手数、本手/本局输赢都在这一行里（桌名不占这一行）。
         title: _TableTitle(table: table),
         actions: [
           IconButton(
@@ -156,7 +156,7 @@ class _GameScreenState extends ConsumerState<GameScreen> {
             Expanded(child: _TableArea(table: table)),
             ConstrainedBox(
               // 底栏只给最小高度、不钉死：补码那一屏比标准底栏高十几像素
-              // （多一行「本局已补码 x/6 次」），钉死 124 会把它顶穿，
+              // （多一行「本局已补码 x/3 次」），钉死 124 会把它顶穿，
               // 报 RenderFlex overflowed on the bottom。
               constraints: const BoxConstraints(minHeight: _bottomBarHeight),
               child: SizedBox(
@@ -985,12 +985,13 @@ class _ActionBarState extends State<_ActionBar> {
   }
 }
 
-/// 顶部标题一行：桌名 · 第几手 + 本手输赢 + 本局输赢。
+/// 顶部标题一行：第几手 + 本手输赢 + 本局输赢。
 ///
-/// 盲注级别不在导航栏里显示（大厅卡片和存档里已经有）。
+/// 桌名和盲注级别都不进这一行——大厅卡片、对局存档和总结页里都有，抬头看牌
+/// 的时候没必要再占一条位置。
 /// 「本手」是这一手牌的输赢（进行中就是实时值，打完就是最终结果，和结算
 /// 条里的「本手赢利/亏损」是同一个数）；「本局」是坐在这张桌上从头到现在
-/// 的累计。数字窄屏也要放得下，所以桌名是弹性宽度（放不下先压缩它）。
+/// 的累计。
 class _TableTitle extends StatelessWidget {
   const _TableTitle({required this.table});
 
@@ -1004,27 +1005,24 @@ class _TableTitle extends StatelessWidget {
         ? (table.handsPlayed < 1 ? 1 : table.handsPlayed)
         : table.handsPlayed + 1;
     final hand = table.heroHandNet;
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Flexible(
-          child: Text(
-            // 还没发牌时只写桌名，发下来就一直带手数（第 1 手也显示，
-            // 以前要等第一手打完才冒出手数，标题会突然变长）。
-            table.lastHand == null
-                ? table.tableName
-                : '${table.tableName} · 第 $handNo 手',
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 15),
-          ),
-        ),
-        const SizedBox(width: 8),
-        if (hand != null) ...[
-          _NetChip(label: '本手', value: hand),
-          const SizedBox(width: 4),
+    // 手数 + 两个药丸挤在导航栏里，窄屏（320）或数字很长时会放不下；包一层
+    // FittedBox 让它按需等比缩小，而不是溢出报 RenderFlex（以前是靠桌名
+    // 那个弹性宽度把这一行撑住的，桌名去掉后就没了）。
+    return FittedBox(
+      fit: BoxFit.scaleDown,
+      alignment: Alignment.centerLeft,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('第 $handNo 手', style: const TextStyle(fontSize: 15)),
+          const SizedBox(width: 8),
+          if (hand != null) ...[
+            _NetChip(label: '本手', value: hand),
+            const SizedBox(width: 4),
+          ],
+          _NetChip(label: '本局', value: table.heroSessionNet),
         ],
-        _NetChip(label: '本局', value: table.heroSessionNet),
-      ],
+      ),
     );
   }
 }

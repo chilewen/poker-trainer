@@ -60,7 +60,7 @@ void main() {
         bestHandNet: bestHandNet,
         worstHandNet: worstHandNet,
         rebuys: rebuys,
-        maxRebuys: 6,
+        maxRebuys: 3,
         duration: const Duration(minutes: 42, seconds: 5),
         endReason: endReason,
         hands:
@@ -96,7 +96,7 @@ void main() {
     // 四格事实。
     expect(find.text('11 手'), findsOneWidget);
     expect(find.text('42 分 5 秒'), findsOneWidget);
-    expect(find.text('2/6 次'), findsOneWidget);
+    expect(find.text('2/3 次'), findsOneWidget);
     expect(find.text('主动结束'), findsOneWidget);
     // 拆细。
     expect(find.text('5 手'), findsOneWidget);
@@ -128,8 +128,8 @@ void main() {
 
   testWidgets('总结页：补码用尽、没打完这两种收尾也说得清楚', (tester) async {
     // 补码用尽：补码那一格要报满，结束原因是输光。
-    await pump(tester, sample(rebuys: 6, endReason: '筹码输光，补码次数已用完'));
-    expect(find.text('6/6 次'), findsOneWidget);
+    await pump(tester, sample(rebuys: 3, endReason: '筹码输光，补码次数已用完'));
+    expect(find.text('3/3 次'), findsOneWidget);
     expect(find.text('筹码输光，补码次数已用完'), findsOneWidget);
 
     // 一手没打完就收手：别硬说赢了还是输了，也别列空明细。

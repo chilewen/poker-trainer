@@ -6649,7 +6649,7 @@ void main() {
         reason: '上一手已经结算，不该重开同一手');
   }, fast: true);
 
-  t('对局标题：桌名不带盲注，本手输赢跟着筹码走', () {
+  t('对局数据：桌名不带盲注，本手输赢跟着筹码走', () {
     final t = TableController(random: Random(7), aiThinkTime: Duration.zero);
     t.startRealTable(
       name: '实战 单挑',
@@ -6657,7 +6657,8 @@ void main() {
           startingStack: 10000, smallBlind: 50, bigBlind: 100),
       playerCount: 2,
     );
-    // 大厅卡片和存档继续带盲注级别，导航栏标题用不带盲注的桌名。
+    // 大厅卡片和存档继续带盲注级别；不带盲注的 tableName 留着给存档/总结用
+    // （导航栏已经不显示桌名了，只剩手数和本手/本局输赢）。
     expect(t.tableLabel, '实战 单挑 · 50/100');
     expect(t.tableName, '实战 单挑');
     // 单挑：英雄坐按钮 = 小盲，一开局就投了 50。
@@ -6702,11 +6703,11 @@ void main() {
     ));
     await cold.loadSession();
     expect(cold.resumeSession(), isTrue);
-    expect(cold.tableName, '实战 9人桌', reason: '续局后标题还是不带盲注');
+    expect(cold.tableName, '实战 9人桌', reason: '续局后桌名还是不带盲注');
     expect(cold.tableLabel, '实战 9人桌 · 50/100',
         reason: '大厅卡片仍然要能看到盲注');
 
-    // 老存档没有 'name' 字段：从 label 里把盲注后缀剪掉，别让标题带上 50/100。
+    // 老存档没有 'name' 字段：从 label 里把盲注后缀剪掉，别让桌名带上 50/100。
     final legacy = Map<String, Object?>.from(raw)..remove('name');
     await file.writeAsString(jsonEncode(legacy));
     final legacyCold = tmp.watch(TableController(
@@ -6767,7 +6768,7 @@ void main() {
     expect(g.topUp('hero'), 0);
   }, fast: true);
 
-  t('对局规则：补码最多 6 次，用完再输光这局直接结束', () async {
+  t('对局规则：补码最多 3 次，用完再输光这局直接结束', () async {
     final tmp = TempSessionDir('poker_rebuy_cap');
     const config =
         GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
@@ -6798,7 +6799,7 @@ void main() {
           reason: '补满至起始买入');
     }
 
-    // 第 7 次输光：没得补了——这局直接结束，不再等玩家点。
+    // 补码次数用完之后再输光：没得补了——这局直接结束，不再等玩家点。
     expect(t.canRebuy, isFalse);
     t.engine.handOver = true;
     t.hero.stack = 0;
