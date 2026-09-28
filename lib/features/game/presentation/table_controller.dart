@@ -128,6 +128,25 @@ class TableController extends ChangeNotifier {
   int _worstHandNet = 0;
   final List<HandHistory> _sessionHands = [];
 
+  /// 本局打过的手牌（最新在前）。
+  ///
+  /// 跟 [history] 不是一回事：那份是全量历史，换桌、重开一局都不清空（「复盘」
+  /// 和「数据」两个 tab 要的正是它）；本局的账一局一清。
+  List<HandHistory> get sessionHands => List.unmodifiable(_sessionHands);
+
+  /// 「行动路线」面板要列的手牌：本局打过的，加上当前这一手（如果还没记进去）。
+  ///
+  /// 取本局的账而不是 [history]：全量历史拿去复盘，新开一局会把上一局甚至上几局
+  /// 的牌一起倒出来，看着就像是这局打的。
+  List<HandHistory> get reviewHands {
+    final current = engine.lastHand;
+    return List.unmodifiable(<HandHistory>[
+      if (current != null && !_sessionHands.any((h) => h.id == current.id))
+        current,
+      ..._sessionHands,
+    ]);
+  }
+
   void _setupPlayers(List<AiStyle> opponentStyles) {
     _ais.clear();
     engine.addPlayer(heroId, '我');

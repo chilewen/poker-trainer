@@ -43,13 +43,14 @@ void main() {
     int potAfter, {
     Street street = Street.preflop,
     int amount = 0,
-  }) => ActionRecord(
-    street: street,
-    actorId: id,
-    type: type,
-    amount: amount,
-    potAfter: potAfter,
-  );
+  }) =>
+      ActionRecord(
+        street: street,
+        actorId: id,
+        type: type,
+        amount: amount,
+        potAfter: potAfter,
+      );
 
   /// 一手打错的牌：单挑坐庄，翻牌拿 76s 在中不到的牌面上跟了一个重注
   /// ——「跟注没有赔率」。总结页该给它挂 ⚠ 并按类型归并。
@@ -92,23 +93,24 @@ void main() {
     int rebuys = 2,
     String endReason = '主动结束',
     List<HandHistory>? hands,
-  }) => SessionSummary(
-    tableName: '实战 6人桌',
-    label: '实战 6人桌 · 50/100',
-    handsPlayed: handsPlayed,
-    handsWon: handsWon,
-    handsLost: handsLost,
-    handsTied: handsTied,
-    heroNet: heroNet,
-    bestHandNet: bestHandNet,
-    worstHandNet: worstHandNet,
-    rebuys: rebuys,
-    maxRebuys: 3,
-    duration: const Duration(minutes: 42, seconds: 5),
-    endReason: endReason,
-    heroStats: HeroStats.from(const [], heroId: 'hero'),
-    hands: hands ?? [hand('h3', -4200), hand('h2', 9000), hand('h1', 300)],
-  );
+  }) =>
+      SessionSummary(
+        tableName: '实战 6人桌',
+        label: '实战 6人桌 · 50/100',
+        handsPlayed: handsPlayed,
+        handsWon: handsWon,
+        handsLost: handsLost,
+        handsTied: handsTied,
+        heroNet: heroNet,
+        bestHandNet: bestHandNet,
+        worstHandNet: worstHandNet,
+        rebuys: rebuys,
+        maxRebuys: 3,
+        duration: const Duration(minutes: 42, seconds: 5),
+        endReason: endReason,
+        heroStats: HeroStats.from(const [], heroId: 'hero'),
+        hands: hands ?? [hand('h3', -4200), hand('h2', 9000), hand('h1', 300)],
+      );
 
   Future<void> pump(
     WidgetTester tester,
@@ -404,5 +406,31 @@ void main() {
     await advance(tester);
     expect(find.byType(SessionSummaryScreen), findsOneWidget);
     expect(find.text('对局总结'), findsOneWidget);
+  });
+
+  testWidgets('行动路线：新开一局只列本局的牌，不把上一局的倒出来', (tester) async {
+    final table = await pumpTable(tester);
+    table.heroAct(ActionType.fold);
+    await advance(tester);
+    expect(table.history.length, 1);
+    final firstHandId = table.lastHand!.id;
+
+    // 重开一局：全量历史留着（「复盘」「数据」两个 tab 用的就是它），
+    // 但牌桌右上角那个「行动路线」只该看本局。
+    table.startRealTable(name: '实战 单挑', config: _config, playerCount: 2);
+    expect(table.sessionHands, isEmpty, reason: '本局的账一局一清');
+    expect(table.history.length, 1, reason: '全量历史不清空');
+    expect(table.reviewHands.length, 1, reason: '行动路线只该有刚发的这一手');
+    await advance(tester);
+
+    await tester.tap(find.byTooltip('行动路线'));
+    await tester.pumpAndSettle();
+    expect(find.text('手牌回顾'), findsOneWidget);
+    expect(find.byKey(ValueKey('hand-$firstHandId')), findsNothing,
+        reason: '上一局的牌不该出现在这一局的复盘里');
+    expect(find.byWidgetPredicate((w) {
+      final key = w.key;
+      return key is ValueKey<String> && key.value.startsWith('hand-');
+    }), findsOneWidget, reason: '本局只有刚发的这一手');
   });
 }

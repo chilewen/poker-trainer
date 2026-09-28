@@ -116,7 +116,6 @@ class _GameScreenState extends ConsumerState<GameScreen> {
       _started = true;
       WidgetsBinding.instance.addPostFrameCallback((_) => table.startHand());
     }
-    final g = table.engine;
 
     return Scaffold(
       backgroundColor: _bg,
@@ -138,20 +137,11 @@ class _GameScreenState extends ConsumerState<GameScreen> {
           IconButton(
             tooltip: '行动路线',
             icon: const Icon(Icons.receipt_long_outlined, size: 20),
-            onPressed: g.lastHand == null && table.history.isEmpty
+            // 只列本局的牌：全量历史在「复盘」tab 里，倒进这里会串局。
+            onPressed: table.reviewHands.isEmpty
                 ? null
-                : () {
-                    // 当前手（进行或刚结束）放最前，其后是已完成的历史。
-                    final current = g.lastHand;
-                    final hands = <HandHistory>[
-                      if (current != null &&
-                          (table.history.isEmpty ||
-                              table.history.first.id != current.id))
-                        current,
-                      ...table.history,
-                    ];
-                    showHandReviewSheet(context, hands, TableController.heroId);
-                  },
+                : () => showHandReviewSheet(
+                    context, table.reviewHands, TableController.heroId),
           ),
         ],
       ),

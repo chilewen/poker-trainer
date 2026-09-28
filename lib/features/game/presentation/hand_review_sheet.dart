@@ -95,8 +95,11 @@ class _HandReviewSheet extends StatelessWidget {
                   controller: controller,
                   padding: const EdgeInsets.fromLTRB(12, 4, 12, 24),
                   itemCount: hands.length,
-                  itemBuilder: (context, index) =>
-                      _HandTile(hand: hands[index], heroId: heroId),
+                  itemBuilder: (context, index) => _HandTile(
+                    key: ValueKey('hand-${hands[index].id}'),
+                    hand: hands[index],
+                    heroId: heroId,
+                  ),
                 ),
         ),
       ],
@@ -106,7 +109,7 @@ class _HandReviewSheet extends StatelessWidget {
 
 /// 单手牌的可展开卡片：收起显示盈亏与牌面，展开显示各人行动路线。
 class _HandTile extends StatefulWidget {
-  const _HandTile({required this.hand, required this.heroId});
+  const _HandTile({super.key, required this.hand, required this.heroId});
 
   final HandHistory hand;
   final String heroId;
