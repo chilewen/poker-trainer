@@ -13,6 +13,7 @@ import '../domain/ai_player.dart';
 import 'chip_format.dart';
 import '../domain/table_position.dart';
 import 'hand_review_sheet.dart';
+import 'mistake_alert_dialog.dart';
 import 'session_summary_screen.dart';
 import 'table_controller.dart';
 
@@ -97,9 +98,31 @@ class GameScreen extends ConsumerStatefulWidget {
 class _GameScreenState extends ConsumerState<GameScreen> {
   bool _started = false;
 
+  /// 提醒弹窗正开着。一手里 `notifyListeners` 会被叫好几次（结算、落盘各一次），
+  /// 不挡一下同一帧就会叠出两层一样的弹窗。
+  bool _alertShowing = false;
+
   @override
   Widget build(BuildContext context) {
     final table = ref.watch(tableProvider);
+
+    // 刚打完的那一手打错了（输了 + 有失误）：当场弹一句，别等总结。
+    ref.listen(tableProvider, (_, next) {
+      if (next.pendingAlert == null) return;
+      // 监听回调可能落在构建期，弹窗得等这一帧画完。
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _alertShowing) return;
+        final alert = ref.read(tableProvider).pendingAlert;
+        if (alert == null) return;
+        _alertShowing = true;
+        showMistakeAlertDialog(context, alert).then((_) {
+          _alertShowing = false;
+          if (!mounted) return;
+          ref.read(tableProvider).dismissAlert();
+        });
+      });
+    });
+
     // 这局收了（补码用尽输光、或玩家自己结束）：整页换成对局总结。
     //
     // 看的是 showSummary 而不是 sessionOver：输光的那一手会先在牌桌上停一下

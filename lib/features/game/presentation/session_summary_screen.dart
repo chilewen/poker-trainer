@@ -5,6 +5,7 @@ import '../domain/hand_grade.dart';
 import '../domain/session_summary.dart';
 import 'chip_format.dart';
 import 'hand_review_sheet.dart';
+import 'mistake_alert_dialog.dart';
 import 'table_controller.dart';
 
 // 和牌桌页同一套深色底：从牌桌直接切过来，不该像换了个 App。
@@ -396,12 +397,23 @@ class _PlayStyle extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 8),
               child: Align(
                 alignment: Alignment.centerLeft,
-                child: Text(
-                  [
-                    for (final e in byKind.entries) '${e.key.label} ${e.value}',
-                  ].join(' · '),
-                  style: const TextStyle(
-                      color: Color(0xFFE5A96B), fontSize: 11.5, height: 1.4),
+                // 点一下看这几类失误分别该怎么改：光报个数玩家不知道该动哪儿。
+                child: InkWell(
+                  onTap: () => showMistakeKindsDialog(context, byKind.keys),
+                  borderRadius: BorderRadius.circular(6),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: Text(
+                      '${[
+                        for (final e in byKind.entries)
+                          '${e.key.label} ${e.value}',
+                      ].join(' · ')}  ›',
+                      style: const TextStyle(
+                          color: Color(0xFFE5A96B),
+                          fontSize: 11.5,
+                          height: 1.4),
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -539,16 +551,28 @@ class _HandRow extends StatelessWidget {
             const SizedBox(width: 8),
           ],
           if (_mistakes.isNotEmpty) ...[
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-              decoration: BoxDecoration(
-                color: _red.withValues(alpha: 0.16),
+            // 点徽标直接看这手哪儿打错了——不点开的话「⚠2」只是个数字，
+            // 玩家还得自己翻到那一手去找。
+            Tooltip(
+              message: '看这手错在哪',
+              child: InkWell(
+                onTap: grade == null
+                    ? null
+                    : () => showHandMistakesDialog(context, grade!),
                 borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                '⚠${_mistakes.length}',
-                style: const TextStyle(
-                    fontSize: 10, color: _red, fontWeight: FontWeight.w600),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: _red.withValues(alpha: 0.16),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '⚠${_mistakes.length}',
+                    style: const TextStyle(
+                        fontSize: 10, color: _red, fontWeight: FontWeight.w600),
+                  ),
+                ),
               ),
             ),
             const SizedBox(width: 8),

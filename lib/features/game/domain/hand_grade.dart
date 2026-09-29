@@ -9,16 +9,38 @@ import 'hand_strength.dart';
 import 'preflop_ranges.dart';
 
 /// 失误的类型。文案是给玩家看的，不是给日志看的——复盘要能一眼读懂。
+///
+/// [detail] 说的是「刚才发生了什么」，[advice] 说的是「下次怎么打」。牌桌上那个
+/// 提醒弹窗两样都要：只讲错了什么，玩家看完还是不知道该怎么改。
 enum MistakeKind {
-  preflopTooLoose('翻前入池过宽', '拿着开池范围外的牌主动投钱'),
-  preflopTooTight('翻前弃牌过紧', '能开池的牌没人加注却先弃了'),
-  badCall('跟注没有赔率', '赔率不够、又没听牌，还是跟了'),
-  badFold('弃牌太紧', '强牌面对便宜的下注却弃了');
+  preflopTooLoose(
+    '翻前入池过宽',
+    '拿着开池范围外的牌主动投钱',
+    '这类牌先扔掉。位置越靠后开池可以越宽，但宽也得是翻后接得上的牌。',
+  ),
+  preflopTooTight(
+    '翻前弃牌过紧',
+    '能开池的牌没人加注却先弃了',
+    '前面没人加注时这种牌可以直接开池。一直弃等于把盲注白送出去。',
+  ),
+  badCall(
+    '跟注没有赔率',
+    '赔率不够、又没听牌，还是跟了',
+    '跟之前先问一句：我这手牌靠什么赢？没成牌又没听牌，赔率不够就该弃。',
+  ),
+  badFold(
+    '弃牌太紧',
+    '强牌面对便宜的下注却弃了',
+    '该跟就得跟。牌已经成了、价格又便宜，弃掉是最亏的一种打法。',
+  );
 
-  const MistakeKind(this.label, this.detail);
+  const MistakeKind(this.label, this.detail, this.advice);
 
   final String label;
   final String detail;
+
+  /// 一句话建议：这手之后该怎么改。
+  final String advice;
 }
 
 /// 一次失误：落在哪条街、当时是第几个动作（对回历史里的下标）。
@@ -235,8 +257,8 @@ class HandGrade {
       final need = d.potOdds;
       final pct = (need * 100).round();
       if (d.type == ActionType.call) {
-        final weakNoDraw = reading.tier.index <= HandTier.weak.index &&
-            !reading.hasDraw;
+        final weakNoDraw =
+            reading.tier.index <= HandTier.weak.index && !reading.hasDraw;
         if (weakNoDraw && need >= steepPotOdds) {
           out.add(Mistake(
             kind: MistakeKind.badCall,
@@ -276,6 +298,54 @@ class HandGrade {
   static String _holeText(List<Card> hole) =>
       hole.map((c) => c.pretty).join(' ');
 }
+
+/// 牌桌上值得打断一下的失误：这手输了，而且里面有失误。
+class MistakeAlert {
+  const MistakeAlert({
+    required this.hand,
+    required this.lost,
+    required this.mistake,
+    required this.others,
+  });
+
+  final HandHistory hand;
+
+  /// 英雄这一手净输了多少（正数，界面上直接显示）。
+  final int lost;
+
+  /// 最该说的一条失误。
+  final Mistake mistake;
+
+  /// 同一手里其余的失误条数（0 表示只有这一条）。
+  final int others;
+}
+
+/// 这手打完要不要在场面上提醒一下：**输了 + 有失误**。
+///
+/// 赢着也弹是噪音，输但没打错（被翻盘、被诈唬）更不该弹——那会把「结果差」和
+/// 「打得差」混成一件事。一次只说最严重的一条（翻后把该跟/该弃做反了 > 翻前
+/// 范围漏），其余只报个数：一次说一件事才记得住。
+MistakeAlert? mistakeAlertOf(HandHistory hand, {required String heroId}) {
+  final net = hand.netResult[heroId] ?? 0;
+  if (net >= 0) return null;
+  final grade = HandGrade.of(HandAnalysis.of(hand, heroId: heroId));
+  if (grade.mistakes.isEmpty) return null;
+  final ranked = [...grade.mistakes]
+    ..sort((a, b) => _weight(b.kind).compareTo(_weight(a.kind)));
+  return MistakeAlert(
+    hand: hand,
+    lost: -net,
+    mistake: ranked.first,
+    others: ranked.length - 1,
+  );
+}
+
+/// 排序用的轻重：翻后把该跟/该弃做反了是当场丢钱，比翻前的范围漏更该先说。
+int _weight(MistakeKind kind) => switch (kind) {
+      MistakeKind.badCall || MistakeKind.badFold => 2,
+      MistakeKind.preflopTooLoose => 1,
+      MistakeKind.preflopTooTight => 0,
+    };
 
 /// 逐手评估（handId → [HandGrade]），给总结页用。
 ///

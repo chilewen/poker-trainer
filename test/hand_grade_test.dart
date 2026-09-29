@@ -12,8 +12,7 @@ import 'package:poker_trainer/features/game/domain/hand_grade.dart';
 void main() {
   const hero = 'hero';
 
-  List<Card> cards(String text) =>
-      text.split(' ').map(Card.parse).toList();
+  List<Card> cards(String text) => text.split(' ').map(Card.parse).toList();
 
   /// seats 按开局顺序给；heroId 固定为 `hero`。
   HandHistory hand({
@@ -134,7 +133,8 @@ void main() {
       ],
     ));
     expect(g.inOpenRange, isTrue, reason: 'ATo 在前位开池范围里');
-    expect(g.mistakes.map((m) => m.kind).toList(), [MistakeKind.preflopTooTight]);
+    expect(
+        g.mistakes.map((m) => m.kind).toList(), [MistakeKind.preflopTooTight]);
   });
 
   test('失误：按钮拿 72o 进池算太松', () {
@@ -151,7 +151,8 @@ void main() {
       ],
     ));
     expect(g.inOpenRange, isFalse);
-    expect(g.mistakes.map((m) => m.kind).toList(), [MistakeKind.preflopTooLoose]);
+    expect(
+        g.mistakes.map((m) => m.kind).toList(), [MistakeKind.preflopTooLoose]);
   });
 
   test('失误：翻后拿空气牌跟重注 → 跟注没赔率', () {
@@ -164,28 +165,88 @@ void main() {
 
   test('失误：成牌很强却面对便宜下注弃牌 → 弃牌太紧', () {
     final g = grade(setHand());
-    final fold = g.analysis.heroFacingBet
-        .firstWhere((d) => d.street == Street.flop);
+    final fold =
+        g.analysis.heroFacingBet.firstWhere((d) => d.street == Street.flop);
     expect(fold.potOdds, lessThanOrEqualTo(HandGrade.cheapPotOdds));
     expect(g.mistakes.map((m) => m.kind).toList(), [MistakeKind.badFold]);
   });
 
   test('EV：跟注的即时 EV 有正负，且同种子可复现', () {
     final air = grade(airHand());
-    final airCall = air.analysis.heroFacingBet
-        .firstWhere((d) => d.street == Street.flop);
+    final airCall =
+        air.analysis.heroFacingBet.firstWhere((d) => d.street == Street.flop);
     final airEv = air.callEv(airCall);
     expect(airEv, isNotNull);
     expect(airEv, lessThan(0), reason: '空气牌跟半个池是负 EV');
 
     final set = grade(setHand());
-    final setCall = set.analysis.heroFacingBet
-        .firstWhere((d) => d.street == Street.flop);
+    final setCall =
+        set.analysis.heroFacingBet.firstWhere((d) => d.street == Street.flop);
     final setEv = set.callEv(setCall);
     expect(setEv, isNotNull);
     expect(setEv, greaterThan(0), reason: '暗三面对 1/6 池，跟注是大正 EV');
     expect(set.callEv(setCall), closeTo(setEv!, 1e-12),
         reason: '同一个决策点算几遍必须是同一个数');
+  });
+
+  // ---------- 牌桌上的失误提醒：输了 + 打错了才弹 ----------
+
+  test('提醒：输了又打错 → 弹，金额和失误都对得上', () {
+    final h = airHand()..netResult['hero'] = -600;
+    final alert = mistakeAlertOf(h, heroId: hero);
+    expect(alert, isNotNull);
+    expect(alert!.lost, 600, reason: '显示的是英雄这手净输多少');
+    expect(alert.mistake.kind, MistakeKind.badCall);
+    expect(alert.others, 0);
+  });
+
+  test('提醒：同一手赢了就不弹——结果好不等于打得好', () {
+    final h = airHand()..netResult['hero'] = 600;
+    expect(mistakeAlertOf(h, heroId: hero), isNull);
+  });
+
+  test('提醒：输了但没打错也不弹——那是运气，不是打法问题', () {
+    // 按钮位拿 72o 直接弃掉是对的，只是先投了小盲。
+    final h = hand(
+      seats: ['hero', 'p1'],
+      heroHole: cards('7s 2d'),
+      actions: [
+        bet('hero', 50, 50),
+        bet('p1', 100, 150),
+        act('hero', ActionType.fold, 150),
+      ],
+    )..netResult['hero'] = -50;
+    expect(grade(h).mistakes, isEmpty, reason: '弃掉 72o 不算失误');
+    expect(mistakeAlertOf(h, heroId: hero), isNull);
+  });
+
+  test('提醒：一手里有多条时挑最重的说，其余只报个数', () {
+    // 按钮位拿 72o 先加注（翻前太松），翻牌又是空气牌跟重注（跟注没赔率）。
+    final h = hand(
+      seats: ['hero', 'p1', 'p2', 'p3', 'p4', 'p5'],
+      heroHole: cards('7s 2d'),
+      board: cards('Kh Qd 9c'),
+      actions: [
+        bet('p1', 50, 50),
+        bet('p2', 100, 150),
+        act('p3', ActionType.fold, 150),
+        act('p4', ActionType.fold, 150),
+        act('p5', ActionType.fold, 150),
+        act('hero', ActionType.raise, 450, amount: 300),
+        act('p2', ActionType.call, 750),
+        act('p2', ActionType.check, 750, street: Street.flop),
+        act('hero', ActionType.check, 750, street: Street.flop),
+        act('p2', ActionType.bet, 1350, street: Street.flop, amount: 600),
+        act('hero', ActionType.call, 1950, street: Street.flop),
+      ],
+    )..netResult['hero'] = -1050;
+
+    final kinds = grade(h).mistakes.map((m) => m.kind).toSet();
+    expect(kinds, {MistakeKind.preflopTooLoose, MistakeKind.badCall});
+    final alert = mistakeAlertOf(h, heroId: hero);
+    expect(alert, isNotNull);
+    expect(alert!.mistake.kind, MistakeKind.badCall, reason: '翻后做反了比翻前范围漏更该先说');
+    expect(alert.others, 1);
   });
 
   test('翻前胜率：固定种子可复现，AA 远高于 72o', () {

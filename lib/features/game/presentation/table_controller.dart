@@ -10,6 +10,7 @@ import '../../history/data/hand_history_store.dart';
 import '../data/table_session.dart';
 import '../data/table_session_store.dart';
 import '../domain/ai_player.dart';
+import '../domain/hand_grade.dart';
 import '../domain/hero_stats.dart';
 import '../domain/session_summary.dart';
 import '../domain/table_restore.dart';
@@ -94,6 +95,19 @@ class TableController extends ChangeNotifier {
   /// 总结里对着一个「-3200」猜是怎么输的。所以这时候先挂着 [sessionOver]、
   /// 留在牌桌上，玩家自己按了「本局总结」才翻。
   bool get showSummary => _sessionOver && !_summaryPending;
+
+  /// 刚打完的那一手打错了、要提醒玩家一下（还没弹/还没关掉）。
+  MistakeAlert? _pendingAlert;
+
+  /// 牌桌上等着弹的失误提醒；没有就是 null。
+  MistakeAlert? get pendingAlert => _pendingAlert;
+
+  /// 玩家看完了提醒，接着打。
+  void dismissAlert() {
+    if (_pendingAlert == null) return;
+    _pendingAlert = null;
+    notifyListeners();
+  }
 
   /// 玩家看完了最后一手，转去对局总结页。
   void openSummary() {
@@ -193,6 +207,7 @@ class TableController extends ChangeNotifier {
     _bestHandNet = 0;
     _worstHandNet = 0;
     _sessionHands.clear();
+    _pendingAlert = null;
   }
 
   /// 实战开桌：按盲注级别与人数重建一桌（筹码重置），并立即发牌。
@@ -629,6 +644,10 @@ class TableController extends ChangeNotifier {
       _handsTied++;
     }
     history.insert(0, h);
+    // 输了又打错的这一手，当场说一句：等这局打完再翻总结，多半已经忘了当时
+    // 是怎么想的。赢了不提醒、输但没打错也不提醒（那是运气，不是打法问题）。
+    final alert = mistakeAlertOf(h, heroId: heroId);
+    if (alert != null) _pendingAlert = alert;
     unawaited(store?.save(h));
     unawaited(persistSession());
   }

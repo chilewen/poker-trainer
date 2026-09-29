@@ -505,7 +505,9 @@ class _HandDetail extends StatelessWidget {
     );
   }
 
-  /// 失误清单：这手哪里打错了，一句话一条。
+  /// 失误清单：这手哪里打错了、下次怎么打，一条失误两行。
+  ///
+  /// 光说「错在哪」玩家看完还是会犯；紧跟着给一句改法，复盘才算有用。
   Widget _mistakeList(HandGrade g) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(10, 4, 10, 2),
@@ -514,11 +516,27 @@ class _HandDetail extends StatelessWidget {
         children: [
           for (final m in g.mistakes)
             Padding(
-              padding: const EdgeInsets.only(bottom: 3),
-              child: Text(
-                '⚠ ${m.kind.label}：${m.detail}',
-                style: const TextStyle(
-                    color: Color(0xFFE5A96B), fontSize: 11.5, height: 1.4),
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '⚠ ${m.kind.label}：${m.detail}',
+                    style: const TextStyle(
+                        color: Color(0xFFE5A96B), fontSize: 11.5, height: 1.4),
+                  ),
+                  const SizedBox(height: 2),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 10),
+                    child: Text(
+                      '↳ 下次这样打：${m.kind.advice}',
+                      style: const TextStyle(
+                          color: Color(0xFF8FD8D5),
+                          fontSize: 11.5,
+                          height: 1.4),
+                    ),
+                  ),
+                ],
               ),
             ),
         ],

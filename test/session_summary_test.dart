@@ -7,9 +7,11 @@ import 'package:poker_trainer/engine/card.dart' as poker;
 import 'package:poker_trainer/engine/game.dart';
 import 'package:poker_trainer/engine/hand_history.dart';
 import 'package:poker_trainer/engine/types.dart';
+import 'package:poker_trainer/features/game/domain/hand_grade.dart';
 import 'package:poker_trainer/features/game/domain/hero_stats.dart';
 import 'package:poker_trainer/features/game/domain/session_summary.dart';
 import 'package:poker_trainer/features/game/presentation/game_screen.dart';
+import 'package:poker_trainer/features/game/presentation/hand_review_sheet.dart';
 import 'package:poker_trainer/features/game/presentation/session_summary_screen.dart';
 import 'package:poker_trainer/features/game/presentation/table_controller.dart';
 
@@ -203,6 +205,65 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('总结页：点 ⚠ 看这手错在哪，点类型汇总看这几类怎么改', (tester) async {
+    await pump(tester, sample(hands: [mistakeHand(), hand('h1', 300)]));
+
+    // ⚠ 徽标：这手的两条信息——当时多贵、下次怎么打。
+    await tester.tap(find.text('⚠1'));
+    await tester.pumpAndSettle();
+    expect(find.text('这手哪里打错了'), findsOneWidget);
+    expect(find.text('${Street.flop.label} · ${MistakeKind.badCall.label}'),
+        findsOneWidget);
+    expect(find.text(MistakeKind.badCall.advice), findsOneWidget);
+    await tester.tap(find.text('知道了'));
+    await tester.pumpAndSettle();
+    expect(find.text('这手哪里打错了'), findsNothing);
+
+    // 类型汇总那一行：光报「跟注没有赔率 1」没用，点开告诉玩家怎么改。
+    await tester.tap(find.textContaining('跟注没有赔率 1'));
+    await tester.pumpAndSettle();
+    expect(find.text('这几类失误怎么改'), findsOneWidget);
+    expect(find.text(MistakeKind.badCall.advice), findsOneWidget);
+    await tester.tap(find.text('知道了'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('复盘面板：展开一手，失误底下就跟着「下次这样打」', (tester) async {
+    tester.view.physicalSize = const Size(400, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final bad = mistakeHand();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData(splashFactory: InkRipple.splashFactory),
+        home: Scaffold(
+          body: Builder(
+            builder: (context) => Center(
+              child: TextButton(
+                onPressed: () => showHandReviewSheet(context, [bad], 'hero'),
+                child: const Text('打开复盘'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('打开复盘'));
+    await tester.pumpAndSettle();
+    expect(find.text('手牌回顾'), findsOneWidget);
+
+    // 展开这一手：失误那一条下面紧跟着改法。
+    await tester.tap(find.text('-250'));
+    await tester.pumpAndSettle();
+    expect(
+        find.textContaining('⚠ ${MistakeKind.badCall.label}'), findsOneWidget);
+    expect(find.textContaining('下次这样打：${MistakeKind.badCall.advice}'),
+        findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('总结页：窄屏上打法那一块也不溢出', (tester) async {
     tester.view.physicalSize = const Size(360, 800);
     tester.view.devicePixelRatio = 1;
@@ -265,7 +326,8 @@ void main() {
   // ---------- 对局页与总结页的联动 ----------
 
   /// 起一张真的牌桌（不落盘：这一节只关心页面怎么切）。
-  Future<TableController> pumpTable(WidgetTester tester) async {
+  Future<TableController> pumpTable(WidgetTester tester,
+      {int playerCount = 2}) async {
     // 总结页是整屏列表，窗口给高一点，免得下面的按钮还没建出来。
     tester.view.physicalSize = const Size(400, 1600);
     tester.view.devicePixelRatio = 1;
@@ -284,7 +346,11 @@ void main() {
         ),
       ),
     );
-    table.startRealTable(name: '实战 单挑', config: _config, playerCount: 2);
+    table.startRealTable(
+      name: playerCount == 2 ? '实战 单挑' : '实战 $playerCount人桌',
+      config: _config,
+      playerCount: playerCount,
+    );
     await tester.pump();
     return table;
   }
@@ -432,5 +498,61 @@ void main() {
       final key = w.key;
       return key is ValueKey<String> && key.value.startsWith('hand-');
     }), findsOneWidget, reason: '本局只有刚发的这一手');
+  });
+  testWidgets('输着又打错的一手：当场弹提醒说清原因和建议，点「继续」接着打', (tester) async {
+    final table = await pumpTable(tester, playerCount: 6);
+
+    // 钉死英雄的底牌是 72o（后位开池范围之外），再按脚本走完翻前：前面的对手
+    // 全弃、英雄开口加注、留最后一个再加注、英雄弃牌。全程同步驱动引擎，一下都
+    // 不让 AI 插手——这样「打错」是确定的，弹不弹只看提醒逻辑，跟对手风格无关。
+    final engine = table.engine;
+    engine.startHand(holeOverride: {
+      'hero': [poker.Card.parse('7s'), poker.Card.parse('2d')],
+    });
+    // 前面还没轮到英雄时，谁该弃谁弃（英雄不看盲注位，避免他被算成从小盲开口）。
+    var guard = 0;
+    while (!table.heroToAct && guard++ < 20) {
+      engine.apply(engine.pendingAction().player.id, ActionType.fold);
+    }
+    expect(table.heroToAct, isTrue, reason: '对手全弃完该轮英雄开口');
+    table.heroAct(ActionType.raise, amountTo: 300);
+
+    // 加注之后只留最后一个对手：他再加注，英雄弃牌——这一手就输在这儿。
+    while (engine.active.length > 2) {
+      engine.apply(engine.pendingAction().player.id, ActionType.fold);
+    }
+    engine.apply(engine.pendingAction().player.id, ActionType.raise,
+        amount: 900);
+    table.heroAct(ActionType.fold);
+    await advance(tester);
+
+    expect(table.handsPlayed, 1);
+    final alert = table.pendingAlert;
+    expect(alert, isNotNull, reason: '输了又打错，得当场挂一条提醒');
+    expect(alert!.lost, 300, reason: '提醒里报的是这手净输多少');
+    expect(alert.mistake.kind, MistakeKind.preflopTooLoose);
+    expect(alert.others, 0);
+
+    // 弹窗：说清哪条街、错在哪、下次怎么打，只有一个「继续」出口。
+    expect(find.text('这手亏 300，有失误'), findsOneWidget);
+    expect(
+        find.text(
+            '${Street.preflop.label} · ${MistakeKind.preflopTooLoose.label}'),
+        findsOneWidget);
+    expect(find.text(alert.mistake.detail), findsOneWidget);
+    expect(find.text(MistakeKind.preflopTooLoose.advice), findsOneWidget);
+
+    // 点「继续」：提醒收掉，牌桌继续，下一手照样发得下来。
+    await tester.tap(find.text('继续'));
+    await advance(tester);
+    expect(find.text('继续'), findsNothing);
+    expect(table.pendingAlert, isNull);
+    expect(find.text('这手亏 300，有失误'), findsNothing);
+
+    table.startHand();
+    await advance(tester);
+    expect(table.pendingAlert, isNull, reason: '没有新失误就不该再弹');
+    expect(find.text('继续'), findsNothing);
+    expect(tester.takeException(), isNull);
   });
 }
