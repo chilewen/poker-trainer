@@ -7,6 +7,7 @@ import 'package:poker_trainer/engine/card.dart' as poker;
 import 'package:poker_trainer/engine/game.dart';
 import 'package:poker_trainer/engine/hand_history.dart';
 import 'package:poker_trainer/engine/types.dart';
+import 'package:poker_trainer/features/game/domain/hand_analysis.dart';
 import 'package:poker_trainer/features/game/domain/hand_grade.dart';
 import 'package:poker_trainer/features/game/domain/hero_stats.dart';
 import 'package:poker_trainer/features/game/domain/session_summary.dart';
@@ -206,6 +207,12 @@ void main() {
   });
 
   testWidgets('总结页：点 ⚠ 看这手错在哪，点类型汇总看这几类怎么改', (tester) async {
+    // 弹窗显示的是「具体到这手」的建议（Mistake.fix），不是每种失误写死的通例。
+    final badCallFix =
+        HandGrade.of(HandAnalysis.of(mistakeHand(), heroId: 'hero'))
+            .mistakes
+            .first
+            .fix;
     await pump(tester, sample(hands: [mistakeHand(), hand('h1', 300)]));
 
     // ⚠ 徽标：这手的两条信息——当时多贵、下次怎么打。
@@ -214,7 +221,7 @@ void main() {
     expect(find.text('这手哪里打错了'), findsOneWidget);
     expect(find.text('${Street.flop.label} · ${MistakeKind.badCall.label}'),
         findsOneWidget);
-    expect(find.text(MistakeKind.badCall.advice), findsOneWidget);
+    expect(find.text(badCallFix), findsOneWidget);
     await tester.tap(find.text('知道了'));
     await tester.pumpAndSettle();
     expect(find.text('这手哪里打错了'), findsNothing);
@@ -234,6 +241,8 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
     final bad = mistakeHand();
+    final fix =
+        HandGrade.of(HandAnalysis.of(bad, heroId: 'hero')).mistakes.first.fix;
     await tester.pumpWidget(
       MaterialApp(
         theme: ThemeData(splashFactory: InkRipple.splashFactory),
@@ -259,8 +268,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(
         find.textContaining('⚠ ${MistakeKind.badCall.label}'), findsOneWidget);
-    expect(find.textContaining('下次这样打：${MistakeKind.badCall.advice}'),
-        findsOneWidget);
+    expect(find.textContaining('下次这样打：$fix'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -540,7 +548,7 @@ void main() {
             '${Street.preflop.label} · ${MistakeKind.preflopTooLoose.label}'),
         findsOneWidget);
     expect(find.text(alert.mistake.detail), findsOneWidget);
-    expect(find.text(MistakeKind.preflopTooLoose.advice), findsOneWidget);
+    expect(find.text(alert.mistake.fix), findsOneWidget);
 
     // 点「继续」：提醒收掉，牌桌继续，下一手照样发得下来。
     await tester.tap(find.text('继续'));

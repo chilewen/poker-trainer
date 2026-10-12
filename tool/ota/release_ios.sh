@@ -6,6 +6,11 @@
 #
 #   --bump        发布前把 pubspec.yaml 的构建号 +1（0.1.0+1 → 0.1.0+2），
 #                 这样手机上能看出装的是不是新包
+#                 （不带 --bump 时脚本自己会看一眼：要发的构建号跟上次发出去的
+#                 一样就自动 +1——见下面「自动 +1」那段）
+#   --no-bump     不管怎样都别动版本号。只改安装页、想重推同一个包时才需要它；
+#                 正常出包时用不到，号码不变的包 iOS 会当成「已经装过」，
+#                 手机上点「安装」可能完全没反应
 #   --skip-build  不重新出包，直接拿 build/ios/ipa/poker_trainer.ipa 发布
 #                 （只改了安装页、或者上次出包其实没问题想重推时用）
 #                 ⚠ 它不会重新编译：改了 Dart 代码却用它发布，推上去的还是旧包。
@@ -21,12 +26,14 @@
 set -e
 
 BUMP=0
+NO_BUMP=0
 SKIP_BUILD=0
 DRY=0
 POS=()
 for a in "$@"; do
   case "$a" in
     --bump) BUMP=1 ;;
+    --no-bump) NO_BUMP=1 ;;
     --skip-build) SKIP_BUILD=1 ;;
     --dry-run) DRY=1 ;;
     -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
@@ -34,6 +41,11 @@ for a in "$@"; do
     *) POS+=("$a") ;;
   esac
 done
+
+if (( BUMP && NO_BUMP )); then
+  echo "--bump 和 --no-bump 只能给一个"
+  exit 2
+fi
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
@@ -90,6 +102,19 @@ pubspec_build_number() {
     "$ROOT/pubspec.yaml" | head -1
 }
 
+# 上一次**真正发出去**的那个包的构建号：发布目录里躺着的 ipa（手机上下到的就是
+# 它）。没发布过、或者读不出来时返回空串。
+published_build_number() {
+  local p tmp plist
+  p=$(find "$ROOT/build/ota" -maxdepth 1 -name '*.ipa' 2>/dev/null | head -1)
+  [[ -n "$p" ]] || return 0
+  tmp=$(mktemp -d)
+  unzip -qq -o "$p" "Payload/*/Info.plist" -d "$tmp" 2>/dev/null
+  plist=$(find "$tmp/Payload" -maxdepth 2 -name Info.plist 2>/dev/null | head -1)
+  [[ -n "$plist" ]] && plutil -extract CFBundleVersion raw "$plist" 2>/dev/null
+  rm -rf "$tmp"
+}
+
 # 出包失败时光看 flutter 那几十行日志很难定位。这里把 flutter 的输出和 Xcode 自己
 # 写的那套导出日志一起翻一遍——真正的失败原因（尤其签名）基本只在后者里——翻译成人话。
 explain_build_failure() {
@@ -126,11 +151,35 @@ explain_build_failure() {
   fi
 }
 
+# ---- 自动 +1：号码跟上次发出去的一样，就自己涨一次 ----
+#
+# iOS 是按「短版本 + 构建号」（CFBundleShortVersionString + CFBundleVersion）判断
+# 有没有新包的，而我们每次 bump 只动构建号。号码不变的时候：安装页上的号不动、
+# 手机点「安装」可能**完全没反应**（iOS 觉得没新包可装），装完 App 里显示的版本
+# 也还是老的——看着就是「发布了但没生效」。忘掉 --bump 的代价特别大，所以这里
+# 不再指望人记得：要发的构建号 == 发布目录里那个包的构建号，就自动 +1。
+#
+# --no-bump 关掉它（比如只想重推安装页）；--skip-build 时也不碰版本号——那种
+# 场景是「拿 build/ios 里现成的 ipa 重发」，改了号反而会让 make_ota.sh 的版本
+# 校验对不上。
+AUTO_BUMP_NOTE=""
+if (( ! BUMP && ! NO_BUMP && ! SKIP_BUILD )); then
+  PUB_BUILD_NOW=$(pubspec_build_number)
+  LAST_PUBLISHED=$(published_build_number)
+  if [[ -n "$PUB_BUILD_NOW" && "$PUB_BUILD_NOW" == "$LAST_PUBLISHED" ]]; then
+    echo "上次发出去的已经是 build $LAST_PUBLISHED，pubspec 也还停在 +$PUB_BUILD_NOW。"
+    echo "号码不变的话手机上会当成同一个包（点安装可能没反应），这里自动 +1。"
+    BUMP=1
+    AUTO_BUMP_NOTE="（自动：build $LAST_PUBLISHED 已经发过）"
+  fi
+fi
+
 if (( BUMP )); then
   if (( DRY )); then
-    echo "（试运行）会把 pubspec.yaml 的构建号 +1"
+    echo "（试运行）会把 pubspec.yaml 的构建号 +1 $AUTO_BUMP_NOTE"
   else
     zsh tool/ota/bump_version.sh
+    [[ -n "$AUTO_BUMP_NOTE" ]] && echo "（$AUTO_BUMP_NOTE 想发同一个号：加 --no-bump）"
   fi
 fi
 

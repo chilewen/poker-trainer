@@ -35,7 +35,7 @@ Future<void> showMistakeAlertDialog(
           const SizedBox(height: 14),
           const Text('下次这样打', style: TextStyle(fontWeight: FontWeight.w600)),
           const SizedBox(height: 4),
-          Text(alert.mistake.kind.advice),
+          Text(alert.mistake.fix),
           if (alert.others > 0) ...[
             const SizedBox(height: 14),
             Text(
@@ -71,7 +71,7 @@ Future<void> showHandMistakesDialog(BuildContext context, HandGrade grade) {
         _MistakeItem(
           title: '${m.street.label} · ${m.kind.label}',
           detail: m.detail,
-          advice: m.kind.advice,
+          advice: m.fix,
         ),
     ],
   );

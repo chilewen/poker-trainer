@@ -128,6 +128,34 @@ A new Flutter project.
 种风格。大厅里也各有单挑场景（`单挑 · 职业`、`单挑 · GTO`），「混合对手 · 9人桌」
 铺的是 `紧凶 / 松弱 / 松凶 / 职业 / GTO / 职业 / GTO / 松凶`。
 
+## 强听牌面对加注（AI 决策）
+
+`_drawCallOrFold` 里听牌的胜率是「数 outs」和「蒙特卡洛对着范围算」两套估值
+调和出来的，权重记作 `trustWeight`。范围模型给的胜率里有一部分是「对手也在
+诈唬」那份，面对**加注**（范围明显更强）兑现不了，所以弱听牌（第二对、卡顺
+这种半个听牌）会被压到 0、退回数 outs。但一刀切对**强听牌**（≥8 outs 的顺听
+/ 花听/组合听）就出问题了：它们的出路是成大牌，不指望那点摊牌价值，实测
+KQ on `10♣6♥J♥`（两头顺）面对翻牌加注会弃掉一大半——真人几乎不会这么做。
+所以给了两处松动，都**只在翻牌圈**生效：
+
+- **别把 `trustWeight` 直接归 0**：翻牌圈强听牌面对加注时保留一半（
+  `strongDrawRaiseTrust = 0.5`），转牌仍归 0。尺度衰减 `1/(1+fade²)` 和转牌
+  对折照旧，只在这一维上松一格。
+- **别叠两个 ×1.08 惩罚**：门槛上调的「对手够强」（
+  `villainStrength > 0.75`）和「没位置」各是一次 ×1.08，讲的其实是同一件事
+  （对手范围强、我兑现不了），乘起来 1.166 会把 8 张的坚果顺听顶出跟注线。
+  翻牌圈强听牌面对加注时最多只上一个；弱听牌、转牌、面对普通下注照旧叠。
+
+为什么只放翻牌：翻牌的两头顺到河牌还有约 31.5% 胜率，对一次加注本来就该跟；
+转牌只剩一张牌（约 17%），面对加注弃掉往往才是对的（跟注门槛普遍在 25% 以上），
+所以转牌不动。踩过的坑：把这两条放到所有街会让 `engine_test` 里「三条同花面：
+只有成花才打光」那条用例里的第二对（`Qc Jc` on `10dQd3sKd`，也带一个两头顺）
+被重新归类成强听牌，于是拿第二对去接加注——所以松动必须锁在翻牌圈。
+
+模拟实测（KQ on `10c 6h Jh`，8000 局随机，翻牌面对加注）：弃牌率从 32.7% 降到
+24.5%；「加注 ≥1 倍池」那档从 93.2% 降到 82.2%——不再被单次加注无条件劝退，
+但大注面前该弃还是弃。
+
 ## iOS 打包 / 装到自己手机上
 
 
@@ -218,3 +246,41 @@ A new Flutter project.
 
      换包名后是全新的 App ID，需要到 developer.apple.com 给新 App ID 重新生成一份
      包含设备 UDID 的 Ad Hoc 描述文件，否则装不上。
+
+## Android 打包 / 装到自己手机上
+
+安卓这套配置跟 iOS 是各自独立的（`android/` 目录），两边共用的只有 `lib/` 和
+`pubspec.yaml`——同一个版本号，改完代码两边都要重新出包。
+
+1. 包名与签名（已配好）：`android/app/build.gradle.kts` 里
+   `namespace` / `applicationId = com.tcgroup.bewt`（跟 iOS 的 bundle id 对齐），
+   Activity 在 `android/app/src/main/kotlin/com/tcgroup/bewt/MainActivity.kt`。
+   版本号同样取 `pubspec.yaml` 的 `0.1.0+N`：短版本进 `versionName`、构建号进
+   `versionCode`。
+   - 默认用 **debug 签名**出 release 包（`flutter build apk --release` 直接能装），
+    自己手机上用足够了；
+   - 以后要换正式签名（上应用商店、或者想让包能互相覆盖升级），按 Flutter 官方那套
+     在 `android/key.properties` 里写 `storeFile` / `storePassword` / `keyAlias` /
+     `keyPassword`，再把 `buildTypes.release` 那行的 `signingConfig` 指向它即可
+     （`key.properties` 和 `*.jks` 已经在 `android/.gitignore` 里，不会进版本库）。
+     注意：**debug 签名和正式签名的包不能互相覆盖安装**，换签名之前先卸载手机上的旧 App。
+2. 出包：
+
+   ```bash
+   zsh tool/android/build_apk.sh --bump          # 构建号 +1 并出通用包
+   zsh tool/android/build_apk.sh --split         # 按 CPU 架构拆包（每个小一半）
+   zsh tool/android/build_apk.sh --install       # 出完直接 adb install 到连着的那台
+   ```
+
+   产物在 `build/android/poker_trainer-<版本>.apk`（脚本会顺手删掉目录里上一版的包，
+   免得传错）。等价的裸命令是 `flutter build apk --release`，产物在
+   `build/app/outputs/flutter-apk/`。
+3. 装到手机上：把 apk 拷过去（微信 / QQ / 数据线 / 网盘都行），在手机上点一下，
+   第一次要允许「安装未知应用」。同一个包名在一台手机上只能装一个版本，装新版会
+   覆盖旧版——前提是两次签名一样（都走 debug，或者都走同一份正式证书）。
+4. 注意：
+   - 第一次出包要联网下 Gradle 依赖（Flutter 用的是 Gradle 9.1 + AGP 9.0.1 + Kotlin
+     2.3.20，`android/gradle/wrapper/gradle-wrapper.properties` 里能改）；
+   - 本机需要 Android SDK（`android/local.properties` 里的 `sdk.dir` 指过去）；
+   - `android/local.properties`、`gradlew`、`gradle-wrapper.jar` 都在 `.gitignore` 里，
+     换机器克隆下来之后第一次跑 `flutter build apk`，Flutter 会自己把它们补上。

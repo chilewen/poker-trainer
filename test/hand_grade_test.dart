@@ -249,6 +249,113 @@ void main() {
     expect(alert.others, 1);
   });
 
+  test('提醒：拿垃圾牌跟加注也算一条——翻前跟加注过宽', () {
+    // 枪口加注、前面都弃了，按钮位拿 72o 跟：开池范围查完，防守范围也查。
+    final h = hand(
+      seats: ['hero', 'p1', 'p2', 'p3', 'p4', 'p5'],
+      heroHole: cards('7s 2d'),
+      actions: [
+        bet('p1', 50, 50),
+        bet('p2', 100, 150),
+        act('p3', ActionType.raise, 450, amount: 300),
+        act('p4', ActionType.fold, 450),
+        act('p5', ActionType.fold, 450),
+        act('hero', ActionType.call, 750),
+        act('p1', ActionType.fold, 750),
+        act('p2', ActionType.fold, 750),
+      ],
+    )..netResult['hero'] = -300;
+
+    final mistakes = grade(h).mistakes;
+    expect(mistakes.map((m) => m.kind),
+        contains(MistakeKind.preflopColdCallTooWide));
+    expect(mistakes.first.detail, contains('跟了'));
+    expect(mistakes.first.detail, contains('枪口'));
+  });
+
+  test('提醒：同一条失误，换个手牌就得换句话——别成复读机', () {
+    // 两手都判「翻前入池过宽」，但一个换位置能开、一个哪儿都开不了，
+    // 建议不该是同一句。以前 fix 是每种失误写死的，才会「提示全一样」。
+    HandHistory epOpen(String hole) => hand(
+          seats: ['hero', 'p1', 'p2', 'p3', 'p4', 'p5'],
+          buttonIndex: 3, // hero 坐枪口
+          heroHole: cards(hole),
+          actions: [
+            act('hero', ActionType.raise, 300, amount: 300),
+            act('p1', ActionType.fold, 300),
+            act('p2', ActionType.fold, 300),
+            act('p3', ActionType.fold, 300),
+            act('p4', ActionType.fold, 300),
+            act('p5', ActionType.fold, 300),
+          ],
+        );
+
+    final lateOk = grade(epOpen('Ah 8c')).mistakes.single;
+    final junk = grade(epOpen('7s 2d')).mistakes.single;
+    expect(lateOk.kind, MistakeKind.preflopTooLoose);
+    expect(junk.kind, MistakeKind.preflopTooLoose);
+    expect(lateOk.fix, isNot(junk.fix), reason: '同类型、不同手牌，建议就该不一样');
+    expect(lateOk.fix, contains('后面的位置'));
+    expect(junk.fix, contains('哪个位置都不在开池范围'));
+  });
+
+  test('提醒：每条失误都带具体建议，不是照抄通例', () {
+    // 通例（MistakeKind.advice）是给「这几类怎么改」用的；牌桌上/复盘里
+    // 显示的是 fix，必须落到这手牌上。
+    for (final h in [airHand(), setHand()]) {
+      for (final m in grade(h).mistakes) {
+        expect(m.fix, isNotEmpty);
+        expect(m.fix, isNot(m.kind.advice), reason: '${m.kind.label} 得说具体点');
+      }
+    }
+    final ep = grade(hand(
+      seats: ['hero', 'p1', 'p2', 'p3', 'p4', 'p5'],
+      buttonIndex: 3,
+      heroHole: cards('Ah 8c'),
+      actions: [
+        act('hero', ActionType.raise, 300, amount: 300),
+        act('p1', ActionType.fold, 300),
+        act('p2', ActionType.fold, 300),
+        act('p3', ActionType.fold, 300),
+        act('p4', ActionType.fold, 300),
+        act('p5', ActionType.fold, 300),
+      ],
+    )).mistakes.single;
+    expect(ep.fix, isNot(ep.kind.advice));
+  });
+
+  test('提醒：一手里两条同档失误，挑哪条是确定的', () {
+    // 翻牌、转牌各来一次「没赔率还跟」，两条同档。List.sort 不保证稳定，
+    // 不加下标兜底的话，同一手每次点开可能说的事都不一样。
+    final h = hand(
+      seats: ['hero', 'p1'],
+      heroHole: cards('7h 6h'),
+      board: cards('Kh Qd 9c 3s'),
+      actions: [
+        bet('hero', 50, 50),
+        bet('p1', 100, 150),
+        act('hero', ActionType.call, 200),
+        act('p1', ActionType.check, 200),
+        act('p1', ActionType.bet, 800, street: Street.flop, amount: 600),
+        act('hero', ActionType.call, 1400, street: Street.flop),
+        act('p1', ActionType.bet, 2800, street: Street.turn, amount: 1400),
+        act('hero', ActionType.call, 4200, street: Street.turn),
+      ],
+    )..netResult['hero'] = -2050;
+
+    final kinds = grade(h).mistakes.map((m) => m.kind).toSet();
+    expect(kinds, {MistakeKind.badCall}, reason: '两条都是「跟注没有赔率」');
+    final first = mistakeAlertOf(h, heroId: hero);
+    expect(first, isNotNull);
+    expect(first!.others, 1);
+    for (var i = 0; i < 5; i++) {
+      final again = mistakeAlertOf(h, heroId: hero);
+      expect(again!.mistake.decisionIndex, first.mistake.decisionIndex,
+          reason: '同一手挑出来的必须是同一条');
+    }
+    expect(first.mistake.street, Street.flop, reason: '同档时按发生顺序，先说翻牌那条');
+  });
+
   test('翻前胜率：固定种子可复现，AA 远高于 72o', () {
     double equity(String hole) {
       final h = hand(

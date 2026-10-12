@@ -57,6 +57,18 @@ class LegalAction {
   final int maxAmount;
 }
 
+/// 一次加注对后面的人意味着什么。
+enum _RaiseReopen {
+  /// 不是加注（弃牌 / 过牌 / 跟注）。
+  none,
+
+  /// 完整加注：所有人都要再表态一次，加注权重新开放。
+  full,
+
+  /// 不足最小加注的全下：只有还没跟平的人要表态，而且他们不能再加注。
+  short,
+}
+
 /// 一手牌的完整执行器：发牌、下注轮、边池、摊牌。
 ///
 /// 用法：
@@ -68,8 +80,11 @@ class LegalAction {
 /// }
 /// ```
 ///
-/// 规则说明：短筹码全下加注不足最小加注额时按全下处理，
-/// 简化起见允许其他玩家再次加注（严格的“不再开放下注”规则未实现）。
+/// 规则说明：加注的底线是「当前最高注 + 上一次的加注幅度」——3bet 以开池
+/// 为基准、4bet 以 3bet 为基准，一路如此，不是固定倍数。
+///
+/// 短筹码全下加注不足最小加注额时按全下处理（半开的下注）：还没跟平的人
+/// 仍然要表态，但已经表过态的人不能再加注——跟真规则一致。
 class GameEngine {
   GameEngine({this.config = const GameConfig(), Random? random})
       : _random = random ?? Random();
@@ -89,7 +104,13 @@ class GameEngine {
   int buttonIndex = -1;
   Street _street = Street.preflop;
   int _actorIndex = 0;
-  int _remainingToAct = 0; // 本街还需行动的人数
+  // 本街还要表态的玩家。用集合而不是「还剩几个人」的计数：不足最小加注的
+  // 全下（短码）不重开下注，但**还没跟平的人**仍然要继续表态——计数表达不了
+  // 「谁还得再说一次」，按集合来才不会要么漏问、要么把已经跟平的人再问一遍。
+  final Set<String> _pending = <String>{};
+  // 本街已经表过态的玩家。碰上「不足最小加注」的全下时，他们只能跟或弃：
+  // 真规则里半开的下注不重开加注权，只有还没说话的人能加。
+  final Set<String> _closedToRaise = <String>{};
   int _minRaise = 0; // 最小加注量（相对当前最高注）
 
   bool handOver = false;
@@ -205,8 +226,8 @@ class GameEngine {
     _actorIndex = players.length == 2
         ? _smallBlindIndex()
         : (_bigBlindIndex() + 1) % players.length;
+    _resetStreetAction();
     _skipToActable();
-    _remainingToAct = actable.length;
     _maybeEarlyFinish();
   }
 
@@ -227,13 +248,20 @@ class GameEngine {
     ));
   }
 
-  /// 从 [_actorIndex] 起向后找到第一个可行动的玩家。
+  /// 从 [_actorIndex] 起向后找到第一个「本街还没表态」的玩家。
   void _skipToActable() {
     for (var i = 0; i < players.length; i++) {
-      final p = players[_actorIndex];
-      if (!p.folded && !p.allIn) return;
+      if (_pending.contains(players[_actorIndex].id)) return;
       _actorIndex = (_actorIndex + 1) % players.length;
     }
+  }
+
+  /// 开手 / 换街时重置本街的表态状态。
+  void _resetStreetAction() {
+    _pending
+      ..clear()
+      ..addAll(actable.map((p) => p.id));
+    _closedToRaise.clear();
   }
 
   // ---------- 决策接口 ----------
@@ -261,7 +289,8 @@ class GameEngine {
       actions.add(
           LegalAction(ActionType.call, amount: toCall.clamp(0, p.stack)));
     }
-    if (p.stack > toCall) {
+    // 半开的下注（短码全下不足最小加注）不给已经表态过的人再加注的机会。
+    if (p.stack > toCall && !_closedToRaise.contains(p.id)) {
       // 留有加注空间（含全下加注）。
       final maxTo = p.streetBet + p.stack;
       final minTo = minRaiseTo.clamp(currentBet, maxTo);
@@ -286,7 +315,7 @@ class GameEngine {
       throw StateError('轮到 ${actor.id}，不是 $playerId');
     }
 
-    var reopened = false; // 本次动作是否让大家需要再次表态
+    var reopen = _RaiseReopen.none;
     switch (type) {
       case ActionType.fold:
         actor.folded = true;
@@ -300,7 +329,7 @@ class GameEngine {
       case ActionType.bet:
       case ActionType.raise:
         final to = amount ?? minRaiseTo;
-        reopened = _placeBet(actor, to);
+        reopen = _placeBet(actor, to);
     }
     lastHand?.actions.add(ActionRecord(
       street: _street,
@@ -310,15 +339,29 @@ class GameEngine {
       potAfter: potTotal(),
     ));
 
-    _remainingToAct = reopened
-        ? actable.where((p) => p != actor).length
-        : _remainingToAct - 1;
+    _pending.remove(actor.id);
+    _closedToRaise.add(actor.id);
+    switch (reopen) {
+      case _RaiseReopen.full:
+        // 完整加注：所有人重新表态一次，加注权也重新开放。
+        _pending.addAll(actable.where((p) => p != actor).map((p) => p.id));
+        _closedToRaise
+          ..clear()
+          ..add(actor.id);
+      case _RaiseReopen.short:
+        // 不足最小加注的全下：只有还没跟平的人要继续表态，而且他们不能再加。
+        _pending.addAll(actable
+            .where((p) => p != actor && p.streetBet < currentBet)
+            .map((p) => p.id));
+      case _RaiseReopen.none:
+        break;
+    }
 
     if (active.length == 1) {
       _finishUncontested();
       return;
     }
-    if (_remainingToAct <= 0) {
+    if (_pending.isEmpty) {
       _advanceStreet();
     } else {
       _actorIndex = (_actorIndex + 1) % players.length;
@@ -336,8 +379,13 @@ class GameEngine {
     if (p.stack == 0) p.allIn = true;
   }
 
-  /// 下注/加注。返回是否重新开放下注（需要其他玩家再次表态）。
-  bool _placeBet(PlayerState p, int toAmount) {
+  /// 下注/加注：返回这次算「完整加注」还是「不足最小加注的全下」，
+  /// 两者对后面的人意味的东西不一样（见 [apply]）。
+  ///
+  /// 最小加注额的口径：**在当前最高注之上，至少再加「上一次的加注幅度」**。
+  /// 3bet 的底线是「开池额 + 开池幅度」，4bet 的底线是「3bet 额 + 3bet
+  /// 幅度」，一路都以之前那一次加注为基准，而不是固定倍数。
+  _RaiseReopen _placeBet(PlayerState p, int toAmount) {
     final maxTo = p.streetBet + p.stack;
     if (toAmount <= currentBet || toAmount > maxTo) {
       throw StateError('非法下注额 $toAmount（当前 $currentBet，上限 $maxTo）');
@@ -348,11 +396,16 @@ class GameEngine {
     if (!isAllIn && to < minRaiseTo) {
       to = minRaiseTo;
     }
-    if (to > currentBet) {
-      _minRaise = to - currentBet;
+    final raised = to - currentBet;
+    // 不足最小加注的全下不改「最小加注幅度」：真规则里它只是半开，下一次
+    // 合法加注仍然照着上一次**完整**加注的幅度算。
+    if (raised < _minRaise) {
+      _putChips(p, to - p.streetBet);
+      return _RaiseReopen.short;
     }
+    _minRaise = raised;
     _putChips(p, to - p.streetBet);
-    return true;
+    return _RaiseReopen.full;
   }
 
   void _advanceStreet() {
@@ -376,7 +429,7 @@ class GameEngine {
       p.streetBet = 0;
     }
     _minRaise = config.bigBlind;
-    _remainingToAct = actable.length;
+    _resetStreetAction();
     _actorIndex = (buttonIndex + 1) % players.length;
     _skipToActable();
     _maybeEarlyFinish();
@@ -476,7 +529,9 @@ class GameEngine {
         'buttonIndex': buttonIndex,
         'street': _street.name,
         'actorIndex': _actorIndex,
-        'remainingToAct': _remainingToAct,
+        'remainingToAct': _pending.length,
+        'pending': _pending.toList(),
+        'closedToRaise': _closedToRaise.toList(),
         'minRaise': _minRaise,
         'handOver': handOver,
         'board': [for (final c in board) c.notation],
@@ -527,7 +582,26 @@ class GameEngine {
     engine.buttonIndex = (json['buttonIndex']! as num).toInt();
     engine._street = Street.values.byName(json['street']! as String);
     engine._actorIndex = (json['actorIndex']! as num).toInt();
-    engine._remainingToAct = (json['remainingToAct']! as num).toInt();
+    engine._pending.clear();
+    final pending = json['pending'];
+    if (pending is List) {
+      engine._pending.addAll(pending.map((e) => '$e'));
+    } else {
+      // 老存档只存了「还剩几个人」：按「从行动位往后数 N 个还能行动的人」
+      // 还原——这正是旧计数器当年的语义。
+      final remaining = (json['remainingToAct']! as num).toInt();
+      var idx = engine._actorIndex;
+      for (var i = 0;
+          i < engine.players.length * 2 && engine._pending.length < remaining;
+          i++) {
+        final p = engine.players[idx];
+        if (!p.folded && !p.allIn) engine._pending.add(p.id);
+        idx = (idx + 1) % engine.players.length;
+      }
+    }
+    engine._closedToRaise.clear();
+    final closed = json['closedToRaise'];
+    if (closed is List) engine._closedToRaise.addAll(closed.map((e) => '$e'));
     engine._minRaise = (json['minRaise']! as num).toInt();
     engine.handOver = json['handOver']! as bool;
     for (final c in (json['board']! as List)) {

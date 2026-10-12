@@ -5,6 +5,7 @@ import '../../../engine/game.dart';
 import '../../../engine/hand_history.dart';
 import '../../../engine/types.dart';
 import '../../../trainer/odds.dart';
+import 'bet_sizing.dart';
 import 'hand_strength.dart';
 import 'preflop_ranges.dart';
 
@@ -66,6 +67,7 @@ class _Profile {
     required this.semiBluffRaiseScale,
     required this.bluffRaiseScale,
     required this.fourBetScale,
+    this.fourBetCall = 0.0,
     this.callSlack = 0.0,
     this.slowPlay = 0.12,
     this.lightThreeBetAnyPosition = false,
@@ -106,7 +108,7 @@ class _Profile {
   /// 纯诈唬频率倍率。
   final double bluffScale;
 
-  /// 面对 3bet 时「再加注回去」的倾向。
+  /// 面对 3bet / 4bet 时「再加注回去」的倾向（4bet 和 5bet 共用）。
   ///
   /// 紧凶是标准频率；松凶压得更凶；松被动几乎不 4bet——真人里松被动
   /// 那一档就是拿 QQ+/AK 一路跟到底（把最强的牌全慢打），这也是他们
@@ -148,6 +150,17 @@ class _Profile {
   /// [_openOverLimp]），对手读几手就能确定「他跟进池 = 他加注过 = 他牌很
   /// 强」；而跟注站反倒成了唯一会溜入的风格，一眼假。
   final double overLimpMix;
+
+  /// 面对 4bet 时，QQ/JJ 在有位置、对方又没打大的情况下跟注的频率。
+  ///
+  /// 这里以前没有这一档：`raises >= 3` 除 AA/KK 外一律弃牌。结果是我们
+  /// 3bet 过的那些牌（QQ/JJ/AQ）**在这个节点 100% 弃**——对手只要敢 4bet，
+  /// 就能稳定地收走我们 3bet 的死钱，而我们连一手「他不用好牌也能这么干」
+  /// 的反制都没有。真人不是这样：QQ/JJ 有位置、4bet 又只是「加了点价」
+  /// 的时候会留一部分跟注，翻后借着位置打，这才是 3bet 范围该有的防守。
+  ///
+  /// 0 = 完全不留（以前的打法）；跟注站这类丢不掉大对子的风格给得最高。
+  final double fourBetCall;
 
   /// 跟注站特性：溜入时不看价格。
   final bool limpsAnyPrice;
@@ -193,6 +206,7 @@ const _tightProfile = _Profile(
   semiBluffRaiseScale: 1.0,
   bluffRaiseScale: 1.0,
   fourBetScale: 1.0,
+  fourBetCall: 0.25,
   callSlack: 0.0,
   slowPlay: 0.12,
   overLimpMix: 0.60,
@@ -212,6 +226,8 @@ const _passiveProfile = _Profile(
   semiBluffRaiseScale: 0.5,
   bluffRaiseScale: 0.6,
   fourBetScale: 0.3,
+  // 跟注站丢不掉大对子：面对 4bet 也照跟，这正是它被人拿去榨价值的地方。
+  fourBetCall: 0.40,
   limpsAnyPrice: true,
   wideLimp: true,
   callSlack: 0.42,
@@ -233,6 +249,7 @@ const _looseAggressiveProfile = _Profile(
   semiBluffRaiseScale: 1.3,
   bluffRaiseScale: 1.6,
   fourBetScale: 1.25,
+  fourBetCall: 0.30,
   callSlack: 0.10,
   slowPlay: 0.18,
   overLimpMix: 0.40,
@@ -261,6 +278,7 @@ const _proProfile = _Profile(
   semiBluffRaiseScale: 1.0,
   bluffRaiseScale: 1.0,
   fourBetScale: 1.15,
+  fourBetCall: 0.30,
   callSlack: 0.0,
   slowPlay: 0.12,
   overLimpMix: 0.60,
@@ -292,6 +310,9 @@ const _gtoProfile = _Profile(
   semiBluffRaiseScale: 1.0,
   bluffRaiseScale: 1.0,
   fourBetScale: 1.0,
+  // 均衡型这个节点要有防守范围：对手 4bet 过来的频率被他自己的范围限制住，
+  // 我们 3bet 过的手牌不许 100% 弃，不然那一段就是白送的死钱。
+  fourBetCall: 0.40,
   callSlack: 0.0,
   slowPlay: 0.08,
   overLimpMix: 0.0,
@@ -381,7 +402,8 @@ class _VillainRead {
 ///    （[HandReading.blockerScore]：坚果花阻断 / 补顺的牌 / A 阻断），
 ///    拿什么都没挡到的牌就老实过牌——真人和按钮精灵最大的区别就在这。
 class AiPlayer {
-  AiPlayer(this.style, {Random? random}) : _random = random ?? Random() {
+  AiPlayer(this.style, {Random? random, this.sizing = PreflopSizing.standard})
+      : _random = random ?? Random() {
     if (style._profile.fixedPersonality) {
       // 均衡型不掷骰子（见 [_Profile.fixedPersonality]）：它的频率是拿来
       // 当标尺用的，同一桌上两个均衡型对手得打得一模一样。
@@ -397,6 +419,11 @@ class AiPlayer {
   }
 
   final AiStyle style;
+
+  /// 翻前加注尺度表（开池 / 3bet / 4bet 的倍数）。默认是 [PreflopSizing.standard]，
+  /// 想试「全桌加得更狠」那类改动可以直接塞一张改过的表进来。
+  final PreflopSizing sizing;
+
   final Random _random;
 
   /// 性格参数：同风格的不同 AI 也会有细微差异。
@@ -747,12 +774,32 @@ class AiPlayer {
       // 提到这里算一次（下面「最小加注还是加三倍」那段用的是同一个值）。
       final threeBetBb = game.currentBet / bb;
       // 已经是 4bet 及以上的底池（我们 4bet 被 5bet，或者对手直接 4bet
-      // 过来）：这里只有 AA/KK 还值得继续。拿 QQ/AK 去跟 4bet 是白送——
-      // 对手敢 4bet，范围里已经没有它们能压住的东西了。
+      // 过来）：骨架是「只有 AA/KK 还值得继续」——拿 QQ/AK 去跟 4bet 是
+      // 白送，对手敢 4bet，范围里已经没有它们能压住的东西了。
+      //
+      // 唯一的例外是**有位置的 QQ/JJ 面对一个没打大的 4bet**（见
+      // [_callFourBet]）。以前这里没有任何例外：除 AA/KK 外一律弃牌，等于
+      // 对手只要敢 4bet 就能稳定收走我们 3bet 的死钱，我们连「他不必有好牌
+      // 也能这么干」的反制都没有。
       if (raises >= 3) {
-        if (!premium) return const AiDecision(ActionType.fold);
+        if (!premium) {
+          if (_callFourBet(hand, game, spot, me, raises, toCall)) {
+            return const AiDecision(ActionType.call);
+          }
+          return const AiDecision(ActionType.fold);
+        }
         if (toCall >= me.stack || shortStack || toCall >= me.stack * 0.55) {
           return _jam(me);
+        }
+        // AA/KK 面对方 4bet 不是只能一路跟。这是把我们整条筹码线送出去、
+        // 也是唯一还能收弃牌率的地方：4bet 的人范围里有一部分是「压一下看
+        // 我们弃不弃」的牌，我们只跟就等于把它们留在底池里便宜看翻牌；再
+        // 压回去才拿得到那笔钱，同时把一百个 bb 的期望锁死。松被动慢打是
+        // 它的招牌（fourBetScale 0.3），紧凶 / 职业 / 均衡则大部分时候压。
+        final chance =
+            0.62 * _p.fourBetScale * (0.9 + 0.2 * (_aggression - 0.85));
+        if (_roll(chance)) {
+          return AiDecision(ActionType.raise, amountTo: _fiveBetSize(game, me));
         }
         return const AiDecision(ActionType.call);
       }
@@ -980,8 +1027,10 @@ class AiPlayer {
               lateOpen &&
               PreflopRanges.isLightThreeBetHand(hand));
       if (mayLight) {
-        final light = _mixSize((game.currentBet * 3).toDouble()).round();
-        return AiDecision(ActionType.raise, amountTo: light);
+        // 轻 3bet 和价值 3bet 用同一个尺寸：尺寸一分为二，对手一眼就能
+        // 从额度读出我们手里是 A5s 还是 AA。
+        return AiDecision(ActionType.raise,
+            amountTo: _threeBetSize(game, spot));
       }
     }
     // 短筹码：与其翻后打小球，不如直接推进去（弃牌率 + 摊牌胜率）。
@@ -995,39 +1044,103 @@ class AiPlayer {
     return const AiDecision(ActionType.fold);
   }
 
-  /// 开池加注的尺度：位置好可以开小一点（省筹码、还能拿下盲注），
-  /// 前位开大一点；每多一个溜入者多加 1bb（隔离他们，也把底池做大）。
+  /// 面对 4bet 时，QQ/JJ 要不要留一部分跟注，而不是一律弃牌。
+  ///
+  /// 触发条件全部要满足，缺一不可：
+  ///
+  /// - 正好是「被 4bet」（`raises == 3`）。再往上（被 5bet）只留 AA/KK——
+  ///   对手已经把自己套牢了，我们的 QQ/JJ 后面没有位置价值可打，跟进去就是
+  ///   把一百个 bb 送给他那一段实到不能再实的范围；
+  /// - 手里是 **QQ / JJ**。AA/KK 走上面的价值线（继续压），TT 以下没有摊牌
+  ///   价值，买三条在 4bet 底池里也早就没有赔率了；
+  /// - **有位置**。QQ/JJ 在这个底池里靠的是摊牌价值：没位置就是翻后三条街
+  ///   都挨打（对手过牌-加注一下我们就得弃），跟注只是把死钱换成更贵的死钱；
+  /// - 对方**没打大**：4bet / 3bet 不超过 [PreflopSizing.fourBetCallRatio]。
+  ///   2 倍出头是「加了点价」，我们跟进去还有位置、还有后手可以打；再往上
+  ///   对手那一注基本等于把筹码套牢（不少时候干脆就是推），他范围里已经没有
+  ///   我们能压住的东西了。
+  ///
+  /// 条件都满足之后再按风格频率掷一次骰子（[_Profile.fourBetCall]）：真人拿
+  /// QQ/JJ 在这个点上也是混着打的——全跟等于把 3bet 范围撑成「被 4bet 就必跟」，
+  /// 全弃则是我们要修的那个洞。
+  bool _callFourBet(PreflopHand hand, GameEngine game, _Spot spot,
+      PlayerState me, int raises, int toCall) {
+    if (_p.fourBetCall <= 0) return false;
+    if (raises != 3) return false;
+    // QQ / JJ：对子，且高牌落在 J~Q。AA/KK 走上面的价值线，TT 以下该弃。
+    if (!hand.isPair ||
+        hand.high < Rank.jack.value ||
+        hand.high >= Rank.king.value) {
+      return false;
+    }
+    if (!spot.inPosition) return false;
+    final prevRaiseTo = spot.preflopPrevRaiseTo;
+    if (prevRaiseTo <= 0) return false; // 拿不到 3bet 的额度就不猜
+    if (game.currentBet > prevRaiseTo * sizing.fourBetCallRatio) return false;
+    // 要跟掉大半筹码的时候，「跟注」已经不是跟注了——那是没有全下勇气的全下。
+    if (toCall >= me.stack * 0.55) return false;
+    return _roll(_p.fourBetCall);
+  }
+
+  /// 开池加注的尺度：风格给的基准 bb × 位置系数（[PreflopSizing.openFactor]），
+  /// 每多一个溜入者多加 [PreflopSizing.openLimpAddBb] bb（隔离他们，也把底池
+  /// 做大）。
   ///
   /// 最后再过一遍尺度混合：真人不会「按钮位永远 2.46bb、前位永远 3bb」，
   /// 而是在小一点/正常/大一点之间换档——固定尺度是最容易被对手读死的。
   int _openSize(GameEngine game, int bb, int limpers, Seat seat) {
-    final base =
-        bb * (_p.openSizeBb * PreflopRanges.openSizeFactor(seat) + limpers);
+    final base = bb *
+        (_p.openSizeBb * sizing.openFactor(seat) +
+            limpers * sizing.openLimpAddBb);
     return _mixSize(base).round();
   }
 
-  /// 4bet 尺度：有位置约 2.2 倍 3bet、没位置 2.6 倍（没位置不加够就是
-  /// 白送对手的跟注赔率）。算出来要是已经压进自己四成筹码，就别再留
-  /// 什么后手了——4bet 完还想弃牌是最亏的打法，直接推到全下。
+  /// 4bet 尺度：当前注（也就是对手 3bet 的额度）× [PreflopSizing.fourBetIp] /
+  /// [PreflopSizing.fourBetOop]。算出来要是已经压进自己筹码的
+  /// [PreflopSizing.fourBetJamStackFrac]，就别再留什么后手了——4bet 完还想
+  /// 弃牌是最亏的打法，直接推到全下。
   int _fourBetSize(GameEngine game, _Spot spot, PlayerState me) {
-    final base = game.currentBet * (spot.inPosition ? 2.2 : 2.6);
+    final base = game.currentBet *
+        (spot.inPosition ? sizing.fourBetIp : sizing.fourBetOop);
     final size = _mixSize(base).round();
-    if (size - me.streetBet >= me.stack * 0.4) {
+    if (size - me.streetBet >= me.stack * sizing.fourBetJamStackFrac) {
       return me.streetBet + me.stack;
     }
     return size;
   }
 
-  /// 3bet / 挤压尺度：有位置约 3 倍开池、没位置 4 倍（没位置要加得
-  /// 更多才能压掉对手的跟注赔率），每个已经进池的人再多加 1bb
-  /// （挤压时不能让跟注者用便宜价格跟进来），但不低于 3 倍当前注。
+  /// 5bet 尺度：当前注（也就是对手 4bet 的额度）× [PreflopSizing.fiveBetRatio]。
+  ///
+  /// 算出来要是已经把自己筹码的 [PreflopSizing.fiveBetJamStackFrac] 压进去，
+  /// 就直接推到全下——5bet 是翻前最后一个动作，留几十个 bb 在后手是白留，
+  /// 对手反正只有推或者弃。只有深筹码（200bb 往上）才真的会打出一个「5bet
+  /// 到某个数」而不是全下。
+  ///
+  /// 先比后手、再换档：换档（[_mixSize]）只在「确实要留后手」的那一档里
+  /// 生效，不然 ×0.85 那一档会把本来该推的牌变回「5bet 到半路」。
+  int _fiveBetSize(GameEngine game, PlayerState me) {
+    final base = game.currentBet * sizing.fiveBetRatio;
+    if (base - me.streetBet >= me.stack * sizing.fiveBetJamStackFrac) {
+      return me.streetBet + me.stack;
+    }
+    return _mixSize(base).round();
+  }
+
+  /// 3bet / 挤压尺度：当前注（开池额）× [PreflopSizing.threeBetIp] /
+  /// [PreflopSizing.threeBetOop]，每个已经进池的人再加
+  /// [PreflopSizing.threeBetPerLimperBb] bb（挤压时不能让跟注者用便宜价格
+  /// 跟进来），但不低于 [PreflopSizing.threeBetMin] 倍当前注。
   int _threeBetSize(GameEngine game, _Spot spot) {
-    final potBased = game.currentBet * (spot.inPosition ? 3 : 4);
-    final floor = game.currentBet * 3;
-    final callers = game.config.bigBlind * spot.limpers;
-    final size = max(max(potBased, floor) + callers, floor);
-    // 同样换档，但 3 倍开池这条底线不能破（没位置时加不够就是白送赔率）。
-    return max(floor, _mixSize(size.toDouble()).round());
+    final potBased = game.currentBet *
+        (spot.inPosition ? sizing.threeBetIp : sizing.threeBetOop);
+    final floor = (game.currentBet * sizing.threeBetMin).round();
+    final callers =
+        (game.config.bigBlind * spot.limpers * sizing.threeBetPerLimperBb)
+            .round();
+    final size =
+        max(max(potBased, floor.toDouble()) + callers, floor.toDouble());
+    // 同样换档，但下限这条线不能破（没位置时加不够就是白送赔率）。
+    return max(floor, _mixSize(size).round());
   }
 
   // ---------- 翻牌后：读牌 → 读人 → 下注/跟注/加注 ----------
@@ -2665,9 +2778,13 @@ class AiPlayer {
     //   · 超池也是例外：敢超池的人范围明显偏价值，范围模型给的胜率偏乐观，
     //     而且成牌之后也收不回钱（隐含赔率被超池吃掉）。这时退回保守估值，
     //     不硬凑，超池面前老实弃牌。
-    //   · 面对「加注」同样不算：能加注出来的范围强得多，而且我们手上那点
-    //     成牌（第二对之类，这类牌也算听牌线）在加注线里根本兑现不了，
-    //     把它按摊牌价值算进去就变成「拿第二对去接加注」。
+    //   · 面对「加注」要额外打折：能加注出来的范围强得多，模型给的那份
+    //     胜率（两张高张能赢 / 他在诈唬）兑现不了。弱听牌（第二对、卡顺
+    //     这种「半个听牌」）直接按摊牌价值算会变成「拿第二对去接加注」，
+    //     所以对它们归 0；但**强听牌**（≥8 outs 的顺听/花听/组合听）靠的
+    //     是成大牌、不指望那点摊牌价值，一刀切归 0 会让「坚果两头顺被单次
+    //     加注劝退」（实测 KQ on 10♣6♥J♥ 面对翻牌加注会弃掉一大半），
+    //     所以给强听牌保留一部分权重（[strongDrawRaiseTrust]）。
     final strongDraw =
         read.drawOuts >= 8 || read.isComboDraw || read.nutFlushDraw;
     final overbet = _overbetProgress(spot);
@@ -2696,9 +2813,24 @@ class AiPlayer {
     // 同一条，只是听牌更狠：成牌的落后还能摊牌，听牌不能。
     final streetTrust = game.street == Street.turn ? 0.5 : 1.0;
     final fade = (spot.betSizeRel - 0.75) / 0.45;
-    final trustWeight = (!strongDraw || spot.villainRaisedThisStreet)
+    // 面对加注时强听牌保留的信任比例：0 = 完全不看范围模型（弱听牌那档），
+    // 1 = 照旧全信。取一半是「加注线范围更实」和「强听牌靠成大牌」之间的
+    // 折中——既不像以前那样把 8 张顺听一刀切掉，也不至于拿加注线当普通下注
+    // 全信。
+    //
+    // 只在**翻牌圈**给这份信任：翻牌的两头顺到河牌还有约 31.5% 胜率，对着
+    // 一次加注本来就该跟；转牌只剩一张牌（约 17%），面对加注弃掉往往才是
+    // 对的（跟注门槛普遍在 25% 以上），所以转牌照旧归 0，不动。
+    // 尺度上的衰减（1/(1+fade²)）和转牌对折也照旧，只在「翻牌 + 加注」这一
+    // 维上松一格。
+    const strongDrawRaiseTrust = 0.5;
+    final trustWeight = !strongDraw
         ? 0.0
-        : streetTrust / (1.0 + fade * fade);
+        : streetTrust /
+            (1.0 + fade * fade) *
+            (spot.villainRaisedThisStreet
+                ? (game.street == Street.flop ? strongDrawRaiseTrust : 0.0)
+                : 1.0);
     final drawOnly = read.drawEquity(streets);
     final base = trustWeight <= 0
         ? drawOnly
@@ -2710,7 +2842,16 @@ class AiPlayer {
     // 几乎都会跟一张看两张牌（赔率够，成牌之后还有隐含赔率）。
     // 真正要防的是被更强的成牌清空，所以余量只留在「对手线很强」和
     // 「超池」这两项上。
-    var need = potOdds * (spot.villainStrength > 0.75 ? 1.08 : 1.0);
+    // 「对手强度」和「没位置」这两个惩罚各是 ×1.08。对**翻牌圈的强听牌**
+    // 不再叠乘：两条讲的分明是同一件事（对手范围强、我兑现不了），乘起来
+    // 1.166 会把 8 张的坚果顺听顶出跟注线（实测 KQ on 10♣6♥J♥ 面对翻牌加注
+    // 被顶掉的那一截就来自这里）。所以翻牌圈强听牌面对加注时，这两个惩罚
+    // 最多只上一个。弱听牌、转牌、面对下注都照旧叠。
+    final vsStrong = spot.villainStrength > 0.75;
+    final flopStrongVsRaise = strongDraw &&
+        spot.villainRaisedThisStreet &&
+        game.street == Street.flop;
+    var need = potOdds * (vsStrong ? 1.08 : 1.0);
     // 超池是两极的：真东西和空气都在里面。模型给的胜率是「对着整条范围」
     // 算的，被价值牌清空的风险没算进去；而且注额越大，成牌之后能再收回来的
     // 钱越少（隐含赔率被超池吃掉），门槛要跟着抬。
@@ -2720,8 +2861,9 @@ class AiPlayer {
     need *= 1 + (spot.polarizedBet ? 0.1 : 0.2) * overbet;
     need *= _callVsReadFactor(game, me); // 疯子付得出隐含赔率，岩石付不出
     // 没位置的听牌不好兑现：跟注之后转牌还得先挨一枪，成牌了也很难
-    // 在后面两条街收满价值（先说话的人收不到薄价值）。
-    if (!spot.inPosition) need *= 1.08;
+    // 在后面两条街收满价值（先说话的人收不到薄价值）。但上面那条「对手
+    // 强度」已经收过的（[flopStrongVsRaise] + [vsStrong]）就不再叠。
+    if (!spot.inPosition && !(flopStrongVsRaise && vsStrong)) need *= 1.08;
     if (!spot.villainRaisedThisStreet) {
       need *= 1 - 0.6 * _p.callSlack; // 跟注站连听牌都买得更便宜
     }
@@ -3383,6 +3525,7 @@ class _Spot {
     required this.raisesThisStreet,
     required this.preflopRaises,
     required this.preflopOpenTo,
+    required this.preflopPrevRaiseTo,
     required this.limpers,
     required this.coldCallers,
     required this.priorAgg,
@@ -3436,6 +3579,14 @@ class _Spot {
   /// 判断第二个加注是「最小加注到 4bb」还是「真加注到 10bb」要用它：
   /// 只看绝对筹码分不出小 3bet 和大 3bet，而这两者的跟注范围差很远。
   final int preflopOpenTo;
+
+  /// 当前这个加注**之前**那一次加注到的额度（面对 4bet 时就是 3bet 的额度），
+  /// 拿不到时为 0。
+  ///
+  /// 4bet 是大是小不能看绝对数：同样的 22bb，对着 12bb 的 3bet 是「加了点价」，
+  /// 对着 4bb 里的一次小加注就是把自己套牢了。判断要不要留跟注范围（见
+  /// [_callFourBet]）用的是这个比值。
+  final int preflopPrevRaiseTo;
   final int limpers;
 
   /// 还留在牌局里的「翻前用跟注进池」的人数（冷跟者 / 溜入者）。
@@ -3478,6 +3629,8 @@ class _Spot {
 
     var preflopRaises = 0;
     var preflopOpenTo = 0;
+    var preflopPrevRaiseTo = 0;
+    var lastRaiseTo = 0;
     var limpers = 0;
     final calledIds = <String>{};
     String? lastPreflopRaiser;
@@ -3486,6 +3639,12 @@ class _Spot {
       if (a.type == ActionType.raise) {
         // 第一次加注就是开池，记下它加到多少（AI 与英雄都会带上注额）。
         if (preflopRaises == 0 && a.amount > 0) preflopOpenTo = a.amount;
+        // 每次加注都往前挪一格：轮到我们时日志里最后一条加注就是**正在面对**
+        // 的这一注，再往前一条才是它的基准（面对 4bet 时就是 3bet 的额度）。
+        if (a.amount > 0) {
+          preflopPrevRaiseTo = lastRaiseTo;
+          lastRaiseTo = a.amount;
+        }
         preflopRaises++;
         lastPreflopRaiser = a.actorId;
       } else if (a.type == ActionType.call) {
@@ -3647,6 +3806,7 @@ class _Spot {
       raisesThisStreet: raisesThisStreet,
       preflopRaises: preflopRaises,
       preflopOpenTo: preflopOpenTo,
+      preflopPrevRaiseTo: preflopPrevRaiseTo,
       limpers: limpers,
       coldCallers: coldCallers,
       priorAgg: priorAgg,

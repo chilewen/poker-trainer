@@ -473,16 +473,8 @@ class PreflopRanges {
     suitedAny: 9,
   );
 
-  /// 开池加注大小的位置系数：前位开得大一点（要保护、要隔离），
-  /// 后位偷盲可以小一点（同样能拿下盲注，还省筹码）。
-  static double openSizeFactor(Seat seat) => switch (seat) {
-        Seat.ep => 1.0,
-        Seat.mp => 0.95,
-        Seat.co => 0.88,
-        Seat.btn => 0.82,
-        Seat.sb => 1.0, // 小盲没位置，照前位开
-        Seat.bb => 1.0,
-      };
+  // 开池的位置系数（前位开大、后位开小）已经搬去 [PreflopSizing.openFactor]，
+  // 和 3bet / 4bet 的倍数放在同一张表里。
 
   // ---------- 短筹码：推 / 弃 ----------
 

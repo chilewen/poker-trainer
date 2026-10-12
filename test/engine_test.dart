@@ -16,6 +16,7 @@ import 'package:poker_trainer/features/game/domain/hero_stats.dart';
 import 'package:poker_trainer/features/game/domain/session_summary.dart';
 import 'package:poker_trainer/features/game/domain/table_restore.dart';
 import 'package:poker_trainer/features/game/presentation/table_controller.dart';
+import 'package:poker_trainer/features/game/domain/bet_sizing.dart';
 import 'package:poker_trainer/features/game/domain/preflop_ranges.dart';
 import 'package:poker_trainer/trainer/odds.dart';
 
@@ -3146,6 +3147,156 @@ void main() {
       expect(r.fold / 200, greaterThan(0.8),
           reason: '$hole 不该跟人家推出来的全下（弃 ${(100 * r.fold / 200).round()}%）');
     }
+  });
+
+  /// 6 人桌：p3 弃 → p4 开 [open] → p5 弃 → AI（[aiSeat]）3bet 到 [threeBet]
+  /// → 剩下的盲注位弃 → p4 4bet 到 [fourBet] → 又轮到 AI 说话。
+  ///
+  /// [aiSeat] 给 'p0' 是**有位置**那条线（按钮位 3bet 出去、后面没人了）；
+  /// 给 'p1' 是**没位置**那条线（小盲位 3bet，p2 弃掉之后 p4 还转得回来）。
+  /// 量的是同一手牌在这两条线上的选择差多少。
+  ({int raise, int call, int fold, int n, int raiseTo}) aiFacingFourBet(
+      String hole,
+      {int seeds = 200,
+      AiStyle style = AiStyle.tightAggressive,
+      int stack = 10000,
+      int open = 300,
+      int threeBet = 900,
+      int fourBet = 1800,
+      String aiSeat = 'p0'}) {
+    var raise = 0, call = 0, fold = 0, n = 0;
+    int? raiseTo;
+    for (var seed = 0; seed < _trialSeeds(seeds); seed++) {
+      final rnd = Random(seed);
+      final g = GameEngine(
+        config: GameConfig(startingStack: stack, smallBlind: 50, bigBlind: 100),
+        random: rnd,
+      );
+      for (var i = 0; i < 6; i++) {
+        g.addPlayer('p$i', 'P$i');
+      }
+      g.startHand(holeOverride: {aiSeat: _cs(hole)});
+      g.apply('p3', ActionType.fold);
+      g.apply('p4', ActionType.raise, amount: open);
+      g.apply('p5', ActionType.fold);
+      // 按钮位在小盲位**前面**说话：小盲那条线得先把它按顺序处理掉。
+      if (aiSeat == 'p1') g.apply('p0', ActionType.fold);
+      // AI 的 3bet 直接照 [threeBet] 落地——这条用例量的是它**被 4bet 之后**
+      // 的选择，前面那一下不能由 AI 自己掷骰子（同一手牌它有时 3bet 有时跟注，
+      // 样本会被撕成两半）。
+      g.apply(aiSeat, ActionType.raise, amount: threeBet);
+      if (aiSeat == 'p1') {
+        g.apply('p2', ActionType.fold);
+      } else {
+        g.apply('p1', ActionType.fold);
+        g.apply('p2', ActionType.fold);
+      }
+      g.apply('p4', ActionType.raise, amount: fourBet);
+      if (g.handOver) continue;
+      final p = g.pendingAction().player;
+      if (p.id != aiSeat) fail('轮到的是 ${p.id}，不是 $aiSeat');
+      final d = AiPlayer(style, random: rnd).decide(g, p);
+      n++;
+      switch (d.type) {
+        case ActionType.raise:
+          raise++;
+          raiseTo ??= d.amountTo;
+        case ActionType.call:
+          call++;
+        default:
+          fold++;
+      }
+    }
+    return (raise: raise, call: call, fold: fold, n: n, raiseTo: raiseTo ?? 0);
+  }
+
+  t('翻前 4bet：QQ/JJ 有位置、4bet 没打大时会跟注，不再一律弃牌', () {
+    // 以前 `raises >= 3` 除 AA/KK 外一律弃：3bet 过的 QQ/JJ/AQ 在这个节点
+    // 是 100% 弃牌，对手只要敢 4bet 就能稳定收走我们 3bet 的死钱。真人不是
+    // 这样——有位置、4bet 又只是「加了点价」的时候会留一部分跟注，翻后借着
+    // 位置打，这才是 3bet 范围该有的防守。
+    const seeds = 400;
+    final total = _trialSeeds(seeds);
+
+    for (final hole in ['Qh Qd', 'Jh Jd']) {
+      final r = aiFacingFourBet(hole, seeds: seeds);
+      expect(r.n, total, reason: '$hole 每个种子都该轮到一次');
+      expect(r.call / r.n, greaterThan(0.15),
+          reason: '$hole 有位置面对小 4bet 该有一部分跟注（跟 ${r.call}/${r.n}）');
+      expect(r.fold / r.n, greaterThan(0.4),
+          reason: '$hole 也不是必跟，大头还是弃（弃 ${r.fold}/${r.n}）');
+      expect(r.raise, 0, reason: '$hole 面对没打大的 4bet 不该 5bet 出去（加注 ${r.raise}）');
+    }
+
+    // 三条反例，一条比一条关键。
+    // 1) 同样的牌、同样的尺寸，换成小盲位（没位置）就该收手：这个底池里
+    //    QQ/JJ 靠的是摊牌价值，没位置就是翻后三条街都挨打。
+    final ip = aiFacingFourBet('Jh Jd', seeds: seeds);
+    final oop = aiFacingFourBet('Jh Jd', seeds: seeds, aiSeat: 'p1');
+    expect(oop.call / oop.n, lessThan(0.05),
+        reason: '没位置就别接（跟 ${oop.call}/${oop.n}）');
+    expect(ip.call, greaterThan(oop.call + 20),
+        reason: '位置这一条得真的在起作用（有位置 ${ip.call} vs 没位置 ${oop.call}）');
+
+    // 2) 4bet 打到 5 倍（筹码等于套牢了）时，有位置也收手。
+    final big = aiFacingFourBet('Jh Jd', seeds: seeds, fourBet: 4500);
+    expect(big.call, 0, reason: '4bet 打大了就不该再跟（跟 ${big.call}/${big.n}）');
+
+    // 3) 被推全下更不用说；TT 也不够格（摊牌价值不够、买三条没赔率）。
+    final jam = aiFacingFourBet('Jh Jd', seeds: seeds, fourBet: 10000);
+    expect(jam.call, 0, reason: '被推全下不该拿 JJ 跟（跟 ${jam.call}）');
+    final tt = aiFacingFourBet('10h 10d', seeds: seeds);
+    expect(tt.call, 0, reason: 'TT 不在这一档里（跟 ${tt.call}/${tt.n}）');
+
+    // AA/KK 走的是价值线（继续压），不能被这条例外改成跟注。
+    final aa = aiFacingFourBet('Ah Ad', seeds: seeds);
+    expect(aa.fold, 0, reason: 'AA 面对 4bet 不会弃（弃 ${aa.fold}）');
+  });
+
+  t('翻前 5bet：AA/KK 面对 4bet 会再加注回去，不是一路只跟', () {
+    // 以前 AA/KK 在 `raises >= 3` 那一支里只会 `call`：谁也压不动我们，
+    // 而我们也从来不压回去。对手拿任意两张牌 4bet 我们，成本只是「弃给我
+    // 们的 5bet」——可我们根本不 5bet，那笔成本就不存在，他随便 4bet 都是
+    // 白赚。真人拿 AA/KK 面对方 4bet 大部分时候是把整条筹码线推出去。
+    const seeds = 400;
+    for (final hole in ['Ah Ad', 'Kh Kd']) {
+      final r = aiFacingFourBet(hole, seeds: seeds);
+      expect(r.fold, 0, reason: '$hole 不会弃给 4bet（弃 ${r.fold}）');
+      expect(r.raise / r.n, greaterThan(0.4),
+          reason: '$hole 该经常 5bet 回去（加注 ${r.raise}/${r.n}）');
+      expect(r.call / r.n, greaterThan(0.08),
+          reason: '$hole 也要留一部分跟注，不然 4bet 诈唬就没有代价'
+              '（跟 ${r.call}/${r.n}）');
+    }
+
+    // 100bb：5bet 出去只剩不到三成半后手，那条线直接推到全下（就等于
+    // 起始筹码数）。换档（×0.85 那一档）不许把该推的牌变回「5bet 到半路」。
+    final aa100 = aiFacingFourBet('Ah Ad', seeds: seeds);
+    expect(aa100.raiseTo, 10000,
+        reason: '100bb 的 5bet 就是推光（实测 ${aa100.raiseTo}）');
+
+    // 300bb：推一百个 bb 太亏，这里要留下真后手。
+    final aaDeep = aiFacingFourBet('Ah Ad', seeds: 200, stack: 30000);
+    expect(aaDeep.raise, greaterThan(0),
+        reason: '深筹码照样会 5bet（加注 ${aaDeep.raise}）');
+    expect(aaDeep.raiseTo, greaterThan(2000),
+        reason: '5bet 不能小于最小加注（实测 ${aaDeep.raiseTo}）');
+    expect(aaDeep.raiseTo, lessThan(20000),
+        reason: '300bb 不该一把推光（实测 ${aaDeep.raiseTo}）');
+
+    // 松被动慢打是它的招牌：AA 面对方 4bet 大半只是跟，但绝不会弃。
+    const deepSeeds = 1500;
+    final lp =
+        aiFacingFourBet('Ah Ad', seeds: deepSeeds, style: AiStyle.loosePassive);
+    final tag = aiFacingFourBet('Ah Ad', seeds: deepSeeds);
+    expect(lp.raise * 2, lessThan(tag.raise),
+        reason: '松被动 5bet 明显少（${lp.raise} vs 紧凶 ${tag.raise}）');
+    expect(lp.fold, 0, reason: '松被动也不会弃 AA');
+
+    // 5bet 的门槛只给 AA/KK：QQ/JJ 被 5bet 回来就是弃（上面那条用例），
+    // 它们自己也不会拿 4bet 去硬顶。
+    final qq = aiFacingFourBet('Qh Qd', seeds: deepSeeds);
+    expect(qq.raise, 0, reason: 'QQ 面对 4bet 不该 5bet 出去（加注 ${qq.raise}）');
   });
 
   /// 单挑（AI 在按钮位、有位置）、英雄全程跟注或过牌，
@@ -7133,6 +7284,216 @@ void main() {
         reason: '换一局座位就该不一样——以前是固定顺序，每局长得一模一样');
     // 同一个种子还是同一张桌：固定 rand 时结果可复现，回归/分片要靠它。
     expect(seats(11), a, reason: '同一个种子座位顺序要稳定');
+  }, fast: true);
+
+  // ---------- 加注门槛：一路以「上一次加注幅度」为基准 ----------
+
+  GameEngine sixHanded() {
+    const config =
+        GameConfig(startingStack: 10000, smallBlind: 50, bigBlind: 100);
+    final g = GameEngine(config: config);
+    for (var i = 0; i < 6; i++) {
+      g.addPlayer('p$i', 'P$i');
+    }
+    g.startHand();
+    return g;
+  }
+
+  t('加注：最小加注额一路跟着上一次的加注幅度涨', () {
+    // 座位：庄位 p0、小盲 p1、大盲 p2，翻前第一个说话的是枪口 p3。
+    final g = sixHanded();
+    expect(g.pendingAction().player.id, 'p3');
+    expect(g.minRaiseTo, 200, reason: '没人加注时最小开池是 2bb');
+
+    g.apply('p3', ActionType.raise, amount: 300);
+    expect(g.minRaiseTo, 500, reason: '开池 300（幅度 200）→ 最小 3bet 到 500');
+
+    g.apply('p4', ActionType.fold);
+    g.apply('p5', ActionType.fold);
+    g.apply('p0', ActionType.raise, amount: 500);
+    expect(g.minRaiseTo, 700, reason: '3bet 到 500（幅度 200）→ 最小 4bet 到 700');
+
+    g.apply('p1', ActionType.fold);
+    g.apply('p2', ActionType.fold);
+    expect(g.pendingAction().player.id, 'p3');
+    g.apply('p3', ActionType.raise, amount: 900);
+    expect(g.minRaiseTo, 1300,
+        reason: '4bet 到 900（幅度 400）→ 下一次最小加到 1300，不是固定倍数');
+  }, fast: true);
+
+  t('加注：低于最小加注的额度会被顶到最小加注', () {
+    final g = sixHanded();
+    g.apply('p3', ActionType.raise, amount: 300);
+    g.apply('p4', ActionType.fold);
+    g.apply('p5', ActionType.fold);
+    g.apply('p0', ActionType.raise, amount: 350); // 低于 500 这条线
+    expect(g.currentBet, 500, reason: '直接按最小加注补到 500');
+  }, fast: true);
+
+  t('短码全下不足最小加注：不改最小加注幅度，也不重开加注权', () {
+    final g = sixHanded();
+    g.apply('p3', ActionType.raise, amount: 300);
+    // p4 只剩 400：全下到 400，比最小加注（500）还差一截。
+    g.players.firstWhere((p) => p.id == 'p4').stack = 400;
+    g.apply('p4', ActionType.bet, amount: 400);
+    expect(g.currentBet, 400);
+    expect(g.minRaiseTo, 600, reason: '最小加注幅度仍是上一次完整加注的 200 → 600，不是 500');
+
+    // 还没跟平的人照样要表态，而且他们还能加。
+    expect(g.pendingAction().player.id, 'p5');
+    expect(
+        g
+            .legalActions(g.players.firstWhere((p) => p.id == 'p5'))
+            .map((a) => a.type),
+        contains(ActionType.raise));
+
+    g.apply('p5', ActionType.fold);
+    g.apply('p0', ActionType.fold);
+    g.apply('p1', ActionType.fold);
+    g.apply('p2', ActionType.fold);
+    // 已经表过态的 p3 还欠 100：要再问一次，但只能跟或弃。
+    expect(g.handOver, isFalse, reason: 'p3 还欠着 100，这手没结束');
+    expect(g.pendingAction().player.id, 'p3');
+    final p3Legal = g.legalActions(g.players.firstWhere((p) => p.id == 'p3'));
+    expect(p3Legal.map((a) => a.type), isNot(contains(ActionType.raise)),
+        reason: '半开的下注不重开加注权');
+    expect(p3Legal.map((a) => a.type), contains(ActionType.call));
+
+    g.apply('p3', ActionType.call);
+    // 只剩 p3 还能行动（其他人全弃、p4 已全下）→ 直接发完公共牌摊牌。
+    expect(g.handOver, isTrue);
+    expect(g.board.length, 5);
+    expect(g.lastHand!.netResult.values.fold<int>(0, (a, b) => a + b), 0,
+        reason: '底池只在 p3 / p4 之间分配，别人不该凭空多出筹码');
+  }, fast: true);
+
+  t('完整加注之后：已经表过态的人能再加注', () {
+    final g = sixHanded();
+    g.apply('p3', ActionType.raise, amount: 300);
+    g.apply('p4', ActionType.raise, amount: 600); // 完整加注
+    final p3Legal = g.legalActions(g.players.firstWhere((p) => p.id == 'p3'));
+    g.apply('p5', ActionType.fold);
+    g.apply('p0', ActionType.fold);
+    g.apply('p1', ActionType.fold);
+    g.apply('p2', ActionType.fold);
+    expect(g.pendingAction().player.id, 'p3');
+    expect(
+        g
+            .legalActions(g.players.firstWhere((p) => p.id == 'p3'))
+            .map((a) => a.type),
+        contains(ActionType.raise),
+        reason: '完整加注重开加注权');
+    expect(p3Legal.map((a) => a.type), isNot(contains(ActionType.bet)));
+  }, fast: true);
+
+  t('打到一半存档：短码全下之后接着打，谁该说话不变', () {
+    final g = sixHanded();
+    g.apply('p3', ActionType.raise, amount: 300);
+    g.players.firstWhere((p) => p.id == 'p4').stack = 400;
+    g.apply('p4', ActionType.bet, amount: 400);
+    g.apply('p5', ActionType.fold);
+
+    final restored = GameEngine.fromSnapshotJson(g.toSnapshotJson(),
+        config: g.config, random: Random(7));
+    expect(restored.currentBet, 400);
+    expect(restored.minRaiseTo, 600, reason: '最小加注幅度也跟着回来');
+    expect(restored.pendingAction().player.id, g.pendingAction().player.id);
+    expect(
+        restored
+            .legalActions(restored.players
+                .firstWhere((p) => p.id == restored.pendingAction().player.id))
+            .map((a) => a.type),
+        g
+            .legalActions(g.players
+                .firstWhere((p) => p.id == g.pendingAction().player.id))
+            .map((a) => a.type));
+  }, fast: true);
+
+  // ---------- 翻前尺度表：调表就能调 AI 的凶 --------------
+
+  t('尺度表：表里的数字就是现在的默认口径', () {
+    const s = PreflopSizing.standard;
+    expect(s.threeBetIp, 3.0);
+    expect(s.threeBetOop, 4.0, reason: '无位置加得更多，压掉对手的跟注赔率');
+    expect(s.threeBetMin, 3.0);
+    expect(s.fourBetIp, 2.2);
+    expect(s.fourBetOop, 2.6);
+    // 位置系数：前位开得比后位大。
+    expect(s.openFactor(Seat.ep), greaterThan(s.openFactor(Seat.btn)));
+  }, fast: true);
+
+  t('尺度表：AI 的 3bet / 4bet 出价真的跟着表走', () {
+    // 6 人桌：p3 弃 → p4 开 300 →（p5 弃）→ 轮到按钮位 p0（AI）。
+    double avgThreeBet(PreflopSizing sizing) {
+      var sum = 0, n = 0;
+      for (var seed = 0; seed < 150; seed++) {
+        final rnd = Random(seed);
+        final g = GameEngine(
+          config: const GameConfig(
+              startingStack: 10000, smallBlind: 50, bigBlind: 100),
+          random: rnd,
+        );
+        for (var i = 0; i < 6; i++) {
+          g.addPlayer('p$i', 'P$i');
+        }
+        g.startHand(holeOverride: {'p0': _cs('Ah Ad')});
+        g.apply('p3', ActionType.fold);
+        g.apply('p4', ActionType.raise, amount: 300);
+        g.apply('p5', ActionType.fold);
+        final p = g.pendingAction().player;
+        final d = AiPlayer(AiStyle.tightAggressive, random: rnd, sizing: sizing)
+            .decide(g, p);
+        if (d.type == ActionType.raise && d.amountTo != null) {
+          sum += d.amountTo!;
+          n++;
+        }
+      }
+      expect(n, greaterThan(10), reason: 'AA 面对开池该 3bet');
+      return sum / n;
+    }
+
+    final base = avgThreeBet(PreflopSizing.standard);
+    expect(base, closeTo(900, 60), reason: '默认 3 倍开池，换档后均值还在这附近');
+    final heavier = avgThreeBet(const PreflopSizing(threeBetIp: 6));
+    expect(heavier, greaterThan(base * 1.6),
+        reason: '把表里的倍数翻倍，AI 的出价就得跟着涨（实测 $base → $heavier）');
+  }, fast: true);
+
+  t('尺度表：4bet 也一样，认表不认死数', () {
+    // p3 弃 → p4 开 300 → p5 3bet 900 → 轮到按钮位 p0（AI，AA）。
+    double avgFourBet(PreflopSizing sizing) {
+      var sum = 0, n = 0;
+      for (var seed = 0; seed < 150; seed++) {
+        final rnd = Random(seed);
+        final g = GameEngine(
+          config: const GameConfig(
+              startingStack: 10000, smallBlind: 50, bigBlind: 100),
+          random: rnd,
+        );
+        for (var i = 0; i < 6; i++) {
+          g.addPlayer('p$i', 'P$i');
+        }
+        g.startHand(holeOverride: {'p0': _cs('Ah Ad')});
+        g.apply('p3', ActionType.fold);
+        g.apply('p4', ActionType.raise, amount: 300);
+        g.apply('p5', ActionType.raise, amount: 900);
+        final p = g.pendingAction().player;
+        final d = AiPlayer(AiStyle.tightAggressive, random: rnd, sizing: sizing)
+            .decide(g, p);
+        if (d.type == ActionType.raise && d.amountTo != null) {
+          sum += d.amountTo!;
+          n++;
+        }
+      }
+      expect(n, greaterThan(10), reason: 'AA 面对方 3bet 该有一部分 4bet');
+      return sum / n;
+    }
+
+    final base = avgFourBet(PreflopSizing.standard);
+    expect(base, greaterThan(1600), reason: '默认 2.2 倍 3bet（900 → 约 1980）');
+    final heavier = avgFourBet(const PreflopSizing(fourBetIp: 4.0));
+    expect(heavier, greaterThan(base * 1.4),
+        reason: '表里的 4bet 倍数改了，出价要跟着变（实测 $base → $heavier）');
   }, fast: true);
 
   t('头像风格：类型缩到两个字，松被动不再和松凶撞脸', () {

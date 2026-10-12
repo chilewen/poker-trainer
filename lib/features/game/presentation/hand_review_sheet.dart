@@ -529,7 +529,7 @@ class _HandDetail extends StatelessWidget {
                   Padding(
                     padding: const EdgeInsets.only(left: 10),
                     child: Text(
-                      '↳ 下次这样打：${m.kind.advice}',
+                      '↳ 下次这样打：${m.fix}',
                       style: const TextStyle(
                           color: Color(0xFF8FD8D5),
                           fontSize: 11.5,
