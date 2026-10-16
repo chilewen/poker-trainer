@@ -5,13 +5,13 @@
 // test/app_version_test.dart 会拿 pubspec.yaml 对一遍，走散了用例会红。
 
 /// 完整版本，跟 pubspec 的 `version:` 一字不差，如 `0.1.0+12`。
-const appVersion = '0.1.0+17';
+const appVersion = '0.1.0+18';
 
 /// 短版本，如 `0.1.0`。
 const appVersionShort = '0.1.0';
 
 /// 构建号（pubspec 里 `+` 后面那一位），如 `12`；没有就是空串。
-const appBuildNumber = '17';
+const appBuildNumber = '18';
 
 /// 给人看的版本文字：`0.1.0（build 12）`。
-const appVersionText = '0.1.0（build 17）';
+const appVersionText = '0.1.0（build 18）';

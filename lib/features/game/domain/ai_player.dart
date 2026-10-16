@@ -1966,6 +1966,19 @@ class AiPlayer {
         spot.spr > 1.0 &&
         (game.street == Street.river ||
             (game.street == Street.turn && spot.betSizeRel >= 1.2));
+    // 被底池套住的程度（0~1）：这一注要吃掉自己还剩多少筹码。跟得越多越
+    // 接近 1。跟强弱那两档里的 [committed] 不同，这一项**就是要**跟这一注
+    // 的大小挂钩——它量的不是「相对底池的深浅」，而是「跟下去还剩多少」。
+    //
+    // 套住之后，两条「深筹码才成立」的规矩不该照旧执行：真人这种局面是把
+    // 剩下的直接推出去，而不是挑着弃。
+    //   · 强牌档面对大注那条挑着弃的线（[strongFoldVsBigBet]，照顶对写的）
+    //     按 (1 - commitRamp) 收手；
+    //   · [noRaiseVsBigBet] 关掉的那条低 SPR 全下线，按 commitRamp 放回来。
+    // 实测：转牌三张黑桃面 A♥3♥（两对，被降档成强牌）面对约 2.5 倍池、
+    // 跟注要吃 0.64 个筹码（SPR≈1.1）时，改前弃 42%——短码拿两对挑着弃。
+    // 深筹码那一头（跟注占比 < 0.35）逐点不变。
+    final commitRamp = ((spot.toCall / me.stack - 0.35) / 0.35).clamp(0.0, 1.0);
     final canRaise = spot.canRaise && spot.toCall < me.stack;
     // 我这条街先过了牌 → 现在的加注就是过牌-加注，频率要明显提上去。
     final checkRaise = spot.checkedThisStreet && canRaise;
@@ -2167,7 +2180,7 @@ class AiPlayer {
       final monsterJamRamp = ((2.5 - spot.spr) / 1.5).clamp(0.0, 1.0);
       if (spot.spr <= 2.5 &&
           canRaise &&
-          !noRaiseVsBigBet &&
+          (!noRaiseVsBigBet || _roll(commitRamp)) &&
           _roll(monsterJamRamp)) {
         return _jam(me);
       }
@@ -2216,8 +2229,8 @@ class AiPlayer {
     final jamRamp = ((jamSpr - spot.spr) / (jamSpr - 0.5)).clamp(0.0, 1.0);
     if (read.tier == HandTier.strong &&
         spot.spr <= jamSpr &&
-        !noRaiseVsBigBet &&
-        !riverFacingRaise) {
+        !riverFacingRaise &&
+        (!noRaiseVsBigBet || _roll(commitRamp))) {
       if (!canRaise) return const AiDecision(ActionType.call);
       if (_roll(jamRamp)) return _jam(me);
     }
@@ -2261,7 +2274,9 @@ class AiPlayer {
                     ? 0.25
                     : 0.0)) *
             read.strongFoldScale;
-        if (foldChance > 0 && _roll(foldChance)) {
+        // 被套住（见 [commitRamp]）就不挑着弃：跟注本身就要押上大半筹码，
+        // 弃掉等于把成牌直接扔了。放行给下面那条常规强牌线去跟/推。
+        if (foldChance > 0 && _roll(foldChance * (1 - commitRamp))) {
           return const AiDecision(ActionType.fold);
         }
         // 只是「这一注下得大」而已——那就把加注频率按尺度**连续**压下来，

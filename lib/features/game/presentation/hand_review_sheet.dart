@@ -226,22 +226,35 @@ class _MiniCard extends StatelessWidget {
   }
 }
 
-/// 单手牌明细：按街分组，同一玩家的连续动作合并为一行。
-class _HandDetail extends StatelessWidget {
+/// 单手牌明细：按街分列（横向滚动），每列列出该街行动的人。
+///
+/// 样式照「牌谱视图」：一个街道一列，列头是街名 + 该街起始底池；列里每位玩家
+/// 一行（风格头像 + 名字 + 位置 + 行动），弃牌的人收进一个可点开的小药丸。
+class _HandDetail extends StatefulWidget {
   const _HandDetail({required this.hand, required this.heroId});
 
   final HandHistory hand;
   final String heroId;
 
   @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: _buildSections(),
-    );
-  }
+  State<_HandDetail> createState() => _HandDetailState();
+}
 
-  List<Widget> _buildSections() {
+class _HandDetailState extends State<_HandDetail> {
+  /// 哪些街道的「弃牌」小药丸被展开了。
+  final Set<Street> _openFolds = {};
+
+  static const _boardStreets = [
+    Street.preflop,
+    Street.flop,
+    Street.turn,
+    Street.river,
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final hand = widget.hand;
+    final heroId = widget.heroId;
     final order = hand.playerNames.keys.toList();
     // 单手复盘数据（位置/SPR/底池/赔率）——纯 Dart 算，这里只负责摆出来。
     final analysis = HandAnalysis.of(hand, heroId: heroId);
@@ -252,81 +265,31 @@ class _HandDetail extends StatelessWidget {
     final behind = Map<String, int>.of(hand.startingStacks);
     final streetBet = {for (final id in order) id: 0};
     var streetMax = 0;
-    Street? cur;
     var preflopBets = 0; // 用于识别前两条盲注
 
-    final widgets = <Widget>[
-      _overview(analysis, grade),
-      if (grade.mistakes.isNotEmpty) _mistakeList(grade),
-    ];
+    final sections = <Street, _StreetSection>{};
     final folded = <String>{};
-
-    Widget rowOf({
-      required String posText,
-      required bool isHero,
-      int? behindStack,
-      required String actionText,
-      required Color color,
-    }) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: 96,
-              child: Text(
-                posText,
-                style: TextStyle(
-                  color: isHero ? _cyan : const Color(0xFF9AA3AB),
-                  fontSize: 12.5,
-                ),
-              ),
-            ),
-            SizedBox(
-              width: 54,
-              child: behindStack == null
-                  ? const SizedBox.shrink()
-                  : Text(
-                      '($behindStack)',
-                      style: const TextStyle(
-                          color: Color(0xFF7A838B), fontSize: 11.5),
-                    ),
-            ),
-            Expanded(
-              child: Text(actionText,
-                  style: TextStyle(color: color, fontSize: 12.5)),
-            ),
-          ],
-        ),
-      );
-    }
 
     final acts = hand.actions;
     var i = 0;
     while (i < acts.length) {
-      cur = acts[i].street;
+      final street = acts[i].street;
       streetMax = 0;
       for (final id in streetBet.keys) {
         streetBet[id] = 0;
       }
-
-      // 收集本街动作：同一玩家的连续动作合并为一行（用 → 连接），
-      // 所有弃牌合并为一行，不再每步各占一行。
+      // 同一玩家的连续动作合并为一行（用 → 连接）；弃牌的人单收进小药丸。
       final seqPlayers = <String>[];
       final seqLabels = <String, List<String>>{};
       final seqTypes = <String, ActionType>{};
-      final seqBehind = <String, int>{};
-      final foldNames = <String>[];
-      var heroFolded = false;
+      final seqNotes = <String, List<String>>{};
+      final foldedHere = <String>[];
 
-      while (i < acts.length && acts[i].street == cur) {
+      while (i < acts.length && acts[i].street == street) {
         final a = acts[i];
         if (a.type == ActionType.fold) {
           folded.add(a.actorId);
-          heroFolded = heroFolded || a.actorId == heroId;
-          foldNames.add(
-              cnPosition(order, hand.buttonIndex, a.actorId) ?? a.actorId);
+          foldedHere.add(a.actorId);
           i++;
           continue;
         }
@@ -363,17 +326,6 @@ class _HandDetail extends StatelessWidget {
           label = '${a.type.label} ${a.amount}';
         }
 
-        // 英雄面对下注的决策：保本胜率 + 跟注 EV。光看赔率不够——胜率足够
-        // 高时跟注才是正 EV，「保本多少」和「跟了值多少」是两个问题。
-        final point = analysis.decisions[i];
-        if (point.isHero && point.facingBet) {
-          var tail = '保本 ${(point.potOdds * 100).round()}%';
-          final ev = grade.callEv(point);
-          if (ev != null) {
-            tail += '，跟注 EV ${ev >= 0 ? '+' : ''}${ev.round()}';
-          }
-          label += '（$tail）';
-        }
         final miss = mistakeAt[i];
         if (miss != null) {
           label += '  ⚠${miss.kind.label}';
@@ -385,41 +337,322 @@ class _HandDetail extends StatelessWidget {
         }
         seqLabels[a.actorId]!.add(label);
         seqTypes[a.actorId] = a.type;
-        seqBehind[a.actorId] = behind[a.actorId]!;
+
+        // 英雄面对下注的决策注解（保本胜率 + 跟注 EV）：单独起一行放在名字
+        // 底下，别塞进右边那点地方——光看赔率不够，胜率足够高时跟注才正 EV。
+        final point = analysis.decisions[i];
+        if (point.isHero && point.facingBet) {
+          var tail = '保本 ${(point.potOdds * 100).round()}%';
+          final ev = grade.callEv(point);
+          if (ev != null) {
+            tail += ' · 跟注 EV ${ev >= 0 ? '+' : ''}${ev.round()}';
+          }
+          seqNotes.putIfAbsent(a.actorId, () => []).add(tail);
+        }
         i++;
       }
 
-      widgets.add(_streetHeader(cur));
-      widgets.addAll([
-        for (final pid in seqPlayers)
-          rowOf(
-            posText: cnPosition(order, hand.buttonIndex, pid) ?? pid,
-            isHero: pid == heroId,
-            behindStack: seqBehind[pid],
-            actionText: seqLabels[pid]!.join(' → '),
-            color: actionColor(seqTypes[pid]!),
-          ),
-        if (foldNames.isNotEmpty)
-          rowOf(
-            posText: foldNames.join('、'),
-            isHero: heroFolded,
-            actionText: '弃牌',
-            color: actionColor(ActionType.fold),
-          ),
-      ]);
+      final si = _boardStreets.indexOf(street);
+      sections[street] = _StreetSection(
+        street: street,
+        // 列头显示的是**进入这条街时的底池**（上一条街打完的池），翻前是 0。
+        pot: si <= 0 ? 0 : (_streetEndPot(_boardStreets[si - 1]) ?? 0),
+        actors: [
+          for (final pid in seqPlayers)
+            _actor(pid, seqLabels[pid]!.join(' → '), seqTypes[pid]!, order,
+                note: seqNotes[pid]?.join(' · ')),
+        ],
+        folded: [
+          for (final pid in foldedHere)
+            _actor(pid, '弃牌', ActionType.fold, order),
+        ],
+      );
     }
 
-    // 摊牌汇总：未弃牌者亮牌 + 盈亏。
-    if (hand.netResult.values.any((v) => v != 0)) {
-      widgets.add(_streetHeader(Street.showdown));
-      widgets.addAll([
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _overview(analysis, grade),
+        if (grade.mistakes.isNotEmpty) _mistakeList(grade),
+        const SizedBox(height: 6),
+        _streetColumns(sections),
+        if (hand.netResult.values.any((v) => v != 0)) _showdown(order, folded),
+        const SizedBox(height: 8),
+      ],
+    );
+  }
+
+  _StreetActor _actor(
+      String pid, String text, ActionType type, List<String> order,
+      {String? note}) {
+    final hand = widget.hand;
+    return _StreetActor(
+      playerId: pid,
+      name: hand.playerNames[pid] ?? pid,
+      position: cnPosition(order, hand.buttonIndex, pid) ?? '',
+      actionText: text,
+      color: actionColor(type),
+      isHero: pid == widget.heroId,
+      note: note,
+    );
+  }
+
+  /// 列头街名：翻牌前在窄列里写成「翻前」（跟牌谱视图一致），其余照旧。
+  String _streetTitle(Street s) => s == Street.preflop ? '翻前' : s.label;
+
+  /// 各街分列：横向滚动，列里是该街行动的人。
+  Widget _streetColumns(Map<Street, _StreetSection> sections) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (final s in _boardStreets)
+              _streetColumn(sections[s] ??
+                  _StreetSection(
+                      street: s, pot: 0, actors: const [], folded: const [])),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _streetColumn(_StreetSection section) {
+    final open = _openFolds.contains(section.street);
+    return Container(
+      width: 216,
+      margin: const EdgeInsets.only(right: 10),
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
+      decoration: BoxDecoration(
+        color: _cardBg,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFF232B32)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 列头：街名 + 该街起始底池。
+          Row(
+            children: [
+              Text(
+                _streetTitle(section.street),
+                style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600),
+              ),
+              const Spacer(),
+              Container(
+                width: 7,
+                height: 7,
+                decoration:
+                    const BoxDecoration(color: _cyan, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 5),
+              Text('${section.pot}',
+                  style: const TextStyle(color: _cyan, fontSize: 12)),
+            ],
+          ),
+          Container(
+            height: 1,
+            margin: const EdgeInsets.symmetric(vertical: 8),
+            color: const Color(0xFF232B32),
+          ),
+          if (section.actors.isEmpty && section.folded.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 6),
+              child: Text('—',
+                  style: TextStyle(color: Color(0xFF5A636B), fontSize: 12)),
+            ),
+          for (final actor in section.actors) ...[
+            _actorRow(actor),
+            if (actor.note != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 38, bottom: 4),
+                child: Text(
+                  actor.note!,
+                  style: const TextStyle(
+                      color: Color(0xFF7A838B),
+                      fontSize: 10.5,
+                      height: 1.35),
+                ),
+              ),
+          ],
+          if (section.folded.isNotEmpty)
+            _foldedPill(section.folded, open: open, street: section.street),
+        ],
+      ),
+    );
+  }
+
+  Widget _actorRow(_StreetActor actor) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          _SeatAvatar(name: actor.name, seed: actor.playerId, size: 30),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  shortPlayerName(actor.name),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: actor.isHero ? _cyan : Colors.white,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                if (actor.position.isNotEmpty)
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF232B32),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(actor.position,
+                        style: const TextStyle(
+                            color: Color(0xFF9AA3AB), fontSize: 10)),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 6),
+          SizedBox(
+            width: 78,
+            child: Text(
+              actor.actionText,
+              textAlign: TextAlign.right,
+              style: TextStyle(color: actor.color, fontSize: 12.5, height: 1.3),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 弃牌的人收进一个小药丸：叠放头像 + 位置 + 展开箭头。
+  Widget _foldedPill(List<_StreetActor> folded,
+      {required bool open, required Street street}) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => setState(() {
+          if (open) {
+            _openFolds.remove(street);
+          } else {
+            _openFolds.add(street);
+          }
+        }),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1B232B),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 14.0 * (folded.length.clamp(1, 3) - 1) + 26,
+                    height: 26,
+                    child: Stack(
+                      children: [
+                        for (var k = 0; k < folded.length && k < 3; k++)
+                          Positioned(
+                            left: k * 14.0,
+                            child: _SeatAvatar(
+                              name: folded[k].name,
+                              seed: folded[k].playerId,
+                              size: 26,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      folded
+                          .map((f) =>
+                              f.position.isNotEmpty ? f.position : f.name)
+                          .join('、'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          color: Color(0xFF9AA3AB), fontSize: 11.5),
+                    ),
+                  ),
+                  Icon(
+                    open
+                        ? Icons.keyboard_arrow_up
+                        : Icons.keyboard_arrow_down,
+                    size: 16,
+                    color: Colors.white38,
+                  ),
+                ],
+              ),
+            ),
+            if (open)
+              for (final f in folded)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4, left: 2),
+                  child: Row(
+                    children: [
+                      _SeatAvatar(name: f.name, seed: f.playerId, size: 22),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          shortPlayerName(f.name),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: Color(0xFF9AA3AB),
+                              fontSize: 11.5,
+                              decoration: TextDecoration.lineThrough),
+                        ),
+                      ),
+                      Text(f.position,
+                          style: const TextStyle(
+                              color: Color(0xFF5A636B), fontSize: 10.5)),
+                    ],
+                  ),
+                ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 摊牌汇总：未弃牌者亮牌 + 盈亏。
+  Widget _showdown(List<String> order, Set<String> folded) {
+    final hand = widget.hand;
+    final heroId = widget.heroId;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _streetHeader(Street.showdown),
         for (final id in order.where((id) => !folded.contains(id)))
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             child: Row(
               children: [
+                _SeatAvatar(
+                    name: hand.playerNames[id] ?? id, seed: id, size: 26),
+                const SizedBox(width: 8),
                 SizedBox(
-                  width: 96,
+                  width: 56,
                   child: Text(
                     cnPosition(order, hand.buttonIndex, id) ?? id,
                     style: TextStyle(
@@ -453,10 +686,8 @@ class _HandDetail extends StatelessWidget {
               ],
             ),
           ),
-      ]);
-    }
-
-    return widgets;
+      ],
+    );
   }
 
   /// 单手概览：位置、起手牌与范围、翻前胜率、SPR、各街底池，再加行动线速记。
@@ -545,7 +776,7 @@ class _HandDetail extends StatelessWidget {
   }
 
   int? _streetEndPot(Street s) {
-    final acts = hand.actions;
+    final acts = widget.hand.actions;
     for (var k = acts.length - 1; k >= 0; k--) {
       if (acts[k].street == s) return acts[k].potAfter;
     }
@@ -553,15 +784,15 @@ class _HandDetail extends StatelessWidget {
   }
 
   Widget _streetHeader(Street street) {
+    final hand = widget.hand;
+    final heroId = widget.heroId;
     final cards = switch (street) {
       Street.preflop => hand.holeCards[heroId] ?? const [],
       Street.flop =>
         hand.board.length >= 3 ? hand.board.sublist(0, 3) : hand.board,
       Street.turn =>
         hand.board.length >= 4 ? hand.board.sublist(0, 4) : hand.board,
-      Street.river ||
-      Street.showdown =>
-        hand.board,
+      Street.river || Street.showdown => hand.board,
     };
     final pot = street == Street.showdown
         ? (hand.actions.isEmpty ? 0 : hand.actions.last.potAfter)
@@ -595,4 +826,86 @@ class _HandDetail extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 圆形头像：里面镶风格简称（跟牌桌座位一致），底色按 id 稳定取。
+class _SeatAvatar extends StatelessWidget {
+  const _SeatAvatar({required this.name, required this.seed, this.size = 30});
+
+  final String name;
+  final String seed;
+  final double size;
+
+  static const _colors = [
+    Color(0xFF4E6E8E),
+    Color(0xFF7A5C8E),
+    Color(0xFF4E8E6A),
+    Color(0xFF8E6A4E),
+    Color(0xFF8E4E5C),
+  ];
+
+  static int _hash(String s) {
+    var h = 0;
+    for (final c in s.codeUnits) {
+      h = (h * 31 + c) & 0x3FFFFFFF;
+    }
+    return h;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: _colors[_hash(seed) % _colors.length],
+        shape: BoxShape.circle,
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        avatarLabel(name),
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: size * 0.34,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+}
+
+/// 一位玩家在一街里的行动（用于分列展示）。
+class _StreetActor {
+  const _StreetActor({
+    required this.playerId,
+    required this.name,
+    required this.position,
+    required this.actionText,
+    required this.color,
+    required this.isHero,
+    this.note,
+  });
+
+  final String playerId;
+  final String name;
+  final String position;
+  final String actionText;
+  final Color color;
+  final bool isHero;
+  final String? note;
+}
+
+/// 一街的分列数据。
+class _StreetSection {
+  const _StreetSection({
+    required this.street,
+    required this.pot,
+    required this.actors,
+    required this.folded,
+  });
+
+  final Street street;
+  final int pot;
+  final List<_StreetActor> actors;
+  final List<_StreetActor> folded;
 }

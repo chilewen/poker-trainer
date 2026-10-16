@@ -9,7 +9,6 @@ import '../../../engine/types.dart';
 import '../../../trainer/odds.dart';
 import '../../history/data/hand_history_store.dart';
 import '../data/table_session_store.dart';
-import '../domain/ai_player.dart';
 import 'chip_format.dart';
 import '../domain/table_position.dart';
 import 'hand_review_sheet.dart';
@@ -40,18 +39,15 @@ String? cnPositionOf(GameEngine engine, PlayerState p) => cnPosition(
       p.id,
     );
 
+/// 座位位置英文缩写（BTN/SB/BB/UTG/MP/HJ/CO），跟 [cnPositionOf] 同一口径。
+String? enPositionOf(GameEngine engine, PlayerState p) => enPosition(
+      [for (final p in engine.players) p.id],
+      engine.buttonIndex,
+      p.id,
+    );
+
 /// 玩家名短显示：去掉风格前缀（紧凶·AI1 → AI1）。
 String shortName(String name) => shortPlayerName(name);
-
-/// 座位头像里的字：英雄显示自己的「我」，电脑玩家显示类型的那两个字。
-///
-/// 以前取的是名字首字，于是松被动和松凶都只剩一个「松」，牌桌上根本看不出
-/// 对手是什么类型；现在镶的是 [AiStyle.shortLabel]（紧凶 / 松弱 / 松凶）。
-String avatarLabel(String name) {
-  final parts = name.split('·');
-  if (parts.length < 2) return name.characters.first;
-  return AiStyle.byLabel(parts.first)?.shortLabel ?? parts.first;
-}
 
 /// 行动概览条用的徽标文案与颜色。
 (String, Color)? stripBadge(ActionRecord a) {
@@ -567,6 +563,8 @@ class OpponentSeat extends StatelessWidget {
     final showCards = g.handOver;
     final avatarColor =
         _avatarColors[positiveHash(p.id) % _avatarColors.length];
+    // 位置英文缩写（BTN/SB/BB/UTG/MP/HJ/CO），跟在名字后面。
+    final pos = enPositionOf(g, p);
 
     return Opacity(
       opacity: p.folded ? 0.35 : 1,
@@ -654,13 +652,30 @@ class OpponentSeat extends StatelessWidget {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          shortName(p.name),
-                          style: const TextStyle(
-                            color: _nameColor,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                          ),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.baseline,
+                          textBaseline: TextBaseline.alphabetic,
+                          children: [
+                            Text(
+                              shortName(p.name),
+                              style: const TextStyle(
+                                color: _nameColor,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            if (pos != null)
+                              Text(
+                                ' $pos',
+                                style: const TextStyle(
+                                  color: Color(0xFF9AA3AB),
+                                  fontSize: 9.5,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 0.2,
+                                ),
+                              ),
+                          ],
                         ),
                         Text(
                           '${p.stack}',
